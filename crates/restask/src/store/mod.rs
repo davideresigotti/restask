@@ -5,8 +5,12 @@
 //! shared with the markdown mutator) once per reconcile cycle and is fully reconstructible
 //! via `restask rebuild` from vault + Radicale.
 
+pub mod cache;
 pub mod index;
+pub mod outbox;
 pub mod tombstones;
 
+pub use cache::{cache_path, cache_read, cache_remove, cache_write};
 pub use index::{Index, IndexEntry};
+pub use outbox::{OutboundOp, Outbox};
 pub use tombstones::Tombstones;
