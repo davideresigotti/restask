@@ -15,7 +15,9 @@ pub enum DateError {
 }
 
 /// A device-local calendar date (§3.3), serialized as `YYYY-MM-DD`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct LocalDate(
     /// Wrapped chrono date.
     pub NaiveDate,

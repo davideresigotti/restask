@@ -9,8 +9,12 @@ pub const UID_PREFIX: &str = "taskres-";
 /// A stable, filename-safe task identifier: `taskres-` + 26-char lowercase Crockford base32.
 ///
 /// Used verbatim as `.taskres/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
-/// UIDs are assigned once and never regenerated (ARCHITECTURE.md invariant 2).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+/// UIDs are assigned once and never regenerated (ARCHITECTURE.md invariant 2). Ordering is
+/// lexicographic, which for fixed-width lowercase ULIDs equals chronological creation order
+/// (required by the TODO.md render's `BTreeMap<TaskUid, Task>`, §7).
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TaskUid(String);
 
 /// Error returned when a string is not a well-formed task UID.
