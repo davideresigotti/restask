@@ -1,0 +1,25 @@
+# Taskres machine configuration.
+# Location: $XDG_CONFIG_HOME/restask/config.toml — chmod 600, NEVER synced.
+# Secrets: a literal `password` key here is a validation error. Use password_file (0600)
+#   or password_env instead. Reference: docs/spec/config.md §14.2, §17.
+
+# vault (optional; usually discovered per §13.3)
+[vault]
+path = "/opt/docker/syncthing/data/obsidian"
+
+[caldav]
+url  = "http://192.168.1.10:5232"   # LAN example; use HTTPS when exposed beyond LAN
+username = "me"
+password_file = "~/.config/restask/radicale.passwd"  # chmod 600; OR password_env below
+# password_env = "RESTASK_CALDAV_PASSWORD"            # alternative source
+poll_secs = 300
+allow_create_lists = true           # MKCOL missing collections on first push
+
+# Wizard-recorded bindings (list display name → Radicale collection)
+[[lists]]
+name = "Inbox"
+collection = "inbox"
+
+[[lists]]
+name = "University"
+collection = "university"
