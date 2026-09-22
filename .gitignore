@@ -1,0 +1,6 @@
+target/
+node_modules/
+.taskres/
+main.js
+*.restask-tmp
+TODO.pre-restask-*.md
