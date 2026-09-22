@@ -267,16 +267,6 @@ fn instant(prop: &Property, field: &'static str) -> Result<DateTime<Utc>, Taskre
 /// device-local wall time via `tz` (chrono-tz lookup by name).
 fn when(prop: &Property, tz: FixedOffset, field: &'static str) -> Result<When, TaskresError> {
     let value = prop.value.trim();
-    if let Ok(parsed) = When::from_ical(value) {
-        return Ok(parsed);
-    }
-    if let Some(body) = value.strip_suffix('Z') {
-        let naive = NaiveDateTime::parse_from_str(body, "%Y%m%dT%H%M%S")
-            .map_err(|_| invalid(field, value))?;
-        return Ok(When::DateTime(LocalDateTime(
-            naive.and_utc().with_timezone(&tz).naive_local(),
-        )));
-    }
     if let Some(tzid) = prop.param("TZID") {
         let naive = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
             .map_err(|_| invalid(field, value))?;
@@ -288,6 +278,16 @@ fn when(prop: &Property, tz: FixedOffset, field: &'static str) -> Result<When, T
             .unwrap_or_else(|| local_fallback(naive, tz));
         return Ok(When::DateTime(LocalDateTime(
             utc.with_timezone(&tz).naive_local(),
+        )));
+    }
+    if let Ok(parsed) = When::from_ical(value) {
+        return Ok(parsed);
+    }
+    if let Some(body) = value.strip_suffix('Z') {
+        let naive = NaiveDateTime::parse_from_str(body, "%Y%m%dT%H%M%S")
+            .map_err(|_| invalid(field, value))?;
+        return Ok(When::DateTime(LocalDateTime(
+            naive.and_utc().with_timezone(&tz).naive_local(),
         )));
     }
     Err(invalid(field, value))
