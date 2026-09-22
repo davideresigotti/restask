@@ -1,10 +1,17 @@
 //! §6.1 line-grammar conformance tests: grammar table, CRLF, `[X]`, `*`/`+` markers,
 //! non-tasks, unknown emoji, token extraction and text normalization.
 
+use restask::config::VaultConfig;
 use restask::domain::{LocalDate, LocalDateTime, Priority, TaskUid, When};
-use restask::markdown::parser::{parse_line, TaskDraft, TaskLine};
+use restask::markdown::parser::{
+    link_parents, parse as parse_file, parse_line, ParsedTask, TaskDraft, TaskLine,
+};
 
 const UID: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpf";
+
+const HOME_LAB: &str = include_str!("../../../test-vault/Home Lab Test.md");
+const PROJECT_ALPHA: &str = include_str!("../../../test-vault/Project Alpha Test.md");
+const TODO: &str = include_str!("../../../test-vault/TODO.md");
 
 fn draft(text: &str) -> TaskDraft {
     TaskDraft {
@@ -203,4 +210,159 @@ fn empty_body_tasks() {
         t.draft.due,
         Some(When::Date(LocalDate::parse("2026-01-01").unwrap()))
     );
+}
+
+#[test]
+fn home_lab_note_done_split_and_headings() {
+    let f = parse_file(HOME_LAB, &VaultConfig::default());
+    assert_eq!(f.done_heading_line, Some(10));
+    assert_eq!(f.tasks.len(), 5);
+
+    let active: Vec<&ParsedTask> = f.tasks.iter().filter(|t| !t.in_done_region).collect();
+    assert_eq!(active.len(), 4);
+    assert_eq!(active[0].line_no, 5);
+    assert_eq!(active[0].draft.text, "Clean up cable management");
+    assert_eq!(active[0].heading.as_deref(), Some("TODO"));
+    assert_eq!(active[1].draft.priority, Some(Priority::Medium));
+    assert_eq!(active[2].draft.priority, Some(Priority::Low));
+    assert_eq!(active[3].draft.text, "Test the plugin high");
+    assert_eq!(active[3].draft.priority, None);
+
+    let done: Vec<&ParsedTask> = f.tasks.iter().filter(|t| t.in_done_region).collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].line_no, 11);
+    assert!(done[0].draft.checked);
+    assert_eq!(done[0].draft.priority, Some(Priority::Highest));
+    assert_eq!(
+        done[0].draft.completed_on,
+        Some(LocalDate::parse("2026-09-19").unwrap())
+    );
+    assert_eq!(done[0].heading.as_deref(), Some("Done"));
+    assert!(link_parents(&f.tasks).iter().all(Option::is_none));
+}
+
+#[test]
+fn project_alpha_done_region_extends_to_eof() {
+    let f = parse_file(PROJECT_ALPHA, &VaultConfig::default());
+    assert_eq!(f.done_heading_line, Some(6));
+    assert_eq!(f.tasks.len(), 2);
+    assert!(f.tasks.iter().all(|t| t.in_done_region));
+    assert_eq!(f.tasks[0].draft.priority, Some(Priority::High));
+    assert_eq!(f.tasks[0].draft.text, "Review architecture plan");
+    assert_eq!(f.tasks[1].draft.priority, Some(Priority::Medium));
+    assert_eq!(f.tasks[1].heading.as_deref(), Some("Done"));
+}
+
+#[test]
+fn todo_md_view_file_parses() {
+    let f = parse_file(TODO, &VaultConfig::default());
+    assert_eq!(f.done_heading_line, Some(20));
+    assert_eq!(f.tasks.len(), 7);
+
+    let first = &f.tasks[0];
+    assert_eq!(first.line_no, 6);
+    assert_eq!(first.heading.as_deref(), Some("🔺 Highest Priority"));
+    assert_eq!(first.draft.priority, Some(Priority::Highest));
+    assert_eq!(
+        first.draft.text,
+        "Setup SSL certificate renew alert [[Home Lab Test#To Do|Home Lab Test]]"
+    );
+
+    let done: Vec<&ParsedTask> = f.tasks.iter().filter(|t| t.in_done_region).collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].line_no, 21);
+    assert_eq!(done[0].draft.text, "Take out trash");
+}
+
+#[test]
+fn frontmatter_lines_are_never_tasks() {
+    let contents = "---\nrestask-list: Home\n- [ ] ghost in frontmatter\n---\n- [ ] real task\n";
+    let f = parse_file(contents, &VaultConfig::default());
+    assert_eq!(f.tasks.len(), 1);
+    assert_eq!(f.tasks[0].line_no, 5);
+    assert_eq!(f.tasks[0].draft.text, "real task");
+}
+
+#[test]
+fn unterminated_frontmatter_is_not_frontmatter() {
+    let contents = "---\n- [ ] ghost\n";
+    let f = parse_file(contents, &VaultConfig::default());
+    assert_eq!(f.tasks.len(), 1);
+    assert_eq!(f.tasks[0].line_no, 2);
+    assert_eq!(f.tasks[0].draft.text, "ghost");
+}
+
+#[test]
+fn fenced_blocks_are_never_tasks() {
+    let contents = concat!(
+        "```tasks\n",
+        "- [ ] in tasks query\n",
+        "```\n",
+        "- [ ] real one\n",
+        "~~~\n",
+        "- [ ] in tilde fence\n",
+        "~~~\n",
+        "- [ ] another real\n",
+    );
+    let f = parse_file(contents, &VaultConfig::default());
+    assert_eq!(f.tasks.len(), 2);
+    assert_eq!(f.tasks[0].draft.text, "real one");
+    assert_eq!(f.tasks[1].draft.text, "another real");
+}
+
+#[test]
+fn crlf_file_lines() {
+    let contents = "# T\r\n\r\n- [ ] a 📅 2026-01-01\r\n";
+    let f = parse_file(contents, &VaultConfig::default());
+    assert_eq!(f.tasks.len(), 1);
+    assert_eq!(f.tasks[0].raw, "- [ ] a 📅 2026-01-01");
+    assert_eq!(f.tasks[0].line_no, 3);
+}
+
+#[test]
+fn done_heading_config_case_and_persistence() {
+    let cfg = VaultConfig {
+        done_heading: "Completed".to_string(),
+        ..VaultConfig::default()
+    };
+    let contents = concat!(
+        "## done\n",
+        "- [ ] a\n",
+        "## Done ###\n",
+        "- [ ] b\n",
+        "## Completed\n",
+        "- [x] c\n",
+        "## Later\n",
+        "- [x] d\n",
+    );
+    let f = parse_file(contents, &cfg);
+    assert_eq!(f.done_heading_line, Some(5));
+    assert!(!f.tasks[0].in_done_region);
+    assert!(!f.tasks[1].in_done_region);
+    assert!(f.tasks[2].in_done_region);
+    assert!(f.tasks[3].in_done_region);
+    assert_eq!(f.tasks[1].heading.as_deref(), Some("Done"));
+    assert_eq!(f.tasks[3].heading.as_deref(), Some("Later"));
+}
+
+#[test]
+fn link_parents_nearest_ancestor() {
+    let u1 = TaskUid::parse("taskres-01jzq4tsvg2c9xkw7n5m8rhdpb").unwrap();
+    let contents = concat!(
+        "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        "    - [ ] B 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        "    - [ ] C\n",
+        "        - [ ] D 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
+        "- [ ] E\n",
+        "    - [ ] F 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
+    );
+    let f = parse_file(contents, &VaultConfig::default());
+    assert_eq!(f.tasks[1].indent_chars, 4);
+    let parents = link_parents(&f.tasks);
+    assert_eq!(parents[0], None);
+    assert_eq!(parents[1], Some(u1.clone()));
+    assert_eq!(parents[2], Some(u1));
+    assert_eq!(parents[3], None);
+    assert_eq!(parents[4], None);
+    assert_eq!(parents[5], None);
 }

@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use crate::config::VaultConfig;
 use crate::domain::{LocalDate, Priority, TaskUid, When};
 
 /// The §6.1 task-line regex, verbatim: single-line unordered-list checkbox.
@@ -33,7 +34,10 @@ const CREATED_PATTERN: &str = r"➕[ \t]+(\d{4}-\d{2}-\d{2})";
 /// UID token (§6.1): `🆔` plus `taskres-` and 26 lowercase alphanumerics.
 const UID_PATTERN: &str = r"🆔[ \t]+(taskres-[0-9a-z]{26})";
 
-/// All compiled §6.1 patterns. Stored as a `Result` so a (test-proven impossible) bad
+/// ATX heading (§6.2): 1–6 `#`, one space, text with an optional closing hash sequence.
+const HEADING_PATTERN: &str = r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$";
+
+/// All compiled §6.1/§6.2 patterns. Stored as a `Result` so a (test-proven impossible) bad
 /// fixed literal degrades to "no line is a task" instead of panicking.
 struct Patterns {
     line: Regex,
@@ -43,6 +47,7 @@ struct Patterns {
     completed: Regex,
     created: Regex,
     uid: Regex,
+    heading: Regex,
 }
 
 fn patterns() -> Option<&'static Patterns> {
@@ -57,6 +62,7 @@ fn patterns() -> Option<&'static Patterns> {
                 completed: Regex::new(COMPLETED_PATTERN)?,
                 created: Regex::new(CREATED_PATTERN)?,
                 uid: Regex::new(UID_PATTERN)?,
+                heading: Regex::new(HEADING_PATTERN)?,
             })
         })
         .as_ref()
@@ -235,4 +241,139 @@ fn extract_text(body: &str, spans: &[Range<usize>]) -> String {
         }
     }
     collapsed.trim().to_string()
+}
+
+/// One task line with its file-level context (§6.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTask {
+    /// 1-based line number in the file.
+    pub line_no: usize,
+    /// Number of leading space/tab characters.
+    pub indent_chars: usize,
+    /// The verbatim source line (no line terminator).
+    pub raw: String,
+    /// Extracted metadata and text.
+    pub draft: TaskDraft,
+    /// Whether the line sits in the completed-records region (first `done_heading`
+    /// heading to end of file).
+    pub in_done_region: bool,
+    /// Nearest preceding ATX heading text, if any.
+    pub heading: Option<String>,
+}
+
+/// Result of parsing one file (§6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParsedFile {
+    /// Task lines in source order; non-task lines are absent.
+    pub tasks: Vec<ParsedTask>,
+    /// 1-based line number of the first heading matching `done_heading`, if present.
+    pub done_heading_line: Option<usize>,
+}
+
+/// Parses a whole file into task records (§6.2). Pure: never fails; non-task lines are
+/// simply absent. Invalid dates inside a matched token are tolerated (token kept verbatim
+/// in [`ParsedTask::raw`], field left `None`).
+///
+/// Lines inside YAML frontmatter are never tasks: a `---` at byte 0 opens the block and a
+/// matching `---` closes it; an unterminated block is not frontmatter (routing decision
+/// D21). Lines inside fenced code blocks (` ``` ` or `~~~`, including ` ```tasks ` query
+/// blocks) are never tasks. `in_done_region` becomes true at the first heading whose text
+/// equals `cfg.done_heading` (case-sensitive, any ATX level) and persists to end of file.
+pub fn parse(contents: &str, cfg: &VaultConfig) -> ParsedFile {
+    let Some(patterns) = patterns() else {
+        return ParsedFile {
+            tasks: Vec::new(),
+            done_heading_line: None,
+        };
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut first = 0usize;
+    if lines.first().is_some_and(|open| *open == "---") {
+        if let Some(close) = lines.iter().skip(1).position(|l| l.trim() == "---") {
+            first = close + 2;
+        }
+    }
+
+    let mut tasks = Vec::new();
+    let mut done_heading_line = None;
+    let mut in_done = false;
+    let mut heading: Option<String> = None;
+    let mut fence: Option<&'static str> = None;
+
+    for (idx, line) in lines.iter().enumerate().skip(first) {
+        let line_no = idx + 1;
+        let line = *line;
+
+        if let Some(marker) = fence {
+            if line.trim_start().starts_with(marker) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = fence_open(line) {
+            fence = Some(marker);
+            continue;
+        }
+        if let Some(text) = heading_text(&patterns.heading, line) {
+            if text == cfg.done_heading && done_heading_line.is_none() {
+                done_heading_line = Some(line_no);
+                in_done = true;
+            }
+            heading = Some(text.to_string());
+            continue;
+        }
+        let Some(task) = parse_line(line) else {
+            continue;
+        };
+        tasks.push(ParsedTask {
+            line_no,
+            indent_chars: task.indent_chars,
+            raw: line.to_string(),
+            draft: task.draft,
+            in_done_region: in_done,
+            heading: heading.clone(),
+        });
+    }
+
+    ParsedFile {
+        tasks,
+        done_heading_line,
+    }
+}
+
+/// Resolves each task's parent UID (§6.2 subtasks): a task whose `indent_chars` exceeds a
+/// previous task's is its child; the parent is the nearest ancestor checkbox. Ancestors
+/// without a registered UID yield `None` (child treated as root). The returned vector
+/// aligns with `tasks` by position; children serialize as `RELATED-TO;TOREL=PARENT`.
+pub fn link_parents(tasks: &[ParsedTask]) -> Vec<Option<TaskUid>> {
+    let mut parents = Vec::with_capacity(tasks.len());
+    let mut stack: Vec<(usize, Option<TaskUid>)> = Vec::new();
+    for task in tasks {
+        while stack
+            .last()
+            .is_some_and(|(indent, _)| *indent >= task.indent_chars)
+        {
+            stack.pop();
+        }
+        parents.push(stack.last().and_then(|(_, uid)| uid.clone()));
+        stack.push((task.indent_chars, task.draft.uid.clone()));
+    }
+    parents
+}
+
+/// The fence marker a line opens (``` or ~~~, tolerating indentation), if any.
+fn fence_open(line: &str) -> Option<&'static str> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") {
+        Some("```")
+    } else if trimmed.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
+}
+
+/// ATX heading text of a line, with the optional closing hash sequence stripped (§6.2).
+fn heading_text<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
+    re.captures(line)?.get(1).map(|m| m.as_str())
 }
