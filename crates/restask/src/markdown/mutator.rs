@@ -1,9 +1,13 @@
 //! Line mutations (§6.3): pure `String → String` rewriting of registered task lines.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+
 use crate::config::VaultConfig;
 use crate::domain::{Clock, LocalDate, Priority, TaskUid, When};
 use crate::error::TaskresError;
-use crate::markdown::parser::{parse_line, TaskDraft};
+use crate::markdown::parser::{parse, parse_line, TaskDraft, TaskLine};
 
 /// Which date-bearing token a [`Mutation::SetWhen`] targets (§6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +146,28 @@ fn join_lines(lines: &[RawLine]) -> String {
     out
 }
 
+/// The file's dominant line ending (`\r\n` when at least half of the `\n`s are preceded by
+/// `\r`), used for lines the mutator inserts or moves.
+fn dominant_ending(contents: &str) -> &'static str {
+    let lf = contents.matches('\n').count();
+    let crlf = contents.matches("\r\n").count();
+    if lf > 0 && crlf * 2 >= lf {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Gives the last line the dominant ending when it was unterminated, so lines appended
+/// after it start on a fresh line.
+fn ensure_trailing_terminator(lines: &mut [RawLine], ending: &'static str) {
+    if let Some(last) = lines.last_mut() {
+        if last.ending.is_empty() {
+            last.ending = ending;
+        }
+    }
+}
+
 /// Formats a [`When`] in its Markdown form (`YYYY-MM-DD` / `YYYY-MM-DD HH:MM`).
 pub(crate) fn fmt_when(when: When) -> String {
     match when {
@@ -190,6 +216,23 @@ fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     out
 }
 
+/// Finds the first line carrying `🆔 uid`, returning its index and parsed form.
+fn locate_uid(lines: &[RawLine], uid: &TaskUid) -> Option<(usize, TaskLine)> {
+    lines.iter().enumerate().find_map(|(i, line)| {
+        parse_line(&line.text)
+            .filter(|t| t.draft.uid.as_ref() == Some(uid))
+            .map(|t| (i, t))
+    })
+}
+
+/// Re-renders the line at `idx` canonically as a standalone [`RawLine`] with the given
+/// ending (used when a mutation moves a line).
+fn render_moved(lines: &[RawLine], idx: usize, task: TaskLine, ending: &'static str) -> RawLine {
+    let indent = lines[idx].text[..task.indent_chars].to_string();
+    let text = canonical_line(&indent, task.marker, &task.draft);
+    RawLine { text, ending }
+}
+
 /// Rewrites the first line carrying `🆔 uid` by applying `change` to its draft; `false`
 /// when no line carries the UID.
 fn with_uid_line(
@@ -197,12 +240,7 @@ fn with_uid_line(
     uid: &TaskUid,
     change: impl FnOnce(&mut TaskDraft),
 ) -> bool {
-    let found = lines.iter().enumerate().find_map(|(i, line)| {
-        parse_line(&line.text)
-            .filter(|t| t.draft.uid.as_ref() == Some(uid))
-            .map(|t| (i, t))
-    });
-    let Some((i, task)) = found else {
+    let Some((i, task)) = locate_uid(lines, uid) else {
         return false;
     };
     let line = &mut lines[i];
@@ -220,14 +258,18 @@ fn with_uid_line(
 /// metadata tail; task text is never altered except by [`Mutation::EditText`];
 /// indentation, list marker, and every non-targeted line — including its line ending —
 /// are preserved byte-for-byte. A `Register` on a line that already carries the same UID
-/// is an idempotent re-render.
+/// is an idempotent re-render. Structural ops: [`Mutation::MoveToDone`] re-inserts the
+/// line directly under the done heading (newest-on-top), creating a level-3 `### Done`
+/// heading at the end of the file when absent; [`Mutation::RestoreFromDone`] re-inserts
+/// it at the bottom of the active region (immediately before the done heading, or end of
+/// file when the heading is absent); [`Mutation::Delete`] removes the line. Inserted and
+/// moved lines use the file's dominant line ending.
 pub fn apply(
     contents: &str,
     ops: &[Mutation],
     cfg: &VaultConfig,
     clock: &dyn Clock,
 ) -> Result<MutationOutcome, TaskresError> {
-    let _ = cfg;
     let mut lines = split_lines(contents);
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
@@ -300,11 +342,57 @@ pub fn apply(
                     skipped.push((op.clone(), SkipReason::UidNotFound));
                 }
             }
-            Mutation::MoveToDone { .. }
-            | Mutation::RestoreFromDone { .. }
-            | Mutation::Delete { .. } => {
-                skipped.push((op.clone(), SkipReason::UidNotFound));
-            }
+            Mutation::MoveToDone { uid } => match locate_uid(&lines, uid) {
+                Some((idx, task)) => {
+                    let ending = dominant_ending(contents);
+                    let moved = render_moved(&lines, idx, task, ending);
+                    lines.remove(idx);
+                    let current = join_lines(&lines);
+                    match parse(&current, cfg).done_heading_line {
+                        Some(heading_no) => {
+                            lines.insert(heading_no, moved);
+                        }
+                        None => {
+                            ensure_trailing_terminator(&mut lines, ending);
+                            lines.push(RawLine {
+                                text: String::new(),
+                                ending,
+                            });
+                            lines.push(RawLine {
+                                text: "### Done".to_string(),
+                                ending,
+                            });
+                            lines.push(moved);
+                        }
+                    }
+                    applied.push(op.clone());
+                }
+                None => skipped.push((op.clone(), SkipReason::UidNotFound)),
+            },
+            Mutation::RestoreFromDone { uid } => match locate_uid(&lines, uid) {
+                Some((idx, task)) => {
+                    let ending = dominant_ending(contents);
+                    let moved = render_moved(&lines, idx, task, ending);
+                    lines.remove(idx);
+                    let current = join_lines(&lines);
+                    match parse(&current, cfg).done_heading_line {
+                        Some(heading_no) => lines.insert(heading_no - 1, moved),
+                        None => {
+                            ensure_trailing_terminator(&mut lines, ending);
+                            lines.push(moved);
+                        }
+                    }
+                    applied.push(op.clone());
+                }
+                None => skipped.push((op.clone(), SkipReason::UidNotFound)),
+            },
+            Mutation::Delete { uid } => match locate_uid(&lines, uid) {
+                Some((idx, _)) => {
+                    lines.remove(idx);
+                    applied.push(op.clone());
+                }
+                None => skipped.push((op.clone(), SkipReason::UidNotFound)),
+            },
         }
     }
 
@@ -313,4 +401,25 @@ pub fn apply(
         applied,
         skipped,
     })
+}
+
+/// Writes `contents` to `path` atomically: a hidden `<dir>/.<name>.restask-tmp` file is
+/// created, written, flushed and fsynced, then renamed over `path` (same directory ⇒
+/// atomic rename on POSIX).
+pub fn write_atomic(path: &Path, contents: &str) -> Result<(), TaskresError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name =
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| TaskresError::Validation {
+                field: "path",
+                reason: format!("{}: not a UTF-8 file name", path.display()),
+            })?;
+    let tmp = dir.join(format!(".{name}.restask-tmp"));
+    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all())?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }

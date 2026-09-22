@@ -384,3 +384,189 @@ fn multiple_ops_on_same_uid_apply_sequentially() {
         "- [x] A 🔺 ✅ 2026-09-21 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
     );
 }
+
+#[test]
+fn move_to_done_newest_on_top() {
+    let out = run(
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "## Done\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc ✅ 2026-09-18\n",
+        ),
+        &[
+            Mutation::SetStatus {
+                uid: uid(UID1),
+                checked: true,
+                completed_on: Some(date("2026-09-22")),
+            },
+            Mutation::MoveToDone { uid: uid(UID1) },
+        ],
+    );
+    assert_eq!(out.applied.len(), 2);
+    assert_eq!(
+        out.contents,
+        concat!(
+            "## Done\n",
+            "- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc ✅ 2026-09-18\n",
+        )
+    );
+}
+
+#[test]
+fn move_to_done_creates_level3_heading_when_absent() {
+    let out = run(
+        "- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::MoveToDone { uid: uid(UID1) }],
+    );
+    assert_eq!(
+        out.contents,
+        "\n### Done\n- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+}
+
+#[test]
+fn move_to_done_terminates_unterminated_last_line() {
+    let out = run(
+        "- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n- [ ] Z 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc",
+        &[Mutation::MoveToDone {
+            uid: uid(UID1),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] Z 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "\n",
+            "### Done\n",
+            "- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        )
+    );
+}
+
+#[test]
+fn restore_from_done_bottom_of_active_region() {
+    let out = run(
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "## Done\n",
+            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpd ✅ 2026-09-18\n",
+        ),
+        &[Mutation::RestoreFromDone { uid: uid(UID2) }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "## Done\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpd ✅ 2026-09-18\n",
+        )
+    );
+}
+
+#[test]
+fn restore_from_done_without_heading_goes_to_eof() {
+    let out = run(
+        concat!(
+            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        ),
+        &[Mutation::RestoreFromDone { uid: uid(UID2) }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        )
+    );
+}
+
+#[test]
+fn delete_removes_line_entirely() {
+    let out = run(
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "plain\n",
+            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        ),
+        &[Mutation::Delete { uid: uid(UID2) }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\nplain\n"
+    );
+}
+
+#[test]
+fn structural_ops_skip_when_uid_missing() {
+    let contents = "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n";
+    let out = run(
+        contents,
+        &[
+            Mutation::MoveToDone { uid: uid(UID2) },
+            Mutation::RestoreFromDone { uid: uid(UID2) },
+            Mutation::Delete { uid: uid(UID2) },
+        ],
+    );
+    assert!(out.applied.is_empty());
+    assert_eq!(out.skipped.len(), 3);
+    assert!(out
+        .skipped
+        .iter()
+        .all(|(_, reason)| *reason == SkipReason::UidNotFound));
+    assert_eq!(out.contents, contents);
+}
+
+#[test]
+fn crlf_move_to_done_uses_dominant_ending() {
+    let out = run(
+        concat!(
+            "- [ ] A 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\r\n",
+            "## Done\r\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc ✅ 2026-09-18\r\n",
+        ),
+        &[
+            Mutation::SetStatus {
+                uid: uid(UID1),
+                checked: true,
+                completed_on: Some(date("2026-09-22")),
+            },
+            Mutation::MoveToDone { uid: uid(UID1) },
+        ],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "## Done\r\n",
+            "- [x] A ✅ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\r\n",
+            "- [x] C 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc ✅ 2026-09-18\r\n",
+        )
+    );
+}
+
+#[test]
+fn write_atomic_renames_hidden_tmp() {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use restask::markdown::mutator::write_atomic;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+
+    write_atomic(&path, "hello\n").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, vec![path.clone()]);
+
+    write_atomic(&path, "second\n").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "second\n");
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
