@@ -7,6 +7,7 @@ pub mod error;
 pub mod markdown;
 pub mod router;
 pub mod store;
+pub mod sync;
 pub mod vtodo;
 
 pub use error::{CaldavErrorKind, TaskresError};

@@ -11,7 +11,12 @@ use crate::domain::uid::TaskUid;
 use crate::TaskresError;
 
 /// Kebab-case list identifier derived from a display name (§3.4): `"Home Lab"` → `home-lab`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// Ordering is lexicographic by slug (required by `sync::planner::Snapshots`' per-list
+/// remote map, §11.1).
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ListSlug(String);
 
 impl ListSlug {
