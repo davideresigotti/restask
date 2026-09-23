@@ -1150,7 +1150,8 @@ fn walk(
         };
         if entry.file_type()?.is_dir() {
             walk(&entry.path(), &child, matchers, out)?;
-        } else if matchers.is_tracked(&child) {
+        } else if matchers.is_tracked(&child) && !name.contains(".pre-restask-") {
+            // Setup backup files are engine artifacts, never scanned (mirrors the engine).
             match std::fs::read_to_string(entry.path()) {
                 Ok(contents) => out.push((child, contents)),
                 Err(error) => {

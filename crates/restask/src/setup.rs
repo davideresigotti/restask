@@ -1,15 +1,16 @@
-//! Setup wizard (§13.2): composes the vault scaffold, TODO.md adoption, machine-config
-//! records, list bindings, and the first full reconcile. The pure/plan surfaces
-//! ([`adopt_todo_md`], [`run_setup`]) carry the tested behavior; [`run_interactive`] is a
-//! thin TTY shell over them.
+//! Setup wizard (§13.2): composes the vault scaffold, the fresh TODO.md creation (any
+//! pre-existing file is renamed to the timestamped backup), machine-config records, the
+//! typed inbox binding, and the first full reconcile. [`run_setup`] carries the tested
+//! behavior; [`run_interactive`] is a thin TTY shell over it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
 use crate::config::{CaldavConfig, ListBinding, MachineConfig, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
-use crate::markdown::{mutator, parse, MARKER};
+use crate::markdown::{mutator, render};
 use crate::sync::{Engine, ReconcileReport};
 use crate::TaskresError;
 
@@ -26,37 +27,6 @@ pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, Taskre
             }),
         })
         .collect()
-}
-
-/// The TODO.md adoption outcome (§13.2 step 2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdoptionOutcome {
-    /// Backup file name (`TODO.pre-restask-YYYYMMDD-HHMMSS.md`, device-local time); the
-    /// caller writes the verbatim original there.
-    pub backup: String,
-    /// Texts of the checkbox lines carried into the fresh `## Inbox`; UIDs are minted by
-    /// the first reconcile's registration pass.
-    pub migrated: Vec<String>,
-}
-
-/// Pure core of the TODO.md adoption (§13.2 step 2): derives the backup file name for
-/// `clock` and the texts of the checkbox lines to migrate. Fenced blocks (obsidian-tasks
-/// ```tasks) are skipped — they survive only in the backup.
-pub fn adopt_todo_md(existing: &str, clock: &dyn Clock) -> AdoptionOutcome {
-    let stamp = clock
-        .now_utc()
-        .with_timezone(&clock.local_offset())
-        .format("%Y%m%d-%H%M%S");
-    let cfg = VaultConfig::default();
-    let migrated = parse(existing, &cfg)
-        .tasks
-        .iter()
-        .map(|task| task.draft.text.clone())
-        .collect();
-    AdoptionOutcome {
-        backup: format!("TODO.pre-restask-{stamp}.md"),
-        migrated,
-    }
 }
 
 /// Non-interactive setup inputs (§13.2 flags). Exactly one of `password_env` /
@@ -123,19 +93,18 @@ pub struct SetupSummary {
     pub vault: PathBuf,
     /// Machine config written.
     pub config_path: PathBuf,
-    /// Backup file name, when an unmarked TODO.md was adopted.
+    /// Backup file name, when a pre-existing TODO.md was renamed aside (every run that
+    /// finds one creates one).
     pub backup: Option<String>,
-    /// Number of checkbox lines migrated into the fresh inbox.
-    pub migrated: usize,
     /// Collections ensured (created or verified) before the first sync.
     pub collections: Vec<String>,
     /// The first full reconcile's report.
     pub report: ReconcileReport,
 }
 
-/// Executes the non-interactive setup plan (§13.2): scaffold the vault, adopt an unmarked
-/// TODO.md, record the machine config and list bindings, ensure the bound collections
-/// exist, and run the first full reconcile.
+/// Executes the non-interactive setup plan (§13.2): scaffold the vault, recreate TODO.md
+/// (renaming any existing file to the backup), record the machine config and list
+/// bindings, ensure the bound collections exist, and run the first full reconcile.
 pub async fn run_setup<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
@@ -274,39 +243,27 @@ async fn prepare_and_sync<C: CaldavPort>(
     }
     std::fs::create_dir_all(vault.join(".restask"))?;
 
-    // Step 2 — TODO.md adoption, only when the file exists and lacks the §7 marker.
+    // Step 2 — TODO.md: a fresh engine-owned file in every scenario. A pre-existing file
+    // is renamed to the timestamped backup; its tasks are NOT migrated (0.1.0 — the user
+    // reconciles the backup manually; tasks already on the bound calendar flow back in
+    // through the first sync).
     let inbox = vault.join(&cfg.inbox_file);
     let mut backup = None;
-    let mut migrated = 0usize;
-    let stem = cfg
-        .inbox_file
-        .strip_suffix(".md")
-        .unwrap_or(&cfg.inbox_file);
-    let header = format!(
-        "---\nrestask-list: {}\n---\n\n# {stem}\n\n{MARKER}\n\n## Inbox\n",
-        cfg.inbox_list
-    );
     if inbox.is_file() {
-        let existing = std::fs::read_to_string(&inbox)?;
-        if !existing.contains(MARKER) {
-            let outcome = adopt_todo_md(&existing, clock.as_ref());
-            mutator::write_atomic(&vault.join(&outcome.backup), &existing)?;
-            let mut fresh = header.clone();
-            for text in &outcome.migrated {
-                fresh.push_str(&format!("- [ ] {text}\n"));
-            }
-            migrated = outcome.migrated.len();
-            mutator::write_atomic(&inbox, &fresh)?;
-            backup = Some(outcome.backup);
-        } else {
-            println!(
-                "{} already engine-managed — no backup created",
-                cfg.inbox_file
-            );
-        }
-    } else {
-        mutator::write_atomic(&inbox, &header)?;
+        let stem = cfg
+            .inbox_file
+            .strip_suffix(".md")
+            .unwrap_or(&cfg.inbox_file);
+        let stamp = clock
+            .now_utc()
+            .with_timezone(&clock.local_offset())
+            .format("%Y%m%d-%H%M%S");
+        let name = format!("{stem}.pre-restask-{stamp}.md");
+        std::fs::rename(&inbox, vault.join(&name))?;
+        backup = Some(name);
     }
+    let fresh = render(&BTreeMap::new(), &cfg);
+    mutator::write_atomic(&inbox, &fresh)?;
 
     // Steps 3–5 — machine config (endpoint + secret reference, never the secret) and the
     // requested bindings; bound collections are created (MKCOL) before the first sync.
@@ -348,7 +305,7 @@ async fn prepare_and_sync<C: CaldavPort>(
         .save(&args.config_path)
         .map_err(|error| config_error(&args.config_path, &error))?;
 
-    // Step 6 — first sync: registers the migrated inbox lines, pushes every task.
+    // Step 6 — first sync: registers fresh lines, pulls tasks from the bound calendar.
     let engine = Engine::new(&vault, cfg, machine, caldav, clock);
     let report = engine.reconcile().await?;
 
@@ -356,7 +313,6 @@ async fn prepare_and_sync<C: CaldavPort>(
         vault,
         config_path: args.config_path,
         backup,
-        migrated,
         collections,
         report,
     })
@@ -387,10 +343,7 @@ fn write_secret(path: &Path, password: &str) -> Result<(), TaskresError> {
 /// Prints the §13.2 step-7 summary (backup, config, client wiring, next steps) to stdout.
 pub fn print_summary(summary: &SetupSummary) {
     if let Some(backup) = &summary.backup {
-        println!(
-            "backed up TODO.md to {backup} ({} task(s) migrated)",
-            summary.migrated
-        );
+        println!("renamed existing TODO.md to {backup}");
     }
     println!("machine config: {}", summary.config_path.display());
     println!("collections: {}", summary.collections.join(", "));

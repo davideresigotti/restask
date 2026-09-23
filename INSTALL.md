@@ -30,7 +30,7 @@ restask setup
 The wizard will:
 
 1. Create `restask.toml` (vault defaults) and the `.restask/` state directory.
-2. Adopt an existing `TODO.md` — the old file is backed up to `TODO.pre-restask-<timestamp>.md`, and its checkbox lines are migrated into the new `## Inbox`.
+2. Create a fresh `TODO.md` — if one already exists it is renamed to `TODO.pre-restask-<timestamp>.md` and its tasks are **not** migrated (manage them from the backup yourself in 0.1.0); tasks already on the bound calendar come back with the first sync.
 3. Ask for your Radicale URL and credentials (password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
 4. Show the server's calendars and ask which one `TODO.md` binds to — type its name (e.g. `inbox`). This binding is required for sync; a wrong name re-prompts, and a server with no calendars aborts setup. Every other list is up to you: add `restask-list`/`restask-list-root` frontmatter to your notes and each list syncs to the same-named collection.
 5. Run the first sync.

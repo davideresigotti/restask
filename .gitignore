@@ -3,4 +3,4 @@ node_modules/
 .restask/
 main.js
 *.restask-tmp
-TODO.pre-restask-*.md
+*.pre-restask-*.md

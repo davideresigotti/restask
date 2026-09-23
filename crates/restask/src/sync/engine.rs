@@ -350,7 +350,7 @@ impl<C: CaldavPort> Engine<C> {
                 task.source.line = 0;
                 rendered_tasks.insert(task.uid.clone(), task);
             }
-            let rendered = todo_view::render(&rendered_tasks, self.clock.as_ref(), &self.cfg);
+            let rendered = todo_view::render(&rendered_tasks, &self.cfg);
             let todo_path = self.vault.join(&self.cfg.inbox_file);
             let current = std::fs::read_to_string(&todo_path).unwrap_or_default();
             if current != rendered {
@@ -401,7 +401,7 @@ impl<C: CaldavPort> Engine<C> {
         let scan = self.scan_vault()?;
         let mut rendered_tasks = scan.local;
         rendered_tasks.insert(task.uid.clone(), task.clone());
-        let rendered = todo_view::render(&rendered_tasks, self.clock.as_ref(), &self.cfg);
+        let rendered = todo_view::render(&rendered_tasks, &self.cfg);
         mutator::write_atomic(&self.vault.join(&self.cfg.inbox_file), &rendered)?;
 
         let mut index = Index::load(&self.state_dir)?;
@@ -778,7 +778,9 @@ fn walk(
         };
         if entry.file_type()?.is_dir() {
             walk(&entry.path(), &child, matchers, out)?;
-        } else if matchers.is_tracked(&child) {
+        } else if matchers.is_tracked(&child) && !name.contains(".pre-restask-") {
+            // Setup backup files (`<stem>.pre-restask-<stamp>.md`) are engine artifacts:
+            // never tracked content, even when the renamed original carried frontmatter.
             match std::fs::read_to_string(entry.path()) {
                 Ok(contents) => out.push((child, contents)),
                 Err(error) => {

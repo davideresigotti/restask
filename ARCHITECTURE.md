@@ -26,7 +26,7 @@ Thunderbird).
 
 | Concept | Name | Location |
 |---|---|---|
-| System/product name | **Taskres** | docs, TODO.md marker |
+| System/product name | **Taskres** | docs (the TODO.md marker reads `Restask`) |
 | CLI binary & Rust crate | **`restask`** | `crates/restask/` |
 | Per-vault state directory | **`.restask/`** | vault root |
 | Vault config | **`restask.toml`** | vault root (synced) |

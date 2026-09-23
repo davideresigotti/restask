@@ -472,7 +472,7 @@ async fn add_and_complete_round_trip() {
 
     engine.set_done(&task.uid, true).await.unwrap();
     let todo = std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
-    assert!(todo.contains("### Done"));
+    assert!(todo.contains("## Done"));
     assert!(todo.contains("- [x] hello world"));
     let body = mock.resource("inbox", task.uid.as_str()).unwrap().body;
     assert!(body.contains("STATUS:COMPLETED"));

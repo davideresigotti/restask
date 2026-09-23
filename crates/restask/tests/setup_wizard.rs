@@ -1,5 +1,6 @@
-//! Setup wizard tests (§13.2): TODO.md adoption, the typed inbox binding, and the
-//! non-interactive full setup against the in-memory CalDAV mock.
+//! Setup wizard tests (§13.2): the fresh TODO.md creation with rename-to-backup, the
+//! typed inbox binding, and the non-interactive full setup against the in-memory CalDAV
+//! mock.
 
 mod common;
 
@@ -13,7 +14,7 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
-use restask::setup::{adopt_todo_md, match_collection, parse_collections, run_setup, SetupArgs};
+use restask::setup::{match_collection, parse_collections, run_setup, SetupArgs};
 use restask::store::Index;
 use restask::TaskresError;
 
@@ -24,7 +25,20 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// A bare vault: legacy TODO.md without the marker, no restask.toml, no `.restask/`.
+/// One hour after [`clock`], so a second setup run stamps a distinct backup name.
+fn later_clock() -> Arc<FixedClock> {
+    Arc::new(FixedClock(
+        Utc.with_ymd_and_hms(2026, 9, 22, 13, 0, 0).unwrap(),
+        FixedOffset::east_opt(2 * 3600).unwrap(),
+    ))
+}
+
+/// The exact fresh TODO.md scaffold: byte-identical to the §7 render of an empty vault.
+fn fresh_todo(inbox_list: &str) -> String {
+    format!("---\nrestask-list: {inbox_list}\n---\n\n{MARKER}\n\n# TODO\n\n## Done\n")
+}
+
+/// A vault with a legacy TODO.md; no restask.toml, no `.restask/`.
 fn legacy_vault() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -46,23 +60,6 @@ fn args(vault: &TempDir) -> SetupArgs {
         inbox_collection: None,
         collections: vec![("Home".to_string(), "home".to_string())],
     }
-}
-
-#[test]
-fn adoption_backs_up_and_migrates_only_unfenced_checkboxes() {
-    let legacy =
-        "# My tasks\n\n- [ ] water the plants\n\n```tasks\n- [ ] inside tasks block\n```\n";
-    let outcome = adopt_todo_md(legacy, clock().as_ref());
-
-    assert_eq!(outcome.backup, "TODO.pre-restask-20260922-140000.md");
-    assert_eq!(outcome.migrated, vec!["water the plants".to_string()]);
-}
-
-#[test]
-fn backup_name_uses_the_device_local_stamp() {
-    // Fixed clock: 2026-09-22 12:00 UTC with +02:00 → 14:00 local.
-    let outcome = adopt_todo_md("", clock().as_ref());
-    assert_eq!(outcome.backup, "TODO.pre-restask-20260922-140000.md");
 }
 
 #[test]
@@ -93,19 +90,16 @@ async fn non_interactive_setup_end_to_end() {
     assert_eq!(cfg.inbox_list, "inbox");
     assert!(vault.path().join(".restask").is_dir());
 
-    // Step 2: verbatim backup, fresh marker scaffold, migrated line present with a UID.
+    // Step 2: the original file was renamed verbatim to the backup; TODO.md is the exact
+    // fresh scaffold with no tasks carried over.
     let backup_name = summary.backup.clone().unwrap();
+    assert_eq!(backup_name, "TODO.pre-restask-20260922-140000.md");
     let backup = std::fs::read_to_string(vault.path().join(&backup_name)).unwrap();
     assert!(backup.contains("- [ ] water the plants"));
     assert!(backup.contains("```tasks"));
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
-    assert!(todo.starts_with("---\nrestask-list: inbox\n---\n\n# TODO\n\n"));
-    assert!(todo.contains(MARKER));
-    assert!(todo.contains("## Inbox"));
-    assert!(todo.contains("- [ ] water the plants"));
-    assert!(todo.contains("🆔 taskres-"));
-    assert!(!todo.contains("inside tasks block"));
-    assert_eq!(summary.migrated, 1);
+    assert_eq!(todo, fresh_todo("inbox"));
+    assert!(!todo.contains("water the plants"));
 
     // Steps 3–5: machine config records the endpoint and the env-var reference (never
     // the secret), the vault path, and the Home→home binding.
@@ -125,43 +119,47 @@ async fn non_interactive_setup_end_to_end() {
     assert_eq!(machine.lists[0].name, "Home");
     assert_eq!(machine.lists[0].collection, "home");
 
-    // MKCOL happened for the binding, and the first sync ensured the inbox collection.
+    // MKCOL happened for the flag binding; the inbox collection is only ensured once a
+    // task needs it (the fresh TODO.md is empty and the mock server has no tasks).
     assert!(mock.collection_names().iter().any(|slug| slug == "home"));
-    assert!(mock.collection_names().iter().any(|slug| slug == "inbox"));
+    assert!(!mock.collection_names().iter().any(|slug| slug == "inbox"));
 
-    // Step 6: the migrated task is registered and pushed.
+    // Step 6: the first sync has nothing to register or push yet.
     let index = Index::load(&vault.path().join(".restask")).unwrap();
-    assert_eq!(index.entries.len(), 1);
-    let entry = index.entries.values().next().unwrap();
-    assert!(entry.caldav_etag.is_some());
-    assert_eq!(entry.list.as_str(), "inbox");
-    assert_eq!(mock.resource_names("inbox").len(), 1);
+    assert!(index.entries.is_empty());
+    assert!(mock.resource_names("inbox").is_empty());
 }
 
 #[tokio::test]
-async fn setup_is_non_destructive_on_rerun() {
+async fn setup_recreates_todo_md_on_rerun() {
     let vault = legacy_vault();
     let mock = MockCaldav::new();
-    run_setup(args(&vault), mock.clone(), clock())
+    let first = run_setup(args(&vault), mock.clone(), clock())
         .await
         .unwrap();
 
-    let second = run_setup(args(&vault), mock.clone(), clock())
+    let second = run_setup(args(&vault), mock.clone(), later_clock())
         .await
         .unwrap();
 
-    // The marker is present now: no second backup, no re-migration, no new pushes.
-    assert!(second.backup.is_none());
-    assert_eq!(second.migrated, 0);
-    let index = Index::load(&vault.path().join(".restask")).unwrap();
-    assert_eq!(index.entries.len(), 1);
-    assert_eq!(mock.resource_names("inbox").len(), 1);
-    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    // Every run recreates TODO.md: the first fresh file was renamed to a second,
+    // distinctly stamped backup; the original legacy content lives only in the first.
     assert_eq!(
-        todo.matches("water the plants").count(),
-        1,
-        "no duplicate migrated lines"
+        first.backup.as_deref(),
+        Some("TODO.pre-restask-20260922-140000.md")
     );
+    assert_eq!(
+        second.backup.as_deref(),
+        Some("TODO.pre-restask-20260922-150000.md")
+    );
+    let first_backup = std::fs::read_to_string(vault.path().join(first.backup.unwrap())).unwrap();
+    assert!(first_backup.contains("- [ ] water the plants"));
+    let second_backup = std::fs::read_to_string(vault.path().join(second.backup.unwrap())).unwrap();
+    assert_eq!(second_backup, fresh_todo("inbox"));
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert_eq!(todo, fresh_todo("inbox"));
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
+    assert!(index.entries.is_empty());
 }
 
 #[test]
@@ -223,13 +221,12 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
 
     let summary = run_setup(setup_args, mock.clone(), clock()).await.unwrap();
 
-    // restask.toml records the chosen calendar as the inbox list; TODO.md carries it in
-    // the frontmatter and every migrated task routes to the `tasks` collection.
+    // restask.toml records the chosen calendar as the inbox list; the fresh TODO.md
+    // carries it in the frontmatter and its tasks sync to the `tasks` collection.
     let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
     assert_eq!(cfg.inbox_list, "tasks");
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
-    assert!(todo.starts_with("---\nrestask-list: tasks\n---\n\n# TODO\n\n"));
-    assert!(todo.contains("- [ ] water the plants"));
+    assert_eq!(todo, fresh_todo("tasks"));
     assert_eq!(
         summary.collections,
         vec!["tasks".to_string(), "home".to_string()]
@@ -248,9 +245,7 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
     assert_eq!(inbox_binding.collection, "tasks");
 
     let index = Index::load(&vault.path().join(".restask")).unwrap();
-    let entry = index.entries.values().next().unwrap();
-    assert_eq!(entry.list.as_str(), "tasks");
-    assert_eq!(mock.resource_names("tasks").len(), 1);
+    assert!(index.entries.is_empty());
 }
 
 #[test]
