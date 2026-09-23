@@ -303,14 +303,13 @@ async fn list_collections_parses_radicale_propfind() {
         _ => RawResponse::status(500),
     }));
     let collections = client(&server.base_url).list_collections().await.unwrap();
-    assert_eq!(collections.len(), 3);
-    assert_eq!(collections[0].slug, "me");
-    assert!(!collections[0].supports_vtodo);
-    assert_eq!(collections[1].slug, "inbox");
-    assert!(collections[1].supports_vtodo);
-    assert_eq!(collections[1].display_name.as_deref(), Some("inbox"));
-    assert_eq!(collections[2].slug, "university");
-    assert!(!collections[2].supports_vtodo);
+    // The user home entry (`/me/`) is the principal container, not a calendar.
+    assert_eq!(collections.len(), 2);
+    assert_eq!(collections[0].slug, "inbox");
+    assert!(collections[0].supports_vtodo);
+    assert_eq!(collections[0].display_name.as_deref(), Some("inbox"));
+    assert_eq!(collections[1].slug, "university");
+    assert!(!collections[1].supports_vtodo);
 }
 
 #[tokio::test]

@@ -275,6 +275,11 @@ fn webdav_method(name: &'static str) -> Result<Method, TaskresError> {
     })
 }
 
+/// Path equality modulo trailing slashes (`/me/` == `/me`).
+fn same_path(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
 impl CaldavPort for CaldavClient {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>, TaskresError> {
         let response = self
@@ -290,7 +295,16 @@ impl CaldavPort for CaldavClient {
             return Ok(Vec::new());
         }
         let body = Self::expect_body(response, &[207], "list_collections").await?;
-        Ok(parse_collections(&body))
+        // A depth-1 PROPFIND always includes the queried user home itself (e.g. href
+        // `/me/`): that entry is the principal container, never a bindable calendar
+        // (§10.2), so it is dropped here — the pure parser stays prefix-agnostic.
+        let home_path = reqwest::Url::parse(&self.user_home_url())
+            .map(|url| url.path().trim_end_matches('/').to_string())
+            .unwrap_or_default();
+        Ok(parse_collections(&body)
+            .into_iter()
+            .filter(|collection| !same_path(&collection.href, &home_path))
+            .collect())
     }
 
     async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), TaskresError> {
