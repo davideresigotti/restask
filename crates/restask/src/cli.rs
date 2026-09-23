@@ -191,7 +191,13 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
             collections,
         } => {
             if !non_interactive {
-                setup::run_interactive(vault, config_path, Arc::new(SystemClock)).await?;
+                setup::run_interactive(
+                    vault,
+                    config_path,
+                    Arc::new(SystemClock),
+                    Some(&setup::SystemdInstaller),
+                )
+                .await?;
                 return Ok(0);
             }
             let args = setup::SetupArgs::from_flags(
@@ -219,7 +225,13 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
                     reason: format!("${password_env} is not set"),
                 })?;
             let caldav = CaldavClient::new(&args.url, args.username.clone(), Some(password))?;
-            let summary = setup::run_setup(args, caldav, Arc::new(SystemClock)).await?;
+            let summary = setup::run_setup(
+                args,
+                caldav,
+                Arc::new(SystemClock),
+                Some(&setup::SystemdInstaller),
+            )
+            .await?;
             setup::print_summary(&summary);
             Ok(0)
         }
@@ -286,7 +298,8 @@ pub async fn run_with<C: CaldavPort>(
             collections,
         } => {
             if !non_interactive {
-                setup::run_interactive(vault, config_path, clock).await?;
+                // Hermetic dispatch: never touch the host's systemd session.
+                setup::run_interactive(vault, config_path, clock, None).await?;
                 return Ok(0);
             }
             let args = setup::SetupArgs::from_flags(
@@ -297,7 +310,8 @@ pub async fn run_with<C: CaldavPort>(
                 password_env,
                 setup::parse_collections(&collections)?,
             )?;
-            let summary = setup::run_setup(args, caldav, clock).await?;
+            // Hermetic dispatch: never touch the host's systemd session.
+            let summary = setup::run_setup(args, caldav, clock, None).await?;
             setup::print_summary(&summary);
             Ok(0)
         }

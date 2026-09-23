@@ -14,7 +14,9 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
-use restask::setup::{match_collection, parse_collections, run_setup, SetupArgs};
+use restask::setup::{
+    daemon_unit_content, match_collection, parse_collections, run_setup, DaemonInstaller, SetupArgs,
+};
 use restask::store::Index;
 use restask::TaskresError;
 
@@ -62,6 +64,36 @@ fn args(vault: &TempDir) -> SetupArgs {
     }
 }
 
+/// A [`DaemonInstaller`] that records `vault|exec` calls instead of touching the host
+/// systemd session (§13.2 step 6 is a port — the suite must stay hermetic).
+#[derive(Clone, Default)]
+struct RecordingInstaller {
+    calls: Arc<std::sync::Mutex<Vec<String>>>,
+    fail: bool,
+}
+
+impl RecordingInstaller {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl DaemonInstaller for RecordingInstaller {
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError> {
+        if self.fail {
+            return Err(TaskresError::Validation {
+                field: "daemon",
+                reason: "injected failure".to_string(),
+            });
+        }
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("{}|{}", vault.display(), exec.display()));
+        Ok(Some(format!("daemon: enabled for {}", vault.display())))
+    }
+}
+
 #[test]
 fn collection_flags_must_be_list_equals_collection() {
     assert_eq!(
@@ -79,7 +111,7 @@ async fn non_interactive_setup_end_to_end() {
     let vault = legacy_vault();
     let mock = MockCaldav::new();
 
-    let summary = run_setup(args(&vault), mock.clone(), clock())
+    let summary = run_setup(args(&vault), mock.clone(), clock(), None)
         .await
         .unwrap();
 
@@ -89,6 +121,7 @@ async fn non_interactive_setup_end_to_end() {
     assert_eq!(cfg.done_heading, "Done");
     assert_eq!(cfg.inbox_list, "inbox");
     assert!(vault.path().join(".restask").is_dir());
+    assert!(summary.daemon.is_none());
 
     // Step 2: the original file was renamed verbatim to the backup; TODO.md is the exact
     // fresh scaffold with no tasks carried over.
@@ -134,11 +167,11 @@ async fn non_interactive_setup_end_to_end() {
 async fn setup_recreates_todo_md_on_rerun() {
     let vault = legacy_vault();
     let mock = MockCaldav::new();
-    let first = run_setup(args(&vault), mock.clone(), clock())
+    let first = run_setup(args(&vault), mock.clone(), clock(), None)
         .await
         .unwrap();
 
-    let second = run_setup(args(&vault), mock.clone(), later_clock())
+    let second = run_setup(args(&vault), mock.clone(), later_clock(), None)
         .await
         .unwrap();
 
@@ -219,7 +252,9 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
     let mut setup_args = args(&vault);
     setup_args.inbox_collection = Some("Tasks".to_string());
 
-    let summary = run_setup(setup_args, mock.clone(), clock()).await.unwrap();
+    let summary = run_setup(setup_args, mock.clone(), clock(), None)
+        .await
+        .unwrap();
 
     // restask.toml records the chosen calendar as the inbox list; the fresh TODO.md
     // carries it in the frontmatter and its tasks sync to the `tasks` collection.
@@ -296,4 +331,61 @@ fn match_collection_is_case_insensitive_and_canonical() {
     );
     assert!(match_collection("", &collections).is_none());
     assert!(match_collection("family", &collections).is_none());
+}
+
+#[tokio::test]
+async fn setup_installs_and_enables_the_daemon_unit() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    let installer = RecordingInstaller::default();
+
+    let summary = run_setup(args(&vault), mock.clone(), clock(), Some(&installer))
+        .await
+        .unwrap();
+
+    // The unit install happened exactly once, pointing at this vault and the running
+    // binary; the summary surfaces the enablement note.
+    let calls = installer.calls();
+    assert_eq!(calls.len(), 1);
+    let (recorded_vault, recorded_exec) = calls[0].split_once('|').unwrap();
+    assert_eq!(Path::new(recorded_vault), vault.path());
+    assert!(!recorded_exec.is_empty());
+    assert!(summary
+        .daemon
+        .as_deref()
+        .unwrap()
+        .contains(&vault.path().display().to_string()));
+}
+
+#[tokio::test]
+async fn daemon_install_failure_only_warns() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    let installer = RecordingInstaller {
+        calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        fail: true,
+    };
+
+    // A daemon-unit failure must not fail the setup run — the sync already happened.
+    let summary = run_setup(args(&vault), mock.clone(), clock(), Some(&installer))
+        .await
+        .unwrap();
+    assert!(summary.daemon.is_none());
+    let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
+    assert_eq!(cfg.inbox_list, "inbox");
+}
+
+#[test]
+fn daemon_unit_content_is_a_valid_user_unit() {
+    let content = daemon_unit_content(
+        Path::new("/srv/My Vault"),
+        Path::new("/home/me/.cargo/bin/restask"),
+    );
+    assert!(content.contains(
+        "ExecStart=\"/home/me/.cargo/bin/restask\" daemon --vault \"/srv/My Vault\""
+    ));
+    assert!(content.contains("Restart=on-failure"));
+    assert!(content.contains("RestartSec=5"));
+    assert!(content.contains("WantedBy=default.target"));
+    assert!(content.contains("Description=Taskres sync daemon (vault <-> Radicale)"));
 }

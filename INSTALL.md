@@ -34,6 +34,7 @@ The wizard will:
 3. Ask for your Radicale URL and credentials (password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
 4. Show the server's calendars and ask which one `TODO.md` binds to — type its name (e.g. `inbox`). This binding is required for sync; a wrong name re-prompts, and a server with no calendars aborts setup. Every other list is up to you: add `restask-list`/`restask-list-root` frontmatter to your notes and each list syncs to the same-named collection.
 5. Run the first sync.
+6. Install and enable the systemd user unit (`~/.config/systemd/user/restask.service`) pointing at this vault — the daemon starts immediately and at boot (Linux with systemd; other environments skip this and say so in the summary). Re-running setup refreshes the unit.
 
 ### How tasks are routed
 
@@ -57,14 +58,19 @@ Unmarked notes are left completely untouched (local-only). Quick tasks live in `
 
 ## 4. Keep it running (sync node)
 
-Run the daemon on one always-on device that has the vault (e.g. your home server).
+On any machine with a systemd user session, `restask setup` already installed and enabled the daemon (step 6 of the wizard): it starts immediately, restarts on failure, and survives logout/login (`loginctl enable-linger`).
 
-**systemd (user unit):**
+Run setup **once per machine that owns a vault copy** — your PC and the home server may each run a daemon on their own copy; multiple daemons are safe (`.restask/` state is reconstructible, reconciliation is idempotent). Never run two daemons on the *same* vault folder.
+
+**Adding the always-on server later:** let Syncthing carry the vault there (`restask.toml` + `.restask/` travel with it), then run `restask setup` inside the server's vault copy and re-enter the credentials — the password is machine-local by design. Setup recreates `TODO.md` (existing tasks return from the calendar on the first sync), so do it after the vault has fully synced.
+
+Manual fallback (e.g. a machine where you skip the wizard):
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp contrib/restask.service ~/.config/systemd/user/   # edit the --vault path
 systemctl --user daemon-reload && systemctl --user enable --now restask
+loginctl enable-linger $USER
 ```
 
 **Docker** (matches an `/opt/docker` style server — see `contrib/docker/docker-compose.yml`):
@@ -96,8 +102,9 @@ restask status        # task counts per list, pending outbox
 ## Updating / uninstalling
 
 ```bash
-git pull && cargo install --path crates/restask --force   # update
-systemctl --user disable --now restask                    # stop
+git pull && cargo install --path crates/restask --force   # update (the unit keeps working)
+systemctl --user disable --now restask                    # stop the daemon
+rm ~/.config/systemd/user/restask.service                 # remove the unit setup wrote
 cargo uninstall restask                                   # remove binary
 ```
 

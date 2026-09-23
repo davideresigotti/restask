@@ -1,10 +1,12 @@
 //! Setup wizard (§13.2): composes the vault scaffold, the fresh TODO.md creation (any
 //! pre-existing file is renamed to the timestamped backup), machine-config records, the
-//! typed inbox binding, and the first full reconcile. [`run_setup`] carries the tested
-//! behavior; [`run_interactive`] is a thin TTY shell over it.
+//! typed inbox binding, the first full reconcile, and the systemd user-unit install that
+//! keeps the daemon running on this vault. [`run_setup`] carries the tested behavior;
+//! [`run_interactive`] is a thin TTY shell over it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
@@ -98,19 +100,23 @@ pub struct SetupSummary {
     pub backup: Option<String>,
     /// Collections ensured (created or verified) before the first sync.
     pub collections: Vec<String>,
+    /// Human note about the daemon unit install (§13.2 step 6), when one was enabled.
+    pub daemon: Option<String>,
     /// The first full reconcile's report.
     pub report: ReconcileReport,
 }
 
 /// Executes the non-interactive setup plan (§13.2): scaffold the vault, recreate TODO.md
 /// (renaming any existing file to the backup), record the machine config and list
-/// bindings, ensure the bound collections exist, and run the first full reconcile.
+/// bindings, ensure the bound collections exist, run the first full reconcile, and
+/// install the daemon unit via `installer` (pass `None` to skip — hermetic tests).
 pub async fn run_setup<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
     clock: Arc<dyn Clock>,
+    installer: Option<&dyn DaemonInstaller>,
 ) -> Result<SetupSummary, TaskresError> {
-    prepare_and_sync(args, caldav, clock).await
+    prepare_and_sync(args, caldav, clock, installer).await
 }
 
 /// Interactive setup (§13.2): prompts for every step, verifies credentials with a
@@ -120,6 +126,7 @@ pub async fn run_interactive(
     vault: PathBuf,
     config_path: PathBuf,
     clock: Arc<dyn Clock>,
+    installer: Option<&dyn DaemonInstaller>,
 ) -> Result<(), TaskresError> {
     let known = vault.join("restask.toml").is_file() || vault.join(".restask").is_dir();
     if !known && !crate::tui::confirm(&format!("Use {} as the vault?", vault.display()))? {
@@ -194,7 +201,7 @@ pub async fn run_interactive(
         inbox_collection: Some(inbox),
         collections: Vec::new(),
     };
-    let summary = prepare_and_sync(args, client, clock).await?;
+    let summary = prepare_and_sync(args, client, clock, installer).await?;
     print_summary(&summary);
     Ok(())
 }
@@ -213,11 +220,12 @@ pub fn match_collection<'a>(
 }
 
 /// Shared setup body: vault scaffold, TODO.md adoption, machine-config records, bound
-/// collection creation, first reconcile.
+/// collection creation, first reconcile, daemon-unit install.
 async fn prepare_and_sync<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
     clock: Arc<dyn Clock>,
+    installer: Option<&dyn DaemonInstaller>,
 ) -> Result<SetupSummary, TaskresError> {
     let vault = args.vault.clone();
 
@@ -309,13 +317,130 @@ async fn prepare_and_sync<C: CaldavPort>(
     let engine = Engine::new(&vault, cfg, machine, caldav, clock);
     let report = engine.reconcile().await?;
 
+    // Step 6 — daemon (§13.2): install/refresh the systemd user unit so this vault keeps
+    // syncing without manual steps. A failed install is a warning — the sync already
+    // happened and `restask doctor` diagnoses the environment.
+    let daemon = install_daemon(installer, &vault);
+
     Ok(SetupSummary {
         vault,
         config_path: args.config_path,
         backup,
         collections,
+        daemon,
         report,
     })
+}
+
+/// Installs the machine-local systemd user unit (§13.2 step 6) that keeps
+/// `restask daemon` running on this vault after setup. A port so tests record instead of
+/// touching the host's systemd session.
+pub trait DaemonInstaller {
+    /// Writes and enables the unit. `Ok(None)` means this environment cannot host a user
+    /// unit (no systemd session) — setup continues without one.
+    ///
+    /// `vault` is the folder the unit points at; `exec` is the `restask` binary to run.
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError>;
+}
+
+/// Real [`DaemonInstaller`]: writes `restask.service` into
+/// `$XDG_CONFIG_HOME/systemd/user/`, runs `systemctl --user daemon-reload`,
+/// `systemctl --user enable --now restask.service`, and enables linger so the unit
+/// survives logout. Re-running setup overwrites the unit (idempotent refresh).
+pub struct SystemdInstaller;
+
+impl DaemonInstaller for SystemdInstaller {
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError> {
+        if !systemd_user_available() {
+            return Ok(None);
+        }
+        let unit_dir = xdg_config_home().join("systemd").join("user");
+        std::fs::create_dir_all(&unit_dir)?;
+        let unit_path = unit_dir.join("restask.service");
+        std::fs::write(&unit_path, daemon_unit_content(vault, exec))?;
+        run("systemctl", &["--user", "daemon-reload"])?;
+        run(
+            "systemctl",
+            &["--user", "enable", "--now", "restask.service"],
+        )?;
+        if let Err(error) = run("loginctl", &["enable-linger"]) {
+            tracing::warn!(%error, "could not enable linger; the daemon stops at logout");
+        }
+        Ok(Some(format!(
+            "daemon: enabled {} (starts now and at boot)",
+            unit_path.display()
+        )))
+    }
+}
+
+/// Whether a systemd user session is reachable (`$XDG_RUNTIME_DIR/systemd/` exists).
+pub fn systemd_user_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(|dir| PathBuf::from(dir).join("systemd").is_dir())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The user-unit body: absolute `ExecStart` (current binary + `daemon --vault`), restart
+/// on failure, start with the user session. Paths are double-quoted so vault folders
+/// with spaces survive systemd's argv splitter.
+pub fn daemon_unit_content(vault: &Path, exec: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Taskres sync daemon (vault <-> Radicale)\n\n[Service]\n\
+         ExecStart=\"{}\" daemon --vault \"{}\"\nRestart=on-failure\nRestartSec=5\n\n\
+         [Install]\nWantedBy=default.target\n",
+        exec.display(),
+        vault.display()
+    )
+}
+
+/// `$XDG_CONFIG_HOME`, else `$HOME/.config` (the §14.2 fallback order).
+fn xdg_config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".config"))
+}
+
+/// Best-effort daemon-unit install (§13.2 step 6): no installer, an unresolvable binary
+/// or an installer error all degrade to a warning — never fail the setup run.
+fn install_daemon(installer: Option<&dyn DaemonInstaller>, vault: &Path) -> Option<String> {
+    let installer = installer?;
+    let exec = match std::env::current_exe() {
+        Ok(exec) => exec,
+        Err(error) => {
+            tracing::warn!(%error, "cannot resolve the restask binary; skipping daemon install");
+            return None;
+        }
+    };
+    match installer.install(vault, &exec) {
+        Ok(note) => note,
+        Err(error) => {
+            tracing::warn!(%error, "daemon unit install failed; see `restask doctor`");
+            None
+        }
+    }
+}
+
+/// Runs a helper command, failing when it cannot start or exits non-zero.
+fn run(program: &str, args: &[&str]) -> Result<(), TaskresError> {
+    let status = Command::new(program).args(args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("{program} {} failed: {status}", args.join(" "))).into())
+    }
 }
 
 /// Writes the password to `path` with mode 0600 on Unix (§17).
@@ -351,9 +476,12 @@ pub fn print_summary(summary: &SetupSummary) {
         "first sync: scanned {} registered {} pushed {}",
         summary.report.scanned_files, summary.report.registered, summary.report.pushes
     );
+    if let Some(note) = &summary.daemon {
+        println!("{note}");
+    }
     println!(
-        "client wiring: <url>/<user>/<slug>/ per bound collection; enable \
-         contrib/restask.service and keep .restask/ inside the Syncthing share"
+        "client wiring: <url>/<user>/<slug>/ per bound collection; keep .restask/ inside \
+         the Syncthing share"
     );
 }
 

@@ -32,7 +32,7 @@ Thunderbird).
 | Vault config | **`restask.toml`** | vault root (synced) |
 | Machine config | **`config.toml`** | `$XDG_CONFIG_HOME/restask/` (never synced) |
 | Env prefix | `RESTASK_*` | — |
-| Systemd unit / container | `restask.service` / `restask` | `contrib/` |
+| Systemd unit / container | `restask.service` / `restask` | `$XDG_CONFIG_HOME/systemd/user/` (written + enabled by `restask setup`) or `contrib/` (manual fallback) |
 
 ## Module boundaries (ports & adapters)
 
