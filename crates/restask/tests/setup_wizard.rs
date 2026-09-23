@@ -99,7 +99,7 @@ async fn non_interactive_setup_end_to_end() {
     assert!(backup.contains("- [ ] water the plants"));
     assert!(backup.contains("```tasks"));
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
-    assert!(todo.starts_with("---\nrestask-list: inbox\n---\n\n"));
+    assert!(todo.starts_with("---\nrestask-list: inbox\n---\n\n# TODO\n\n"));
     assert!(todo.contains(MARKER));
     assert!(todo.contains("## Inbox"));
     assert!(todo.contains("- [ ] water the plants"));
@@ -228,7 +228,7 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
     let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
     assert_eq!(cfg.inbox_list, "tasks");
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
-    assert!(todo.starts_with("---\nrestask-list: tasks\n---\n\n"));
+    assert!(todo.starts_with("---\nrestask-list: tasks\n---\n\n# TODO\n\n"));
     assert!(todo.contains("- [ ] water the plants"));
     assert_eq!(
         summary.collections,

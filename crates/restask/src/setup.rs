@@ -278,8 +278,12 @@ async fn prepare_and_sync<C: CaldavPort>(
     let inbox = vault.join(&cfg.inbox_file);
     let mut backup = None;
     let mut migrated = 0usize;
+    let stem = cfg
+        .inbox_file
+        .strip_suffix(".md")
+        .unwrap_or(&cfg.inbox_file);
     let header = format!(
-        "---\nrestask-list: {}\n---\n\n# Tasks\n\n{MARKER}\n\n## Inbox\n",
+        "---\nrestask-list: {}\n---\n\n# {stem}\n\n{MARKER}\n\n## Inbox\n",
         cfg.inbox_list
     );
     if inbox.is_file() {
