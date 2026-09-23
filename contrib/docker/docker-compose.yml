@@ -1,0 +1,13 @@
+services:
+  restask:
+    build: .
+    image: restask
+    container_name: restask
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+    volumes:
+      - /opt/docker/syncthing/data/obsidian:/vault
+      - ./data:/home/restask/.config/restask
+    # Machine config (./data/config.toml + radicale.passwd, mode 0600) must point the
+    # CalDAV endpoint at http://<radicale-host>:5232 — see INSTALL.md.
