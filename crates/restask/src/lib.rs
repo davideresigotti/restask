@@ -1,6 +1,7 @@
 //! Taskres library: Markdown checkboxes ⇄ CalDAV VTODO sync.
 
 pub mod caldav;
+pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod domain;

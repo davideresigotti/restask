@@ -4,12 +4,17 @@ mod logging;
 
 use clap::Parser;
 
-/// Taskres: Markdown checkboxes ⇄ VTODO (CalDAV) sync.
-#[derive(Parser)]
-#[command(name = "restask", version)]
-struct Cli;
+use restask::cli::{self, Cli};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     logging::init();
-    let _cli = Cli::parse();
+    let cli = Cli::parse();
+    match cli::execute(cli).await {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(cli::exit_code(&error));
+        }
+    }
 }
