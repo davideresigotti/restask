@@ -19,7 +19,7 @@ use crate::daemon::{self, DaemonConfig};
 use crate::domain::{
     Clock, ListSlug, Priority, SourceRef, Status, SystemClock, Task, TaskUid, When,
 };
-use crate::markdown::{parse, parser::link_parents};
+use crate::markdown::{parse, parser::link_parents, MARKER};
 use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::setup;
 use crate::store::{cache_remove, cache_write, Index, IndexEntry};
@@ -109,6 +109,12 @@ pub enum Command {
     },
     /// Re-derive index and cache state from the vault; the server is never touched.
     Rebuild,
+    /// Diagnose config, routing, vault, and server health (§13.3).
+    Doctor {
+        /// SSH alias for a read-only server-compose probe.
+        #[arg(long)]
+        server: Option<String>,
+    },
     /// Manage list bindings (§13.2 step 5 records).
     List {
         /// The list action.
@@ -229,6 +235,22 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
             setup::print_summary(&summary);
             Ok(0)
         }
+        Command::Doctor { server } => {
+            // Diagnostics must run even when the machine config is unusable, so the
+            // client is best-effort here instead of the catch-all below.
+            let caldav = daemon::build_client(&machine).ok();
+            let report = doctor(
+                &vault,
+                &machine,
+                caldav,
+                &config_path,
+                server.as_deref(),
+                Arc::new(SystemClock),
+            )
+            .await?;
+            print_doctor(&report);
+            Ok(report.exit_code)
+        }
         Command::Status { json } => print_status(&vault, Arc::new(SystemClock), json),
         Command::Rebuild => run_rebuild(&vault, Arc::new(SystemClock)),
         Command::List {
@@ -339,6 +361,19 @@ pub async fn run_with<C: CaldavPort>(
         }
         Command::Undone { selector } => {
             set_done(&vault, machine, caldav, clock, selector, false).await
+        }
+        Command::Doctor { server } => {
+            let report = doctor(
+                &vault,
+                &machine,
+                Some(caldav),
+                &config_path,
+                server.as_deref(),
+                clock,
+            )
+            .await?;
+            print_doctor(&report);
+            Ok(report.exit_code)
         }
         Command::Status { json } => print_status(&vault, clock, json),
         Command::Rebuild => run_rebuild(&vault, clock),
@@ -455,6 +490,330 @@ pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, Ta
         outbox_backlog: outbox_backlog(&vault.join(".taskres")),
         last_sync,
     })
+}
+
+/// Check outcome severity (§13.3 `restask doctor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorStatus {
+    /// Healthy.
+    Ok,
+    /// Worth fixing, not fatal.
+    Warn,
+    /// Broken.
+    Fail,
+}
+
+impl DoctorStatus {
+    /// Bracket tag used in the one-shot output (§12.2).
+    pub fn tag(self) -> &'static str {
+        match self {
+            DoctorStatus::Ok => "ok",
+            DoctorStatus::Warn => "warn",
+            DoctorStatus::Fail => "fail",
+        }
+    }
+}
+
+/// One `restask doctor` check result (§13.3).
+#[derive(Debug)]
+pub struct DoctorCheck {
+    /// Check identifier (e.g. `routing`, `caldav`).
+    pub name: &'static str,
+    /// Outcome.
+    pub status: DoctorStatus,
+    /// Human-readable detail.
+    pub detail: String,
+}
+
+/// Doctor report (§13.3): every check plus the §12.1 exit code (4 config invalid, 3
+/// CalDAV unreachable, 1 broken check or §17 no-auth hard warning, 0 healthy).
+#[derive(Debug)]
+pub struct DoctorReport {
+    /// Checks in execution order.
+    pub checks: Vec<DoctorCheck>,
+    /// Process exit code derived from the checks.
+    pub exit_code: i32,
+}
+
+/// Diagnoses vault and server health (§13.3): machine/vault config, routing (incl.
+/// `ListConflict`), vault scan, TODO marker, sync-conflict files, CalDAV reachability,
+/// and the §17 no-auth hard warning (config-layer when no password source is set, plus
+/// an active wrong-password probe against the real endpoint). `caldav` is `None` when no
+/// endpoint is configured; the optional `--server SSH` alias adds a read-only compose
+/// probe. Check failures land in the report with the derived exit code, never as `Err`.
+pub async fn doctor<C: CaldavPort>(
+    vault: &Path,
+    machine: &MachineConfig,
+    caldav: Option<C>,
+    config_path: &Path,
+    server: Option<&str>,
+    clock: Arc<dyn Clock>,
+) -> Result<DoctorReport, TaskresError> {
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+    let mut exit_code = 0i32;
+
+    if config_path.is_file() {
+        checks.push(check(
+            "machine-config",
+            DoctorStatus::Ok,
+            config_path.display(),
+        ));
+    } else {
+        checks.push(check(
+            "machine-config",
+            DoctorStatus::Warn,
+            "no machine config yet (restask setup)",
+        ));
+    }
+
+    // Vault config: a failure dominates (exit 4, §12.1).
+    let cfg = match load_vault_config(vault) {
+        Ok(cfg) => {
+            checks.push(check(
+                "vault-config",
+                DoctorStatus::Ok,
+                format!("restask.toml loaded (inbox {})", cfg.inbox_file),
+            ));
+            cfg
+        }
+        Err(error) => {
+            checks.push(check("vault-config", DoctorStatus::Fail, error));
+            return Ok(DoctorReport {
+                checks,
+                exit_code: 4,
+            });
+        }
+    };
+
+    // Routing and vault scan over one read-only pass.
+    match scan_local(vault, &cfg, clock.as_ref()) {
+        Ok(tasks) => {
+            checks.push(check("routing", DoctorStatus::Ok, "no list conflicts"));
+            checks.push(check(
+                "scan",
+                DoctorStatus::Ok,
+                format!("{} routed task(s)", tasks.len()),
+            ));
+        }
+        Err(TaskresError::ListConflict { dir, a, b }) => {
+            checks.push(check(
+                "routing",
+                DoctorStatus::Fail,
+                format!("{dir}: {a} vs {b}"),
+            ));
+            exit_code = 1;
+        }
+        Err(error @ TaskresError::UidConflict { .. }) => {
+            // Routing succeeded (no list conflict); the duplicate UID broke the scan.
+            checks.push(check("routing", DoctorStatus::Ok, "no list conflicts"));
+            checks.push(check("scan", DoctorStatus::Fail, error));
+            exit_code = 1;
+        }
+        Err(TaskresError::Config { path, reason }) => {
+            checks.push(check(
+                "vault-config",
+                DoctorStatus::Fail,
+                format!("{path}: {reason}"),
+            ));
+            return Ok(DoctorReport {
+                checks,
+                exit_code: 4,
+            });
+        }
+        Err(error) => {
+            checks.push(check("scan", DoctorStatus::Fail, error));
+            exit_code = 1;
+        }
+    }
+
+    let inbox = vault.join(&cfg.inbox_file);
+    match std::fs::read_to_string(&inbox) {
+        Ok(contents) if contents.contains(MARKER) => checks.push(check(
+            "todo-marker",
+            DoctorStatus::Ok,
+            format!("{} carries the marker", cfg.inbox_file),
+        )),
+        Ok(_) => checks.push(check(
+            "todo-marker",
+            DoctorStatus::Warn,
+            format!(
+                "{} lacks the Taskres marker (restask setup writes it)",
+                cfg.inbox_file
+            ),
+        )),
+        Err(_) => checks.push(check(
+            "todo-marker",
+            DoctorStatus::Warn,
+            format!("{} is missing", cfg.inbox_file),
+        )),
+    }
+
+    // Syncthing conflict artifacts signal unresolved divergences.
+    if let Ok(matchers) = cfg.matchers() {
+        let mut files: Vec<(String, String)> = Vec::new();
+        if walk(vault, "", &matchers, &mut files).is_ok() {
+            let conflicts = files
+                .iter()
+                .filter(|(path, _)| path.contains("sync-conflict"))
+                .count();
+            if conflicts > 0 {
+                checks.push(check(
+                    "sync-conflict",
+                    DoctorStatus::Warn,
+                    format!("{conflicts} file(s) — resolve and delete them"),
+                ));
+            } else {
+                checks.push(check("sync-conflict", DoctorStatus::Ok, "none"));
+            }
+        }
+    }
+
+    // Optional read-only SSH probe (§13.3 `--server`, default docker root of §13.2).
+    if let Some(alias) = server {
+        match std::process::Command::new("ssh")
+            .args([alias, "cat", "/opt/docker/radicale/docker-compose.yml"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let facts = setup::parse_radicale_compose(&String::from_utf8_lossy(&output.stdout));
+                if facts.host_port.is_some() {
+                    checks.push(check(
+                        "server-ssh",
+                        DoctorStatus::Ok,
+                        format!("{alias}: radicale compose readable"),
+                    ));
+                } else {
+                    checks.push(check(
+                        "server-ssh",
+                        DoctorStatus::Warn,
+                        format!("{alias}: compose has no 5232 mapping — confirm the URL manually"),
+                    ));
+                }
+            }
+            _ => checks.push(check(
+                "server-ssh",
+                DoctorStatus::Warn,
+                format!("{alias}: compose not readable via ssh"),
+            )),
+        }
+    }
+
+    // CalDAV reachability and the §17 no-auth hard warning.
+    match caldav {
+        Some(client) => match client.list_collections().await {
+            Ok(collections) => {
+                checks.push(check(
+                    "caldav",
+                    DoctorStatus::Ok,
+                    format!("reachable ({} collection(s))", collections.len()),
+                ));
+                // The §17 auth layers only apply when an endpoint is configured.
+                if machine.caldav.url.is_some() {
+                    match machine.resolved_password() {
+                        Ok(Some(_)) => {
+                            if let Some(username) = &machine.caldav.username {
+                                // §17 finding: a wrong password must be rejected; a
+                                // success means auth is disabled server-side. One attempt.
+                                let probe = CaldavClient::with_retry_delays(
+                                    machine.caldav.url.as_deref().unwrap_or_default(),
+                                    username.clone(),
+                                    Some("restask-doctor-invalid-password".to_string()),
+                                    Vec::new(),
+                                );
+                                match probe {
+                                    Ok(probe) => match probe.list_collections().await {
+                                        Ok(_) => {
+                                            checks.push(check(
+                                                "caldav-auth",
+                                                DoctorStatus::Warn,
+                                                "the server accepts any credentials — auth is \
+                                                 disabled (§17)",
+                                            ));
+                                            if exit_code == 0 {
+                                                exit_code = 1;
+                                            }
+                                        }
+                                        Err(TaskresError::Caldav {
+                                            kind: CaldavErrorKind::Auth,
+                                            ..
+                                        }) => checks.push(check(
+                                            "caldav-auth",
+                                            DoctorStatus::Ok,
+                                            "server rejects wrong credentials",
+                                        )),
+                                        Err(error) => checks.push(check(
+                                            "caldav-auth",
+                                            DoctorStatus::Warn,
+                                            format!("could not verify auth: {error}"),
+                                        )),
+                                    },
+                                    Err(error) => checks.push(check(
+                                        "caldav-auth",
+                                        DoctorStatus::Warn,
+                                        format!("could not build the auth probe: {error}"),
+                                    )),
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            checks.push(check(
+                                "caldav-auth",
+                                DoctorStatus::Warn,
+                                "no password configured — requests are sent unauthenticated (§17)",
+                            ));
+                            if exit_code == 0 {
+                                exit_code = 1;
+                            }
+                        }
+                        Err(error) => checks.push(check(
+                            "caldav-auth",
+                            DoctorStatus::Warn,
+                            format!("password source unreadable: {error}"),
+                        )),
+                    }
+                }
+            }
+            Err(TaskresError::Caldav {
+                kind: CaldavErrorKind::Network | CaldavErrorKind::Tls,
+                detail,
+                ..
+            }) => {
+                checks.push(check(
+                    "caldav",
+                    DoctorStatus::Fail,
+                    format!("unreachable: {detail}"),
+                ));
+                exit_code = 3;
+            }
+            Err(error) => {
+                checks.push(check("caldav", DoctorStatus::Fail, error));
+                exit_code = 1;
+            }
+        },
+        None => checks.push(check(
+            "caldav",
+            DoctorStatus::Warn,
+            "not configured (restask setup)",
+        )),
+    }
+
+    Ok(DoctorReport { checks, exit_code })
+}
+
+/// Prints the doctor report to stdout (§12.2 one-shot format).
+fn print_doctor(report: &DoctorReport) {
+    for check in &report.checks {
+        println!("[{}] {}: {}", check.status.tag(), check.name, check.detail);
+    }
+}
+
+/// Builds a [`DoctorCheck`] from a displayable detail.
+fn check(name: &'static str, status: DoctorStatus, detail: impl std::fmt::Display) -> DoctorCheck {
+    DoctorCheck {
+        name,
+        status,
+        detail: detail.to_string(),
+    }
 }
 
 /// Completes/reopens via [`Engine::set_done`] after resolving the selector (§13.3).

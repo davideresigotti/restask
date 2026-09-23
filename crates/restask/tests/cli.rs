@@ -9,9 +9,9 @@ use std::sync::Arc;
 use chrono::{FixedOffset, TimeZone, Utc};
 use tempfile::TempDir;
 
-use common::{sample_task, temp_vault, FixedClock, MockCaldav};
-use restask::cli::{self, Cli, Command, ListAction, Selector};
-use restask::config::{ListBinding, MachineConfig};
+use common::{sample_task, temp_vault, write_vault_file, FixedClock, MockCaldav};
+use restask::cli::{self, Cli, Command, DoctorStatus, ListAction, Selector};
+use restask::config::{CaldavConfig, ListBinding, MachineConfig};
 use restask::domain::{ListSlug, Priority, TaskUid};
 use restask::store::{cache_path, cache_write, Index, IndexEntry};
 use restask::vtodo::to_vcalendar;
@@ -482,4 +482,165 @@ fn selector_requires_uid_or_file_and_line() {
         }
         _ => panic!("expected the done command"),
     }
+}
+
+/// Machine config for doctor tests: a configured endpoint plus an optional passwd file.
+fn doctor_machine(password_file: Option<PathBuf>) -> MachineConfig {
+    MachineConfig {
+        caldav: CaldavConfig {
+            url: Some("http://radicale.local:5232".to_string()),
+            username: Some("me".to_string()),
+            password_file,
+            ..CaldavConfig::default()
+        },
+        ..MachineConfig::default()
+    }
+}
+
+/// Runs the doctor check suite directly (checks + exit code assertions).
+async fn doctor_report(
+    vault: &TempDir,
+    machine: &MachineConfig,
+    mock: MockCaldav,
+) -> restask::cli::DoctorReport {
+    cli::doctor(
+        vault.path(),
+        machine,
+        Some(mock),
+        &vault.path().join("machine.toml"),
+        None,
+        clock(),
+    )
+    .await
+    .unwrap()
+}
+
+fn status_of(report: &restask::cli::DoctorReport, name: &str) -> Option<DoctorStatus> {
+    report
+        .checks
+        .iter()
+        .find(|check| check.name == name)
+        .map(|check| check.status)
+}
+
+#[tokio::test]
+async fn doctor_healthy_reports_all_ok_and_exit_zero() {
+    let vault = temp_vault();
+    std::fs::write(vault.path().join("machine.toml"), "").unwrap();
+    let passwd = vault.path().join("radicale.passwd");
+    std::fs::write(&passwd, "secret").unwrap();
+    let machine = doctor_machine(Some(passwd));
+    let mock = MockCaldav::new();
+
+    let report = doctor_report(&vault, &machine, mock.clone()).await;
+    assert_eq!(report.exit_code, 0);
+    assert_eq!(status_of(&report, "machine-config"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "vault-config"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "routing"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "scan"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "todo-marker"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "sync-conflict"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
+    // The auth probe runs against the configured endpoint; with no reachable real
+    // server it reports a soft warning and must not affect the exit code.
+    assert_eq!(status_of(&report, "caldav-auth"), Some(DoctorStatus::Warn));
+
+    // Through the CLI the report's exit code is the process exit code.
+    let code = run(Command::Doctor { server: None }, vault.path(), &mock)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn doctor_hard_warns_when_no_password_is_configured() {
+    let vault = temp_vault();
+    let machine = doctor_machine(None);
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    assert_eq!(report.exit_code, 1);
+    assert_eq!(status_of(&report, "caldav-auth"), Some(DoctorStatus::Warn));
+    // Reachability itself is fine; only the auth layer warns.
+    assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
+}
+
+#[tokio::test]
+async fn doctor_reports_an_unreachable_server_as_exit_three() {
+    let vault = temp_vault();
+    let passwd = vault.path().join("radicale.passwd");
+    std::fs::write(&passwd, "secret").unwrap();
+    let machine = doctor_machine(Some(passwd));
+    let mock = MockCaldav::new();
+    mock.fail_next(CaldavErrorKind::Network);
+
+    let report = doctor_report(&vault, &machine, mock).await;
+    assert_eq!(report.exit_code, 3);
+    assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Fail));
+}
+
+#[tokio::test]
+async fn doctor_reports_an_invalid_vault_config_as_exit_four() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::write(vault.path().join("restask.toml"), "not [ valid toml").unwrap();
+    let machine = doctor_machine(None);
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    assert_eq!(report.exit_code, 4);
+    assert_eq!(status_of(&report, "vault-config"), Some(DoctorStatus::Fail));
+}
+
+#[tokio::test]
+async fn doctor_flags_uid_conflicts_as_exit_one() {
+    let vault = temp_vault();
+    let uid = TaskUid::generate();
+    let line = format!("- [ ] shared 🆔 {uid}");
+    write_vault_file(
+        &vault,
+        "notes/a.md",
+        &format!("---\nrestask-list: Home\n---\n\n{line}\n"),
+    );
+    write_vault_file(
+        &vault,
+        "notes/b.md",
+        &format!("---\nrestask-list: Home\n---\n\n{line}\n"),
+    );
+    let passwd = vault.path().join("radicale.passwd");
+    std::fs::write(&passwd, "secret").unwrap();
+    let machine = doctor_machine(Some(passwd));
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    assert_eq!(report.exit_code, 1);
+    assert_eq!(status_of(&report, "routing"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "scan"), Some(DoctorStatus::Fail));
+}
+
+#[tokio::test]
+async fn doctor_warns_on_missing_marker_and_conflict_files_without_failing() {
+    let vault = temp_vault();
+    std::fs::write(vault.path().join("TODO.md"), "- [ ] plain without marker\n").unwrap();
+    write_vault_file(&vault, "notes/sync-conflict-20260922.md", "junk\n");
+    let passwd = vault.path().join("radicale.passwd");
+    std::fs::write(&passwd, "secret").unwrap();
+    let machine = doctor_machine(Some(passwd));
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    assert_eq!(report.exit_code, 0);
+    assert_eq!(status_of(&report, "todo-marker"), Some(DoctorStatus::Warn));
+    assert_eq!(
+        status_of(&report, "sync-conflict"),
+        Some(DoctorStatus::Warn)
+    );
+}
+
+#[tokio::test]
+async fn doctor_without_a_configured_endpoint_stays_soft() {
+    let vault = temp_vault();
+    let machine = MachineConfig::default();
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    // With an injected port that answers, reachability is real; with no endpoint
+    // configured the §17 auth layers are skipped entirely.
+    assert_eq!(report.exit_code, 0);
+    assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "caldav-auth"), None);
 }
