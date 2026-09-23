@@ -22,7 +22,7 @@ const DEFER_ERROR_THRESHOLD: u8 = 3;
 pub struct Snapshots {
     /// Tasks parsed from the vault scan.
     pub local: BTreeMap<TaskUid, Task>,
-    /// Tasks parsed from `.taskres/tasks` (the engine overwrites `list` from the index).
+    /// Tasks parsed from `.restask/tasks` (the engine overwrites `list` from the index).
     pub cache: BTreeMap<TaskUid, Task>,
     /// Remote VTODOs per bound/managed collection, keyed by resource name (sans `.ics`).
     pub remote: BTreeMap<ListSlug, BTreeMap<String, RemoteTask>>,

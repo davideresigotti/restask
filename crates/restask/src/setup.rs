@@ -143,7 +143,7 @@ pub async fn run_interactive(
     config_path: PathBuf,
     clock: Arc<dyn Clock>,
 ) -> Result<(), TaskresError> {
-    let known = vault.join("restask.toml").is_file() || vault.join(".taskres").is_dir();
+    let known = vault.join("restask.toml").is_file() || vault.join(".restask").is_dir();
     if !known && !crate::tui::confirm(&format!("Use {} as the vault?", vault.display()))? {
         return Err(TaskresError::Validation {
             field: "vault",
@@ -244,7 +244,7 @@ pub async fn run_interactive(
     Ok(())
 }
 
-/// Walks the vault (skipping hidden directories, so `.taskres/` is never entered) and
+/// Walks the vault (skipping hidden directories, so `.restask/` is never entered) and
 /// collects the distinct routed lists (§5): the engine-managed Inbox first, then every
 /// list resolved from `restask-list`/`restask-list-root` markers, in first-seen file
 /// order. Returns `(display name, slug)` pairs. Routing conflicts collapse to the
@@ -335,7 +335,7 @@ async fn prepare_and_sync<C: CaldavPort>(
 ) -> Result<SetupSummary, TaskresError> {
     let vault = args.vault.clone();
 
-    // Step 1 — vault: §14-default restask.toml when missing, plus `.taskres/`.
+    // Step 1 — vault: §14-default restask.toml when missing, plus `.restask/`.
     let config_path = vault.join("restask.toml");
     let cfg = if config_path.is_file() {
         VaultConfig::load(&config_path).map_err(|error| config_error(&config_path, &error))?
@@ -345,7 +345,7 @@ async fn prepare_and_sync<C: CaldavPort>(
             .map_err(|error| config_error(&config_path, &error))?;
         cfg
     };
-    std::fs::create_dir_all(vault.join(".taskres"))?;
+    std::fs::create_dir_all(vault.join(".restask"))?;
 
     // Step 2 — TODO.md adoption, only when the file exists and lacks the §7 marker.
     let inbox = vault.join(&cfg.inbox_file);
@@ -450,7 +450,7 @@ pub fn print_summary(summary: &SetupSummary) {
     );
     println!(
         "client wiring: <url>/<user>/<slug>/ per bound collection; enable \
-         contrib/restask.service and keep .taskres/ inside the Syncthing share"
+         contrib/restask.service and keep .restask/ inside the Syncthing share"
     );
 }
 

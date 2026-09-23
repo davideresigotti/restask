@@ -49,7 +49,7 @@ Taskres follows a strict **local-first and offline-first** philosophy. All core 
 - **Local Vault on Phone**: The entire Markdown vault is stored locally on the mobile device and kept in sync via Syncthing.
 - **Immediate Local Mutation**: When a task is checked as done in the mobile app or widget without an internet connection:
   - The local Markdown note on the phone is updated immediately (the checkbox becomes `- [x]`, the completion date `✅ YYYY-MM-DD` is appended, and the task is moved under `### Done`).
-  - The corresponding VTODO file in the local `.taskres/tasks` cache is updated simultaneously.
+  - The corresponding VTODO file in the local `.restask/tasks` cache is updated simultaneously.
   - No network connectivity is required to complete, edit, or capture tasks.
 
 ## Synchronization on Reconnection

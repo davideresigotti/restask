@@ -29,7 +29,7 @@ restask setup
 
 The wizard will:
 
-1. Create `restask.toml` (vault defaults) and the `.taskres/` state directory.
+1. Create `restask.toml` (vault defaults) and the `.restask/` state directory.
 2. Adopt an existing `TODO.md` — the old file is backed up to `TODO.pre-restask-<timestamp>.md`, and its checkbox lines are migrated into the new `## Inbox`.
 3. Ask for your Radicale URL and credentials (password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
 4. Show every list it found in your vault (from `restask-list`/`restask-list-root` markers, plus the Inbox) and the server's collections, and let you **bind, create, or keep local-only** each one (e.g. `University.md` → your existing `university` calendar, `Home Lab/` folder → a new `home-lab` list). Extra bindings can be entered manually as `list=collection`.
@@ -101,4 +101,4 @@ systemctl --user disable --now restask                    # stop
 cargo uninstall restask                                   # remove binary
 ```
 
-State lives entirely in `<vault>/.taskres/` and `~/.config/restask/` — delete those to fully reset.
+State lives entirely in `<vault>/.restask/` and `~/.config/restask/` — delete those to fully reset.

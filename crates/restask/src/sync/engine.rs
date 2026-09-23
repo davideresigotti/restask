@@ -1,5 +1,5 @@
 //! Reconciliation engine (§11, §13.1): the single-writer I/O orchestrator. Owns every
-//! mutation of the vault, `.taskres/` state, and the server; the planner decides, the
+//! mutation of the vault, `.restask/` state, and the server; the planner decides, the
 //! engine executes and records.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,7 +68,7 @@ pub struct Engine<C: CaldavPort> {
 
 impl<C: CaldavPort> Engine<C> {
     /// Builds an engine over `vault` (containing `restask.toml`-derived `cfg` and the
-    /// `.taskres/` state directory).
+    /// `.restask/` state directory).
     pub fn new(
         vault: &Path,
         cfg: VaultConfig,
@@ -77,7 +77,7 @@ impl<C: CaldavPort> Engine<C> {
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
-            state_dir: vault.join(".taskres"),
+            state_dir: vault.join(".restask"),
             vault: vault.to_path_buf(),
             cfg,
             machine,
@@ -630,7 +630,7 @@ impl<C: CaldavPort> Engine<C> {
         Ok(())
     }
 
-    /// Loads the VTODO cache (`.taskres/tasks/*.ics`), overwriting each task's list from
+    /// Loads the VTODO cache (`.restask/tasks/*.ics`), overwriting each task's list from
     /// the index (routing truth, D30).
     fn load_cache(&self, index: &Index) -> Result<BTreeMap<TaskUid, Task>, TaskresError> {
         let mut map = BTreeMap::new();

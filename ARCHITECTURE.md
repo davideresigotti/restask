@@ -16,10 +16,10 @@ Radicale (CalDAV) is both a projection and an ingress point for external clients
 Thunderbird).
 
 - **Sync node** (always-on device, e.g. home server): runs `restask daemon` on the vault folder
-  (a Syncthing share) and bridges vault ⇄ Radicale. Multiple daemons are safe: `.taskres/`
+  (a Syncthing share) and bridges vault ⇄ Radicale. Multiple daemons are safe: `.restask/`
   state is reconstructible and reconciliation is idempotent.
 - **Phone**: no daemon. Obsidian edits Markdown (the plugin mirrors completions into
-  `.taskres/tasks/*.ics`, which ride the vault via Syncthing); Tasks.org talks CalDAV to
+  `.restask/tasks/*.ics`, which ride the vault via Syncthing); Tasks.org talks CalDAV to
   Radicale. On reconnection the daemon converges vault and server.
 
 ## Naming map
@@ -28,7 +28,7 @@ Thunderbird).
 |---|---|---|
 | System/product name | **Taskres** | docs, TODO.md marker |
 | CLI binary & Rust crate | **`restask`** | `crates/restask/` |
-| Per-vault state directory | **`.taskres/`** | vault root |
+| Per-vault state directory | **`.restask/`** | vault root |
 | Vault config | **`restask.toml`** | vault root (synced) |
 | Machine config | **`config.toml`** | `$XDG_CONFIG_HOME/restask/` (never synced) |
 | Env prefix | `RESTASK_*` | — |
@@ -45,7 +45,7 @@ Thunderbird).
 └──────────────────────────────────────────────────────────────────────────────────────────┘
         ▲ construction & data                ▲ construction & data
 ┌───────┴───────────────── ADAPTERS (I/O) ───┴─────────────────────────────────────────────┐
-│ store (index, cache, tombstones, outbox — filesystem under .taskres/)                    │
+│ store (index, cache, tombstones, outbox — filesystem under .restask/)                    │
 │ caldav::client (reqwest, rustls)  implements  caldav::port::CaldavPort                    │
 │ daemon (notify watcher → debounced events)   cli / setup / tui (process + TTY)             │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
@@ -87,7 +87,7 @@ Rules:
 | `docs/spec/routing.md` | §5 note routing, list roots, slug→collection mapping | T05 |
 | `docs/spec/markdown.md` | §6–7 grammar, mutations, TODO.md view contract | T06–T10 |
 | `docs/spec/vtodo.md` | §8 + App. A codec, folding/escaping, golden VTODO | T11–T13 |
-| `docs/spec/storage.md` | §9 `.taskres/` layout, index/tombstones/cache/outbox | T14–T15 |
+| `docs/spec/storage.md` | §9 `.restask/` layout, index/tombstones/cache/outbox | T14–T15 |
 | `docs/spec/caldav.md` | §10 XML protocol, CaldavPort, retry, foreign rules | T16–T17 |
 | `docs/spec/sync.md` | §11 snapshots, plan, rules R0–R10 | T18–T19 |
 | `docs/spec/runtime.md` | §12–13 errors, logging, daemon, CLI, setup wizard | T20–T23 |
@@ -104,7 +104,7 @@ crates/restask/src/
 ├── markdown/  parser, mutator, todo_view                 (pure)
 ├── vtodo/     serialize, parse                           (pure)
 ├── sync/      planner (pure), engine (I/O orchestrator)
-├── store/     index, cache, tombstones, outbox           (.taskres/)
+├── store/     index, cache, tombstones, outbox           (.restask/)
 ├── caldav/    protocol (pure XML), port (trait), client (reqwest)
 ├── daemon.rs  watcher + debounce + single reconciler
 └── cli.rs, setup.rs, tui.rs, config.rs, logging.rs

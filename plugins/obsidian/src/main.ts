@@ -3,7 +3,7 @@
  *
  * This file isolates every Obsidian API call; markdown.ts, modal.ts and vtodo.ts stay
  * API-free and unit-testable (AGENTS.md §3). The plugin mutates Markdown and mirrors
- * mutations into `.taskres/tasks/<uid>.ics`; it never talks CalDAV — that is the
+ * mutations into `.restask/tasks/<uid>.ics`; it never talks CalDAV — that is the
  * daemon's job (§15).
  */
 

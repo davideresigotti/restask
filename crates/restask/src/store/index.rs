@@ -1,4 +1,4 @@
-//! `.taskres/index.json`: per-UID routing/etag bookkeeping (§9.1).
+//! `.restask/index.json`: per-UID routing/etag bookkeeping (§9.1).
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -12,7 +12,7 @@ use crate::domain::uid::TaskUid;
 use crate::markdown::mutator::write_atomic;
 use crate::TaskresError;
 
-/// Name of the index file inside `.taskres/`.
+/// Name of the index file inside `.restask/`.
 const FILE_NAME: &str = "index.json";
 
 /// Bookkeeping for one known task UID (§9.1).
@@ -45,7 +45,7 @@ pub struct Index {
 }
 
 impl Index {
-    /// Loads `.taskres/index.json` from `dir`; a missing file yields an empty index.
+    /// Loads `.restask/index.json` from `dir`; a missing file yields an empty index.
     pub fn load(dir: &Path) -> Result<Index, TaskresError> {
         let path = dir.join(FILE_NAME);
         let contents = match std::fs::read_to_string(&path) {

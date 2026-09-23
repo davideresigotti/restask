@@ -23,7 +23,7 @@ impl TaskUid {
 impl std::fmt::Display for TaskUid;                  // writes self.0
 ```
 
-Filename-safe: `taskres-01jz…` is used verbatim as `.taskres/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
+Filename-safe: `taskres-01jz…` is used verbatim as `.restask/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
 
 ### 3.2 `priority.rs`
 

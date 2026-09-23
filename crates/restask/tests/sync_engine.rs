@@ -150,14 +150,14 @@ async fn first_sync_registers_pushes_and_renders() {
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     assert_eq!(note.matches("\u{1F194}").count(), 2);
 
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(index.entries.len(), 2);
     assert!(index
         .entries
         .values()
         .all(|entry| entry.caldav_etag.is_some() && entry.list == slug("home")));
     assert_eq!(
-        std::fs::read_dir(dir.path().join(".taskres/tasks"))
+        std::fs::read_dir(dir.path().join(".restask/tasks"))
             .unwrap()
             .count(),
         2
@@ -195,13 +195,13 @@ async fn remote_created_task_is_inserted_into_its_routed_note() {
     assert!(note.contains("from the server"));
     assert!(note.contains("taskres-01jz0000000000000000000002"));
 
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     let entry = &index.entries[&TaskUid::parse("taskres-01jz0000000000000000000002").unwrap()];
     assert_eq!(entry.source_path, "notes/home.md");
     assert!(entry.caldav_etag.is_some());
     assert!(dir
         .path()
-        .join(".taskres/tasks/taskres-01jz0000000000000000000002.ics")
+        .join(".restask/tasks/taskres-01jz0000000000000000000002.ics")
         .exists());
 
     let todo = std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
@@ -223,13 +223,13 @@ async fn server_side_deletion_tombstones_and_removes_the_line() {
 
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     assert!(!note.contains("doomed"));
-    let tombstones = Tombstones::load(&dir.path().join(".taskres")).unwrap();
+    let tombstones = Tombstones::load(&dir.path().join(".restask")).unwrap();
     assert!(tombstones.contains(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap()));
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
     assert!(!dir
         .path()
-        .join(".taskres/tasks/taskres-01jz0000000000000000000001.ics")
+        .join(".restask/tasks/taskres-01jz0000000000000000000001.ics")
         .exists());
 }
 
@@ -251,9 +251,9 @@ async fn vault_side_deletion_purges_cache_and_remote() {
     assert!(mock
         .resource("home", "taskres-01jz0000000000000000000001")
         .is_none());
-    let tombstones = Tombstones::load(&dir.path().join(".taskres")).unwrap();
+    let tombstones = Tombstones::load(&dir.path().join(".restask")).unwrap();
     assert!(tombstones.contains(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap()));
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     assert!(note.contains("# Home"));
@@ -292,7 +292,7 @@ async fn rerouting_a_note_moves_the_task_between_collections() {
     assert!(mock
         .resource("work", "taskres-01jz0000000000000000000001")
         .is_some());
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(
         index
             .entries
@@ -331,7 +331,7 @@ async fn remote_wins_duel_mutates_the_note() {
     assert!(!note.contains("alpha"));
     let cached = std::fs::read_to_string(
         dir.path()
-            .join(".taskres/tasks/taskres-01jz0000000000000000000001.ics"),
+            .join(".restask/tasks/taskres-01jz0000000000000000000001.ics"),
     )
     .unwrap();
     assert!(cached.contains("beta"));
@@ -383,7 +383,7 @@ async fn failed_push_parks_to_the_outbox_and_flushes_later() {
         .0
         .resource("home", "taskres-01jz0000000000000000000001")
         .is_none());
-    let mut outbox = restask::store::outbox::Outbox::load(&dir.path().join(".taskres")).unwrap();
+    let mut outbox = restask::store::outbox::Outbox::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(outbox.take_all().len(), 1);
 
     // A healthy engine over the same vault replays the parked op and converges.
@@ -393,14 +393,14 @@ async fn failed_push_parks_to_the_outbox_and_flushes_later() {
     assert!(mock
         .resource("home", "taskres-01jz0000000000000000000001")
         .is_some());
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index
         .entries
         .get(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap())
         .unwrap()
         .caldav_etag
         .is_some());
-    let mut outbox = restask::store::outbox::Outbox::load(&dir.path().join(".taskres")).unwrap();
+    let mut outbox = restask::store::outbox::Outbox::load(&dir.path().join(".restask")).unwrap();
     assert!(outbox.take_all().is_empty());
 }
 
@@ -449,7 +449,7 @@ async fn foreign_task_is_adopted_into_the_inbox() {
 
     let todo = std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
     assert!(todo.contains("made in Tasks.org"));
-    let index = Index::load(&dir.path().join(".taskres")).unwrap();
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(index.entries.len(), 1);
     assert_eq!(
         index.entries.values().next().unwrap().source_path,
@@ -496,7 +496,7 @@ async fn unrouted_notes_are_never_touched() {
     let plain = std::fs::read_to_string(dir.path().join("notes/plain.md")).unwrap();
     assert_eq!(plain, "# Journal\n\n- [ ] not tracked\n");
     assert!(mock.collection_names().is_empty());
-    assert!(Index::load(&dir.path().join(".taskres"))
+    assert!(Index::load(&dir.path().join(".restask"))
         .unwrap()
         .entries
         .is_empty());

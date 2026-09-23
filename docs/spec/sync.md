@@ -9,7 +9,7 @@
 ```rust
 pub struct Snapshots {
     pub local: std::collections::BTreeMap<TaskUid, Task>,        // from vault scan
-    pub cache: std::collections::BTreeMap<TaskUid, Task>,        // from .taskres/tasks
+    pub cache: std::collections::BTreeMap<TaskUid, Task>,        // from .restask/tasks
     pub remote: std::collections::BTreeMap<ListSlug, std::collections::BTreeMap<String, RemoteTask>>, // per bound/managed collection
     pub tombstones: std::collections::BTreeSet<TaskUid>,
     pub index: Index,

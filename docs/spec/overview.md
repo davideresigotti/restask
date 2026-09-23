@@ -12,7 +12,7 @@ Taskres is a local-first, offline-first task system linking Markdown checkboxes 
 |---|---|---|
 | System/product name | **Taskres** | docs, TODO.md marker |
 | CLI binary & Rust crate | **`restask`** | `crates/restask/` |
-| Per-vault state directory | **`.taskres/`** | vault root |
+| Per-vault state directory | **`.restask/`** | vault root |
 | Vault config | **`restask.toml`** | vault root (synced) |
 | Machine config | **`config.toml`** | `$XDG_CONFIG_HOME/restask/` (never synced) |
 | Env prefix | `RESTASK_*` | — |
@@ -29,7 +29,7 @@ Taskres is a local-first, offline-first task system linking Markdown checkboxes 
 └──────────────────────────────────────────────────────────────────────────────────────────┘
         ▲ construction & data                ▲ construction & data
 ┌───────┴───────────────── ADAPTERS (I/O) ───┴─────────────────────────────────────────────┐
-│ store (index, cache, tombstones, outbox — filesystem under .taskres/)                    │
+│ store (index, cache, tombstones, outbox — filesystem under .restask/)                    │
 │ caldav::client (reqwest, rustls)  implements  caldav::port::CaldavPort                    │
 │ daemon (notify watcher → debounced events)   cli / setup / tui (process + TTY + ssh)     │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
@@ -43,12 +43,12 @@ Rules:
 ### 1.3 Topology & mobile execution model
 
 - **Sync node** (always-on device, e.g. home server): runs `restask daemon` against the vault folder (a Syncthing share) and bridges vault ⇄ Radicale.
-- **Phone**: no daemon. Obsidian app edits Markdown; Tasks.org talks CalDAV to Radicale. The Obsidian plugin (§15) mirrors completions into `.taskres/tasks/*.ics` so offline state travels with the vault.
-- **Multiple daemons are safe**: all state under `.taskres/` is reconstructible from vault + Radicale; reconciliation is idempotent.
+- **Phone**: no daemon. Obsidian app edits Markdown; Tasks.org talks CalDAV to Radicale. The Obsidian plugin (§15) mirrors completions into `.restask/tasks/*.ics` so offline state travels with the vault.
+- **Multiple daemons are safe**: all state under `.restask/` is reconstructible from vault + Radicale; reconciliation is idempotent.
 
 ```
 Phone (offline): toggle checkbox ─▶ Obsidian plugin rewrites line, moves under Done,
-                                    updates .taskres/tasks/<uid>.ics
+                                    updates .restask/tasks/<uid>.ics
 Reconnect: Syncthing ─▶ vault (md + cache) ─▶ sync node
            Tasks.org  ─▶ CalDAV PUT ─▶ Radicale
            restask daemon ─▶ 3-way plan ─▶ converge (vault == Radicale) ─▶ Syncthing fans out

@@ -187,7 +187,7 @@ fn default_track() -> Vec<String> {
 }
 
 fn default_ignore() -> Vec<String> {
-    [".taskres/**", ".obsidian/**", ".trash/**", ".git/**"]
+    [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
         .iter()
         .map(|pattern| pattern.to_string())
         .collect()

@@ -1,4 +1,4 @@
-//! `.taskres/outbox.json`: CalDAV operations parked after retry exhaustion (§9).
+//! `.restask/outbox.json`: CalDAV operations parked after retry exhaustion (§9).
 //!
 //! Parked operations are replayed by later reconcile cycles; the vault and index remain
 //! reconstructible regardless of outbox contents.
@@ -14,7 +14,7 @@ use crate::domain::uid::TaskUid;
 use crate::markdown::mutator::write_atomic;
 use crate::TaskresError;
 
-/// Name of the outbox file inside `.taskres/`.
+/// Name of the outbox file inside `.restask/`.
 const FILE_NAME: &str = "outbox.json";
 
 /// One pending CalDAV operation (§9.2).
@@ -44,7 +44,7 @@ pub struct Outbox {
 }
 
 impl Outbox {
-    /// Loads `.taskres/outbox.json` from `dir`; a missing file yields an empty outbox.
+    /// Loads `.restask/outbox.json` from `dir`; a missing file yields an empty outbox.
     pub fn load(dir: &Path) -> Result<Self, TaskresError> {
         let path = dir.join(FILE_NAME);
         let contents = match std::fs::read_to_string(&path) {

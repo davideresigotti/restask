@@ -1,13 +1,13 @@
-# Taskres Spec — Storage & State — .taskres/ (§9)
+# Taskres Spec — Storage & State — .restask/ (§9)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
-## §9 Storage & State (`.taskres/`, per-vault)
+## §9 Storage & State (`.restask/`, per-vault)
 
-`.taskres/` lives inside the vault and **is synced by Syncthing** (the offline mobile cache rides the vault). It is fully reconstructible via `restask rebuild`. `*.sync-conflict*` files are ignored for indexing; `doctor` reports them.
+`.restask/` lives inside the vault and **is synced by Syncthing** (the offline mobile cache rides the vault). It is fully reconstructible via `restask rebuild`. `*.sync-conflict*` files are ignored for indexing; `doctor` reports them.
 
 ```
-.taskres/
+.restask/
 ├── tasks/<uid>.ics        # VTODO cache (same bytes as pushed to Radicale)
 ├── index.json             # uid → routing/etag bookkeeping
 ├── tombstones.json        # deleted UIDs with timestamps (pruned after 365 days)
@@ -47,7 +47,7 @@ impl Tombstones {
     pub fn prune(&mut self, older_than: chrono::Duration);
 }
 
-pub fn cache_path(dir: &Path, uid: &TaskUid) -> std::path::PathBuf;  // .taskres/tasks/<uid>.ics
+pub fn cache_path(dir: &Path, uid: &TaskUid) -> std::path::PathBuf;  // .restask/tasks/<uid>.ics
 pub fn cache_read(dir: &Path, uid: &TaskUid, tz: chrono::FixedOffset) -> Option<Task>;
 pub fn cache_write(dir: &Path, task: &Task, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), TaskresError>;
 pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), TaskresError>;

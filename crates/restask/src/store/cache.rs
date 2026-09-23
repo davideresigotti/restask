@@ -1,4 +1,4 @@
-//! `.taskres/tasks/<uid>.ics`: VTODO cache holding the same bytes pushed to Radicale (§9).
+//! `.restask/tasks/<uid>.ics`: VTODO cache holding the same bytes pushed to Radicale (§9).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -12,10 +12,10 @@ use crate::markdown::mutator::write_atomic;
 use crate::vtodo::{from_vcalendar, to_vcalendar};
 use crate::TaskresError;
 
-/// Subdirectory of `.taskres/` holding the cached VTODOs.
+/// Subdirectory of `.restask/` holding the cached VTODOs.
 const TASKS_DIR: &str = "tasks";
 
-/// Returns the cache path `.taskres/tasks/<uid>.ics` for `uid`.
+/// Returns the cache path `.restask/tasks/<uid>.ics` for `uid`.
 pub fn cache_path(dir: &Path, uid: &TaskUid) -> PathBuf {
     dir.join(TASKS_DIR).join(format!("{}.ics", uid.as_str()))
 }

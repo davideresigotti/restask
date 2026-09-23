@@ -24,7 +24,7 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// A bare vault: legacy TODO.md without the marker, no restask.toml, no `.taskres/`.
+/// A bare vault: legacy TODO.md without the marker, no restask.toml, no `.restask/`.
 fn legacy_vault() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -85,10 +85,10 @@ async fn non_interactive_setup_end_to_end() {
         .await
         .unwrap();
 
-    // Step 1: §14-default restask.toml written, `.taskres/` created.
+    // Step 1: §14-default restask.toml written, `.restask/` created.
     let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
     assert_eq!(cfg.done_heading, "Done");
-    assert!(vault.path().join(".taskres").is_dir());
+    assert!(vault.path().join(".restask").is_dir());
 
     // Step 2: verbatim backup, fresh marker scaffold, migrated line present with a UID.
     let backup_name = summary.backup.clone().unwrap();
@@ -126,7 +126,7 @@ async fn non_interactive_setup_end_to_end() {
     assert!(mock.collection_names().iter().any(|slug| slug == "inbox"));
 
     // Step 6: the migrated task is registered and pushed.
-    let index = Index::load(&vault.path().join(".taskres")).unwrap();
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert_eq!(index.entries.len(), 1);
     let entry = index.entries.values().next().unwrap();
     assert!(entry.caldav_etag.is_some());
@@ -149,7 +149,7 @@ async fn setup_is_non_destructive_on_rerun() {
     // The marker is present now: no second backup, no re-migration, no new pushes.
     assert!(second.backup.is_none());
     assert_eq!(second.migrated, 0);
-    let index = Index::load(&vault.path().join(".taskres")).unwrap();
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert_eq!(index.entries.len(), 1);
     assert_eq!(mock.resource_names("inbox").len(), 1);
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
@@ -231,8 +231,8 @@ fn discover_lists_reports_inbox_and_routed_markers() {
     )
     .unwrap();
     std::fs::write(vault.path().join("Unmarked.md"), "- [ ] untouched\n").unwrap();
-    std::fs::create_dir_all(vault.path().join(".taskres")).unwrap();
-    std::fs::write(vault.path().join(".taskres/index.json"), "{}").unwrap();
+    std::fs::create_dir_all(vault.path().join(".restask")).unwrap();
+    std::fs::write(vault.path().join(".restask/index.json"), "{}").unwrap();
 
     let lists = restask::setup::discover_vault_lists(vault.path());
 

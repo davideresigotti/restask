@@ -111,7 +111,7 @@ async fn add_registers_pushes_and_renders() {
     assert!(uid.starts_with("taskres-"));
 
     assert_eq!(mock.resource_names("inbox"), vec![uid.clone()]);
-    let index = Index::load(&vault.path().join(".taskres")).unwrap();
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
     let entry = index.get(&TaskUid::parse(&uid).unwrap()).unwrap();
     assert_eq!(entry.list.as_str(), "inbox");
     assert!(entry.caldav_etag.is_some());
@@ -277,7 +277,7 @@ async fn rebuild_rederives_state_preserves_etags_and_prunes() {
     let mock = MockCaldav::new();
     let alpha = add(&vault, &mock, "alpha", None, None).await;
     add(&vault, &mock, "beta", None, None).await;
-    let state = vault.path().join(".taskres");
+    let state = vault.path().join(".restask");
     let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
 
     let alpha_uid = TaskUid::parse(&alpha).unwrap();
@@ -333,7 +333,7 @@ async fn sync_pulls_a_remote_task_into_the_inbox() {
     let contents = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     assert!(contents.contains("from server"));
     assert!(contents.contains(uid.as_str()));
-    let index = Index::load(&vault.path().join(".taskres")).unwrap();
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert!(index.get(&uid).is_some());
 }
 

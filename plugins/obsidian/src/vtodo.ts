@@ -1,7 +1,7 @@
 /**
  * TypeScript port of the VTODO serializer (docs/spec/vtodo.md §8.1) for the exact
  * subset the plugin produces (complete/uncomplete, priority) — the cache writer for
- * `.taskres/tasks/<uid>.ics` (§15.3).
+ * `.restask/tasks/<uid>.ics` (§15.3).
  *
  * Emits the same bytes as the Rust codec for the same task: CRLF endings, the §8.1
  * property order, §4 timestamp forms, iCalendar TEXT escaping, and 75-octet folding.
@@ -24,10 +24,10 @@ const PRIORITY_ICAL: Readonly<Record<Priority, number>> = {
 export const PRODID = "-//taskres//restask 0.1.0//EN";
 
 /** Per-vault state directory (§15.3). */
-export const CACHE_DIR = ".taskres";
+export const CACHE_DIR = ".restask";
 
 /** Cache directory inside the vault (§15.3). */
-export const TASKS_DIR = ".taskres/tasks";
+export const TASKS_DIR = ".restask/tasks";
 
 /** The task fields the plugin can produce when mirroring a line into the cache. */
 export interface CacheTask {
@@ -143,14 +143,14 @@ export function toVcalendar(task: CacheTask, nowUtc: string): string {
 	return props.map(fold).join("\r\n") + "\r\n";
 }
 
-/** Cache path for a UID (§15.3): `.taskres/tasks/<uid>.ics`. */
+/** Cache path for a UID (§15.3): `.restask/tasks/<uid>.ics`. */
 export function cachePath(uid: string): string {
 	return `${TASKS_DIR}/${uid}.ics`;
 }
 
 /**
- * Writes the cache VTODO via the injected adapter (§15.3): creates `.taskres/tasks/`
- * as needed; when `.taskres/` is absent (fresh mobile device) it skips silently and
+ * Writes the cache VTODO via the injected adapter (§15.3): creates `.restask/tasks/`
+ * as needed; when `.restask/` is absent (fresh mobile device) it skips silently and
  * returns false, otherwise true after writing.
  */
 export async function writeCacheFile(adapter: AdapterPort, task: CacheTask, nowUtc: string): Promise<boolean> {

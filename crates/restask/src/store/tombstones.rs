@@ -1,4 +1,4 @@
-//! `.taskres/tombstones.json`: deleted UIDs with deletion timestamps (§9.1).
+//! `.restask/tombstones.json`: deleted UIDs with deletion timestamps (§9.1).
 //!
 //! Tombstones prevent a stale server copy (or late-arriving Syncthing peer) from
 //! resurrecting a deleted task; entries older than 365 days are pruned so the file stays
@@ -15,7 +15,7 @@ use crate::domain::uid::TaskUid;
 use crate::markdown::mutator::write_atomic;
 use crate::TaskresError;
 
-/// Name of the tombstones file inside `.taskres/`.
+/// Name of the tombstones file inside `.restask/`.
 const FILE_NAME: &str = "tombstones.json";
 
 /// Deletion markers (§9.1): UID → instant of deletion.
@@ -23,7 +23,7 @@ const FILE_NAME: &str = "tombstones.json";
 pub struct Tombstones(BTreeMap<TaskUid, DateTime<Utc>>);
 
 impl Tombstones {
-    /// Loads `.taskres/tombstones.json` from `dir`; a missing file yields an empty set.
+    /// Loads `.restask/tombstones.json` from `dir`; a missing file yields an empty set.
     pub fn load(dir: &Path) -> Result<Self, TaskresError> {
         let path = dir.join(FILE_NAME);
         let contents = match std::fs::read_to_string(&path) {

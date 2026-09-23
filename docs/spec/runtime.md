@@ -58,12 +58,12 @@ pub async fn run(vault: PathBuf, machine: MachineConfig, dc: DaemonConfig, shutd
 
 Non-destructive; every destructive step prompts. Steps:
 
-1. **Vault**: resolve (`--vault`, else `RESTASK_VAULT`, else upward search for `restask.toml`/`.taskres/`, else cwd must contain `TODO.md` or be confirmed). Write `restask.toml` (§14 defaults). Create `.taskres/`.
+1. **Vault**: resolve (`--vault`, else `RESTASK_VAULT`, else upward search for `restask.toml`/`.restask/`, else cwd must contain `TODO.md` or be confirmed). Write `restask.toml` (§14 defaults). Create `.restask/`.
 2. **TODO.md adoption** (only if TODO.md exists and lacks the §7 marker): back up verbatim to `TODO.pre-restask-YYYYMMDD-HHMMSS.md`; any checkbox lines are migrated into the fresh `## Inbox` (registered with UIDs); everything else (incl. obsidian-tasks ```tasks blocks) lives on only in the backup. Pure core in `adopt_todo_md(existing, clock) -> AdoptionOutcome { backup: String, migrated: Vec<String> }`.
 3. **CalDAV credentials**: URL, username, password (hidden, `rpassword`). Password is stored ONLY in `~/.config/restask/radicale.passwd` (chmod 600) or referenced via env — never in `config.toml`. `PROPFIND` verifies; 401 re-prompts (3 tries).
 4. **Lists**: PROPFIND user root → show discovered vault lists (from §5 markers, Inbox first) and the server's collections; for each vault list, propose: bind existing (case-insensitive slug match, e.g. `University` → `university`, Inbox → `inbox`) / create `<slug>` collection / keep local-only. Bindings are recorded in machine config `[[lists]]`; a free-form `list=collection` prompt covers anything discovery missed.
 5. **First sync**: full reconcile (creates collections, registers UIDs, pushes all routed tasks).
-6. **Summary**: client wiring URLs (`<url>/<user>/<slug>/`), systemd/docker next steps, Syncthing reminder (vault folder must include `.taskres/`).
+6. **Summary**: client wiring URLs (`<url>/<user>/<slug>/`), systemd/docker next steps, Syncthing reminder (vault folder must include `.restask/`).
 
 Flags for non-interactive use: `--url`, `--username`, `--password-env`, `--collection <list=slug>` (repeatable), `--non-interactive` (fails rather than prompting). Server discovery via SSH was removed by owner decision — the URL and credentials are always entered manually.
 

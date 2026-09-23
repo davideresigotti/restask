@@ -4,7 +4,7 @@ import type TaskresPlugin from "./main";
 
 /** Plugin settings (§15.4). */
 export interface TaskresSettings {
-	/** Mirror task mutations into `.taskres/tasks/<uid>.ics` (§15.3). */
+	/** Mirror task mutations into `.restask/tasks/<uid>.ics` (§15.3). */
 	enableCacheMirror: boolean;
 	/** Heading that starts the completed region; must equal the vault config `done_heading`. */
 	doneHeading: string;
@@ -32,7 +32,7 @@ export class TaskresSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Enable cache mirror")
-			.setDesc("Mirror task mutations into .taskres/tasks/<uid>.ics so the daemon can sync them.")
+			.setDesc("Mirror task mutations into .restask/tasks/<uid>.ics so the daemon can sync them.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.enableCacheMirror).onChange(async (value) => {
 					this.plugin.settings.enableCacheMirror = value;

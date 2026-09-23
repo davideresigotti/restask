@@ -151,23 +151,23 @@ describe("§8.1 folding", () => {
 });
 
 describe("§15.3 cache writer", () => {
-	it("skips silently when .taskres is absent", async () => {
+	it("skips silently when .restask is absent", async () => {
 		const adapter = memAdapter();
 		await expect(writeCacheFile(adapter, goldenTask(), NOW)).resolves.toBe(false);
 		expect(adapter.writes).toEqual([]);
 		expect(adapter.mkdirs).toEqual([]);
 	});
 
-	it("creates .taskres/tasks as needed and writes the vtodo", async () => {
-		const adapter = memAdapter([".taskres"]);
+	it("creates .restask/tasks as needed and writes the vtodo", async () => {
+		const adapter = memAdapter([".restask"]);
 		await expect(writeCacheFile(adapter, goldenTask(), NOW)).resolves.toBe(true);
-		expect(adapter.mkdirs).toEqual([".taskres/tasks"]);
+		expect(adapter.mkdirs).toEqual([".restask/tasks"]);
 		expect(adapter.writes).toEqual([cachePath(GOLDEN_UID)]);
 		expect(adapter.contents.get(cachePath(GOLDEN_UID))).toBe(toVcalendar(goldenTask(), NOW));
 	});
 
-	it("writes directly when .taskres/tasks exists", async () => {
-		const adapter = memAdapter([".taskres", ".taskres/tasks"]);
+	it("writes directly when .restask/tasks exists", async () => {
+		const adapter = memAdapter([".restask", ".restask/tasks"]);
 		await expect(writeCacheFile(adapter, goldenTask(), NOW)).resolves.toBe(true);
 		expect(adapter.mkdirs).toEqual([]);
 		expect(adapter.writes).toEqual([cachePath(GOLDEN_UID)]);

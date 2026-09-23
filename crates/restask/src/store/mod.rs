@@ -1,4 +1,4 @@
-//! Persistent per-vault state under `.taskres/` (§9). Adapter layer — together with
+//! Persistent per-vault state under `.restask/` (§9). Adapter layer — together with
 //! `sync::engine`, `setup`, and `daemon`, the only place that touches `std::fs`.
 //!
 //! Every state file is written atomically (hidden `.<name>.restask-tmp` + fsync + rename,

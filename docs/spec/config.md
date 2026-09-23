@@ -10,7 +10,7 @@
 done_heading = "Done"      # heading text that starts the completed-records region
 inbox_file   = "TODO.md"   # engine-managed inbox + aggregation view
 track  = ["**/*.md"]       # globset patterns (applied after ignore)
-ignore = [".taskres/**", ".obsidian/**", ".trash/**", ".git/**"]
+ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```
 
 `ignore` wins over `track`. Vault-relative paths only.

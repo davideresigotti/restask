@@ -34,7 +34,7 @@ const ENV_VAULT: &str = "RESTASK_VAULT";
 #[command(name = "restask", version)]
 pub struct Cli {
     /// Vault directory. Defaults to `$RESTASK_VAULT`, then an upward search from the
-    /// working directory for `restask.toml` or `.taskres/` (§13.3 resolution order).
+    /// working directory for `restask.toml` or `.restask/` (§13.3 resolution order).
     #[arg(long, global = true)]
     pub vault: Option<PathBuf>,
 
@@ -161,7 +161,7 @@ pub struct StatusReport {
     pub priorities: BTreeMap<String, usize>,
     /// Tasks completed today (device-local date).
     pub done_today: usize,
-    /// Operations parked in `.taskres/outbox.json`.
+    /// Operations parked in `.restask/outbox.json`.
     pub outbox_backlog: usize,
     /// RFC 3339 instant of the most recent reconciliation known to the index.
     pub last_sync: Option<String>,
@@ -381,7 +381,7 @@ pub async fn run_with<C: CaldavPort>(
 }
 
 /// Resolves the vault directory (§13.3): `flag` → `$RESTASK_VAULT` → upward search from
-/// `start` for `restask.toml` or `.taskres/`. A miss is a config error (exit 4).
+/// `start` for `restask.toml` or `.restask/`. A miss is a config error (exit 4).
 pub fn resolve_vault_with(
     flag: Option<&Path>,
     env: Option<&str>,
@@ -395,7 +395,7 @@ pub fn resolve_vault_with(
     }
     let mut dir = start.to_path_buf();
     loop {
-        if dir.join("restask.toml").is_file() || dir.join(".taskres").is_dir() {
+        if dir.join("restask.toml").is_file() || dir.join(".restask").is_dir() {
             return Ok(dir);
         }
         if !dir.pop() {
@@ -405,7 +405,7 @@ pub fn resolve_vault_with(
     Err(TaskresError::Config {
         path: "<vault>".to_string(),
         reason: "no vault found: pass --vault, set RESTASK_VAULT, or run inside a vault \
-                 (restask.toml or .taskres/)"
+                 (restask.toml or .restask/)"
             .to_string(),
     })
 }
@@ -465,11 +465,11 @@ pub fn exit_code(error: &TaskresError) -> i32 {
 }
 
 /// Computes the [`StatusReport`] for `vault` (§13.3): a read-only vault scan plus the
-/// index and outbox state under `.taskres/`.
+/// index and outbox state under `.restask/`.
 pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, TaskresError> {
     let cfg = load_vault_config(vault)?;
     let tasks = scan_local(vault, &cfg, clock)?;
-    let index = Index::load(&vault.join(".taskres"))?;
+    let index = Index::load(&vault.join(".restask"))?;
     let mut lists: BTreeMap<String, usize> = BTreeMap::new();
     let mut priorities: BTreeMap<String, usize> = BTreeMap::new();
     let mut done_today = 0usize;
@@ -498,7 +498,7 @@ pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, Ta
         lists,
         priorities,
         done_today,
-        outbox_backlog: outbox_backlog(&vault.join(".taskres")),
+        outbox_backlog: outbox_backlog(&vault.join(".restask")),
         last_sync,
     })
 }
@@ -908,7 +908,7 @@ fn run_rebuild(vault: &Path, clock: Arc<dyn Clock>) -> Result<i32, TaskresError>
     Ok(0)
 }
 
-/// Re-derives `.taskres/` index + cache from the vault (§13.3 `restask rebuild`): entries
+/// Re-derives `.restask/` index + cache from the vault (§13.3 `restask rebuild`): entries
 /// whose thumbprint is unchanged keep their etag, stale entries and caches are dropped,
 /// and the server is never contacted.
 fn rebuild_state(
@@ -916,7 +916,7 @@ fn rebuild_state(
     cfg: &VaultConfig,
     clock: &dyn Clock,
 ) -> Result<usize, TaskresError> {
-    let state_dir = vault.join(".taskres");
+    let state_dir = vault.join(".restask");
     let tasks = scan_local(vault, cfg, clock)?;
     let now = clock.now_utc();
     let old = Index::load(&state_dir)?;
@@ -999,7 +999,7 @@ fn load_vault_config(vault: &Path) -> Result<VaultConfig, TaskresError> {
     })
 }
 
-/// Number of operations parked in `.taskres/outbox.json` (0 when absent or unreadable).
+/// Number of operations parked in `.restask/outbox.json` (0 when absent or unreadable).
 fn outbox_backlog(state_dir: &Path) -> usize {
     let contents = match std::fs::read_to_string(state_dir.join("outbox.json")) {
         Ok(contents) => contents,

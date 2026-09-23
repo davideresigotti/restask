@@ -29,7 +29,7 @@ fn vault_config_defaults() {
     assert_eq!(cfg.track, vec!["**/*.md"]);
     assert_eq!(
         cfg.ignore,
-        vec![".taskres/**", ".obsidian/**", ".trash/**", ".git/**"]
+        vec![".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
     );
 
     let parsed = VaultConfig::from_str("").unwrap();
@@ -45,7 +45,7 @@ fn vault_config_defaults() {
 #[test]
 fn vault_config_round_trip() {
     let cfg = VaultConfig::from_str(
-        "done_heading = \"Archived\"\ninbox_file = \"Tasks.md\"\ntrack = [\"notes/*.md\"]\nignore = [\".taskres/**\"]\n",
+        "done_heading = \"Archived\"\ninbox_file = \"Tasks.md\"\ntrack = [\"notes/*.md\"]\nignore = [\".restask/**\"]\n",
     )
     .unwrap();
     let dir = tempdir().unwrap();
@@ -126,8 +126,8 @@ fn vault_matchers_ignore_wins_over_track() {
     assert!(matchers.is_tracked("TODO.md"));
     assert!(matchers.is_tracked("notes/idea.md"));
     assert!(matchers.is_tracked("projects/school/plan.md"));
-    assert!(!matchers.is_tracked(".taskres/index.json"));
-    assert!(!matchers.is_tracked(".taskres/tasks/taskres-01abc.ics"));
+    assert!(!matchers.is_tracked(".restask/index.json"));
+    assert!(!matchers.is_tracked(".restask/tasks/taskres-01abc.ics"));
     assert!(!matchers.is_tracked(".obsidian/app.json"));
     assert!(!matchers.is_tracked(".trash/old.md"));
     assert!(!matchers.is_tracked(".git/config"));

@@ -4,7 +4,7 @@
 
 ## §15 Obsidian Plugin (`plugins/obsidian/`, TypeScript, zero runtime deps)
 
-Runs on desktop **and mobile**; it is the phone-side half of the offline promise (mutates Markdown + `.taskres/tasks/*.ics`; never talks CalDAV — that is the daemon's job).
+Runs on desktop **and mobile**; it is the phone-side half of the offline promise (mutates Markdown + `.restask/tasks/*.ics`; never talks CalDAV — that is the daemon's job).
 
 ### 15.1 `markdown.ts` — grammar port
 
@@ -24,7 +24,7 @@ Filter rule: an option matches iff its keyword `startsWith` the typed fragment (
 
 ### 15.3 `vtodo.ts` — cache writer
 
-TS port of §8.1 (serialize only) for the exact subset the plugin produces (complete/uncomplete, priority). Emits the same bytes as Rust for the same task — asserted against `docs/contracts/vtodo-golden.ics` in `test/vtodo.test.ts`. Writes `.taskres/tasks/<uid>.ics` via `app.vault.adapter` (creating `.taskres/tasks/` as needed). Absent `.taskres/` (fresh mobile device) → skip silently.
+TS port of §8.1 (serialize only) for the exact subset the plugin produces (complete/uncomplete, priority). Emits the same bytes as Rust for the same task — asserted against `docs/contracts/vtodo-golden.ics` in `test/vtodo.test.ts`. Writes `.restask/tasks/<uid>.ics` via `app.vault.adapter` (creating `.restask/tasks/` as needed). Absent `.restask/` (fresh mobile device) → skip silently.
 
 ### 15.4 `main.ts` — commands & settings
 
