@@ -3,12 +3,14 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{FixedOffset, TimeZone, Utc};
 use tempfile::TempDir;
 
 use common::{FixedClock, MockCaldav};
+use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
 use restask::setup::{
@@ -217,5 +219,55 @@ async fn setup_is_non_destructive_on_rerun() {
         todo.matches("water the plants").count(),
         1,
         "no duplicate migrated lines"
+    );
+}
+
+#[test]
+fn setup_vault_falls_back_to_cwd_with_todo_md() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::write(vault.path().join("TODO.md"), "# Taskres\n").unwrap();
+
+    assert_eq!(
+        cli::resolve_setup_vault_with(None, None, vault.path(), true).unwrap(),
+        vault.path().to_path_buf()
+    );
+
+    let bare = tempfile::tempdir().unwrap();
+    assert_eq!(
+        cli::resolve_setup_vault_with(None, None, bare.path(), false).unwrap(),
+        bare.path().to_path_buf()
+    );
+    assert!(matches!(
+        cli::resolve_setup_vault_with(None, None, bare.path(), true),
+        Err(TaskresError::Config { .. })
+    ));
+}
+
+#[test]
+fn setup_vault_prefers_flags_env_and_markers_over_the_fallback() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::write(vault.path().join("restask.toml"), "").unwrap();
+    std::fs::write(vault.path().join("TODO.md"), "").unwrap();
+    let nested = vault.path().join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    assert_eq!(
+        cli::resolve_setup_vault_with(None, Some("/env/vault"), Path::new("/nowhere"), true)
+            .unwrap(),
+        PathBuf::from("/env/vault")
+    );
+    assert_eq!(
+        cli::resolve_setup_vault_with(None, None, &nested, true).unwrap(),
+        vault.path().to_path_buf()
+    );
+    assert_eq!(
+        cli::resolve_setup_vault_with(
+            Some(Path::new("/srv/other")),
+            Some("/env/vault"),
+            &nested,
+            true
+        )
+        .unwrap(),
+        PathBuf::from("/srv/other")
     );
 }

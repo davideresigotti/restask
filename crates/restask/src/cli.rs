@@ -182,7 +182,14 @@ pub struct StatusReport {
 /// [`Command::Rebuild`], `list show`/`list bind`) never construct a server client.
 pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
     let Cli { vault, command } = cli;
-    let vault = resolve_vault(vault.as_deref())?;
+    // `setup` carries its own vault fallback (§13.2 step 1): cwd, confirmed or
+    // TODO.md-marked — a fresh vault has no markers for the strict search to find.
+    let vault = match &command {
+        Command::Setup {
+            non_interactive, ..
+        } => resolve_setup_vault(vault.as_deref(), *non_interactive)?,
+        _ => resolve_vault(vault.as_deref())?,
+    };
     let config_path = machine_config_path();
     let machine = load_machine(&config_path)?;
     match command {
@@ -431,6 +438,40 @@ pub fn resolve_vault_with(
                  (restask.toml or .taskres/)"
             .to_string(),
     })
+}
+
+/// [`resolve_vault`] with the setup-only fallback (§13.2 step 1): when the strict chain
+/// (flag → env → upward search) misses, the start directory is accepted — confirmed
+/// interactively by [`crate::setup::run_interactive`]. `--non-interactive` cannot
+/// confirm, so it additionally requires a `TODO.md` in the start directory.
+pub fn resolve_setup_vault_with(
+    flag: Option<&Path>,
+    env: Option<&str>,
+    start: &Path,
+    non_interactive: bool,
+) -> Result<PathBuf, TaskresError> {
+    if let Ok(vault) = resolve_vault_with(flag, env, start) {
+        return Ok(vault);
+    }
+    if non_interactive && !start.join("TODO.md").is_file() {
+        return Err(TaskresError::Config {
+            path: "<vault>".to_string(),
+            reason: "no vault found: --non-interactive setup needs --vault, RESTASK_VAULT, \
+                     an existing vault marker, or a directory containing TODO.md"
+                .to_string(),
+        });
+    }
+    Ok(start.to_path_buf())
+}
+
+/// [`resolve_setup_vault_with`] against the process environment and working directory.
+pub fn resolve_setup_vault(
+    flag: Option<&Path>,
+    non_interactive: bool,
+) -> Result<PathBuf, TaskresError> {
+    let env = std::env::var(ENV_VAULT).ok();
+    let cwd = std::env::current_dir()?;
+    resolve_setup_vault_with(flag, env.as_deref(), &cwd, non_interactive)
 }
 
 /// [`resolve_vault_with`] against the process environment and working directory.
