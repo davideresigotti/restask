@@ -182,6 +182,10 @@ fn default_inbox_file() -> String {
     "TODO.md".to_string()
 }
 
+fn default_inbox_list() -> String {
+    "inbox".to_string()
+}
+
 fn default_track() -> Vec<String> {
     vec!["**/*.md".to_string()]
 }
@@ -201,6 +205,9 @@ pub struct VaultConfig {
     pub done_heading: String,
     /// Engine-managed inbox and aggregation view (vault-relative path).
     pub inbox_file: String,
+    /// The list the inbox file routes to (§5.2); its slug names the bound CalDAV
+    /// collection. `restask setup` records the user-chosen calendar here.
+    pub inbox_list: String,
     /// Vault-relative globs of files the engine may parse; `ignore` wins over `track`.
     pub track: Vec<String>,
     /// Vault-relative globs excluded even when matched by `track`.
@@ -212,6 +219,7 @@ impl Default for VaultConfig {
         Self {
             done_heading: default_done_heading(),
             inbox_file: default_inbox_file(),
+            inbox_list: default_inbox_list(),
             track: default_track(),
             ignore: default_ignore(),
         }

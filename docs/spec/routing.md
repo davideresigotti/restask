@@ -26,7 +26,7 @@ For a note at vault-relative path `p` (excluding the engine-managed inbox file):
 2. Nearest enclosing directory (walking up from `p`'s dir to vault root) containing a note with `restask-list-root: X` → list `slug(X)`. Deeper roots shadow shallower ones.
 3. Otherwise → **`LocalOnly`**: no UID assignment, no VTODO, no TODO.md mirror, file untouched.
 
-The inbox file (`TODO.md` by default) is engine-managed and routes to the **Inbox** list.
+The inbox file (`TODO.md` by default) is engine-managed and routes to the list named by `inbox_list` in `restask.toml` (§14.1, default `inbox`) — the calendar the user bound TODO.md to during setup (§13.2).
 
 ```rust
 pub enum NoteRouting { LocalOnly, List(ListSlug) }
@@ -53,11 +53,11 @@ impl Router {
 2. Areas/Home Lab/Alarm.md         (no marker)                   → home-lab (inherited)
 University.md                      restask-list: University      → university (binds to existing calendar)
 Inbox.md                           (no marker)                   → LocalOnly
-TODO.md                            (engine-managed)              → inbox list
+TODO.md                            (engine-managed)              → inbox_list (default inbox)
 ```
 
 ### 5.4 List ⇄ Radicale collection mapping
 
 - List `Home Lab` → slug `home-lab` → CalDAV collection `<url>/<user>/home-lab/`, `MKCOL`'d on first push (displayname `Home Lab`, `supported-calendar-component-set: VTODO` only) when `caldav.allow_create_lists = true`.
-- **Wizard-confirmed binding**: `restask setup` proposes bindings by case-insensitive slug match against existing collections and records them in machine config `[[lists]]` (e.g. `University` → existing `university`; Inbox → existing `inbox`). Bound collections may contain foreign resources — see §10.5 foreign rules.
+- **Setup-confirmed inbox binding**: `restask setup` binds TODO.md to **one existing server calendar** the user types by name (case-insensitive, re-prompted on a miss; aborts when the server has no collections — the binding is required for sync). The typed calendar's slug becomes `vault.inbox_list` (§14.1), TODO.md carries it as `restask-list:` frontmatter, and the binding is recorded in machine config `[[lists]]`. Other lists map to same-named collections via their slug (`MKCOL` on first push when `caldav.allow_create_lists`); users declare them by hand with `restask-list`/`restask-list-root` frontmatter. Bound collections may contain foreign resources — see §10.5 foreign rules.
 - Moving a task between differently-routed notes keeps its UID and **moves** the VTODO between collections (§11 R9).

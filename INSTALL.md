@@ -32,7 +32,7 @@ The wizard will:
 1. Create `restask.toml` (vault defaults) and the `.restask/` state directory.
 2. Adopt an existing `TODO.md` — the old file is backed up to `TODO.pre-restask-<timestamp>.md`, and its checkbox lines are migrated into the new `## Inbox`.
 3. Ask for your Radicale URL and credentials (password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
-4. Show every list it found in your vault (from `restask-list`/`restask-list-root` markers, plus the Inbox) and the server's collections, and let you **bind, create, or keep local-only** each one (e.g. `University.md` → your existing `university` calendar, `Home Lab/` folder → a new `home-lab` list). Extra bindings can be entered manually as `list=collection`.
+4. Show the server's calendars and ask which one `TODO.md` binds to — type its name (e.g. `inbox`). This binding is required for sync; a wrong name re-prompts, and a server with no calendars aborts setup. Every other list is up to you: add `restask-list`/`restask-list-root` frontmatter to your notes and each list syncs to the same-named collection.
 5. Run the first sync.
 
 ### How tasks are routed

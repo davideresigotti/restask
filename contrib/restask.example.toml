@@ -4,5 +4,7 @@
 
 done_heading = "Done"      # heading text that starts the completed-records region
 inbox_file   = "TODO.md"   # engine-managed inbox + aggregation view
+inbox_list   = "inbox"     # list the inbox routes to; `restask setup` records the
+                           # calendar you bind TODO.md to
 track  = ["**/*.md"]       # globset patterns (applied after ignore)
 ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]

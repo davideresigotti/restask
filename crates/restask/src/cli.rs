@@ -1042,7 +1042,10 @@ fn scan_local(
         })
         .collect();
     let router = Router::build(&metas)?;
-    let inbox = inbox_slug()?;
+    let inbox = ListSlug::from_name(&cfg.inbox_list).map_err(|_| TaskresError::Validation {
+        field: "inbox_list",
+        reason: format!("cannot slugify the inbox list name `{}`", cfg.inbox_list),
+    })?;
 
     let mut local: BTreeMap<TaskUid, Task> = BTreeMap::new();
     let mut seen: BTreeMap<TaskUid, String> = BTreeMap::new();
@@ -1122,14 +1125,6 @@ fn scan_local(
         }
     }
     Ok(local)
-}
-
-/// The engine-managed inbox list (§5.2): TODO.md routes to the `inbox` collection.
-fn inbox_slug() -> Result<ListSlug, TaskresError> {
-    ListSlug::from_name("Inbox").map_err(|_| TaskresError::Validation {
-        field: "inbox",
-        reason: "cannot slugify the inbox list name".to_string(),
-    })
 }
 
 /// File mtime as a UTC instant (the engine's scan semantics).

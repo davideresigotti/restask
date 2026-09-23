@@ -36,8 +36,8 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 - **Route a single note** — frontmatter `restask-list: University` sends that note's tasks to list `University`.
 - **Route a whole folder** — a note carrying `restask-list-root: Home Lab` becomes that folder's *root note* and declares the list for the whole directory, recursively. The nearest enclosing root wins; deeper roots shadow shallower ones.
 - A note may carry both markers: `restask-list` wins for the file, `restask-list-root` still declares the folder.
-- The `TODO.md` inbox is engine-managed and routes to the **Inbox** list.
-- A list maps to a Radicale collection via its slug (`Home Lab` → `home-lab` → `http://<radicale-host>:5232/<user>/home-lab/`); the collection is created on first push (`caldav.allow_create_lists`) or bound to an existing one (e.g. `University` → the existing `university` calendar) during `restask setup`.
+- The `TODO.md` inbox is engine-managed and routes to the list recorded in `inbox_list` (`restask.toml`, default `inbox`) — the calendar you bind it to during `restask setup`.
+- A list maps to a Radicale collection via its slug (`Home Lab` → `home-lab` → `http://<radicale-host>:5232/<user>/home-lab/`); the collection is created on first push (`caldav.allow_create_lists`). `restask setup` binds TODO.md to one existing server calendar of your choice; every other list is declared by you with frontmatter.
 - Moving a task between differently-routed notes keeps its UID and **moves** the VTODO between collections.
 
 `restask doctor` verifies the whole chain (markers, shadows, conflicts, bindings) — see [INSTALL.md](INSTALL.md) to install the engine, run the setup wizard, and deploy the daemon on your always-on device (systemd user unit or Docker).

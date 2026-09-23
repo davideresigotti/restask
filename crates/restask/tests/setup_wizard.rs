@@ -1,4 +1,4 @@
-//! Setup wizard tests (§13.2): vault-list discovery, TODO.md adoption, and the
+//! Setup wizard tests (§13.2): TODO.md adoption, the typed inbox binding, and the
 //! non-interactive full setup against the in-memory CalDAV mock.
 
 mod common;
@@ -13,7 +13,7 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
-use restask::setup::{adopt_todo_md, parse_collections, run_setup, SetupArgs};
+use restask::setup::{adopt_todo_md, match_collection, parse_collections, run_setup, SetupArgs};
 use restask::store::Index;
 use restask::TaskresError;
 
@@ -43,6 +43,7 @@ fn args(vault: &TempDir) -> SetupArgs {
         username: "me".to_string(),
         password_env: Some("RESTASK_TEST_PASS".to_string()),
         password_file: None,
+        inbox_collection: None,
         collections: vec![("Home".to_string(), "home".to_string())],
     }
 }
@@ -85,9 +86,11 @@ async fn non_interactive_setup_end_to_end() {
         .await
         .unwrap();
 
-    // Step 1: §14-default restask.toml written, `.restask/` created.
+    // Step 1: §14-default restask.toml written, `.restask/` created; the inbox list
+    // stays the §14 default because no inbox binding was requested.
     let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
     assert_eq!(cfg.done_heading, "Done");
+    assert_eq!(cfg.inbox_list, "inbox");
     assert!(vault.path().join(".restask").is_dir());
 
     // Step 2: verbatim backup, fresh marker scaffold, migrated line present with a UID.
@@ -96,6 +99,7 @@ async fn non_interactive_setup_end_to_end() {
     assert!(backup.contains("- [ ] water the plants"));
     assert!(backup.contains("```tasks"));
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.starts_with("---\nrestask-list: inbox\n---\n\n"));
     assert!(todo.contains(MARKER));
     assert!(todo.contains("## Inbox"));
     assert!(todo.contains("- [ ] water the plants"));
@@ -210,38 +214,91 @@ fn setup_vault_prefers_flags_env_and_markers_over_the_fallback() {
     );
 }
 
-#[test]
-fn discover_lists_reports_inbox_and_routed_markers() {
-    let vault = tempfile::tempdir().unwrap();
-    std::fs::write(vault.path().join("TODO.md"), "- [ ] inbox only\n").unwrap();
-    std::fs::write(
-        vault.path().join("University.md"),
-        "---\nrestask-list: University\n---\n\n- [ ] study\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(vault.path().join("2. Areas/Home Lab")).unwrap();
-    std::fs::write(
-        vault.path().join("2. Areas/Home Lab/Home Lab.md"),
-        "---\nrestask-list-root: Home Lab\n---\n\n- [ ] server\n",
-    )
-    .unwrap();
-    std::fs::write(
-        vault.path().join("2. Areas/Home Lab/Security.md"),
-        "- [ ] inherit\n",
-    )
-    .unwrap();
-    std::fs::write(vault.path().join("Unmarked.md"), "- [ ] untouched\n").unwrap();
-    std::fs::create_dir_all(vault.path().join(".restask")).unwrap();
-    std::fs::write(vault.path().join(".restask/index.json"), "{}").unwrap();
+#[tokio::test]
+async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    let mut setup_args = args(&vault);
+    setup_args.inbox_collection = Some("Tasks".to_string());
 
-    let lists = restask::setup::discover_vault_lists(vault.path());
+    let summary = run_setup(setup_args, mock.clone(), clock()).await.unwrap();
+
+    // restask.toml records the chosen calendar as the inbox list; TODO.md carries it in
+    // the frontmatter and every migrated task routes to the `tasks` collection.
+    let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
+    assert_eq!(cfg.inbox_list, "tasks");
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.starts_with("---\nrestask-list: tasks\n---\n\n"));
+    assert!(todo.contains("- [ ] water the plants"));
+    assert_eq!(
+        summary.collections,
+        vec!["tasks".to_string(), "home".to_string()]
+    );
+    assert!(mock.collection_names().iter().any(|slug| slug == "tasks"));
+    assert!(mock.collection_names().iter().any(|slug| slug == "home"));
+
+    let machine = MachineConfig::load(&vault.path().join("machine.toml")).unwrap();
+    assert_eq!(machine.lists.len(), 2);
+    let inbox_binding = machine
+        .lists
+        .iter()
+        .find(|binding| binding.collection == "tasks")
+        .unwrap();
+    assert_eq!(inbox_binding.name, "tasks");
+    assert_eq!(inbox_binding.collection, "tasks");
+
+    let index = Index::load(&vault.path().join(".restask")).unwrap();
+    let entry = index.entries.values().next().unwrap();
+    assert_eq!(entry.list.as_str(), "tasks");
+    assert_eq!(mock.resource_names("tasks").len(), 1);
+}
+
+#[test]
+fn from_flags_lifts_the_inbox_binding_out_of_collections() {
+    let args = SetupArgs::from_flags(
+        PathBuf::from("/vault"),
+        PathBuf::from("/machine.toml"),
+        Some("http://radicale.local:5232".to_string()),
+        Some("me".to_string()),
+        Some("RESTASK_TEST_PASS".to_string()),
+        vec![
+            ("Home".to_string(), "home".to_string()),
+            ("inbox".to_string(), "Tasks".to_string()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(args.inbox_collection.as_deref(), Some("Tasks"));
+    assert_eq!(
+        args.collections,
+        vec![("Home".to_string(), "home".to_string())]
+    );
+}
+
+#[test]
+fn match_collection_is_case_insensitive_and_canonical() {
+    let collections = vec![
+        restask::caldav::CollectionInfo {
+            href: "/me/inbox/".to_string(),
+            slug: "inbox".to_string(),
+            display_name: Some("Inbox".to_string()),
+            supports_vtodo: true,
+        },
+        restask::caldav::CollectionInfo {
+            href: "/me/Tasks/".to_string(),
+            slug: "Tasks".to_string(),
+            display_name: None,
+            supports_vtodo: true,
+        },
+    ];
 
     assert_eq!(
-        lists,
-        vec![
-            ("Inbox".to_string(), "inbox".to_string()),
-            ("University".to_string(), "university".to_string()),
-            ("Home Lab".to_string(), "home-lab".to_string()),
-        ]
+        match_collection("tasks", &collections).map(|collection| collection.slug.as_str()),
+        Some("Tasks")
     );
+    assert_eq!(
+        match_collection("  INBOX  ", &collections).map(|collection| collection.slug.as_str()),
+        Some("inbox")
+    );
+    assert!(match_collection("", &collections).is_none());
+    assert!(match_collection("family", &collections).is_none());
 }

@@ -63,8 +63,9 @@ Rules:
 3. **Local-only by default.** Unrouted notes are never parsed (beyond frontmatter), never
    modified, never synced.
 4. **Lists = collections.** Tasks route to CalDAV lists via frontmatter (`restask-list`,
-   `restask-list-root`, nearest-root-wins); one list = one Radicale collection; bindings to
-   existing collections are wizard-confirmed.
+   `restask-list-root`, nearest-root-wins); one list = one Radicale collection. `restask
+   setup` binds TODO.md to one existing server calendar typed by name (`vault.inbox_list`);
+   every other list is declared by the user with frontmatter.
 5. **Foreign resources are safe.** In bound collections: VEVENTs never touched; foreign VTODOs
    adopted with a fresh UID; only `taskres-*` resources managed.
 6. **Timestamps follow the §4 contract** (`docs/spec/domain.md`): date-only Markdown → midnight

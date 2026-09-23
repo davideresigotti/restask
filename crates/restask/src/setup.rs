@@ -6,11 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::caldav::{CaldavClient, CaldavPort};
+use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
 use crate::config::{CaldavConfig, ListBinding, MachineConfig, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
 use crate::markdown::{mutator, parse, MARKER};
-use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::sync::{Engine, ReconcileReport};
 use crate::TaskresError;
 
@@ -76,25 +75,34 @@ pub struct SetupArgs {
     pub password_env: Option<String>,
     /// Passwd file holding the password (interactive path).
     pub password_file: Option<PathBuf>,
+    /// Calendar TODO.md (the inbox) is bound to, recorded as `vault.inbox_list` (§14.1).
+    /// Interactive setup always sets it; non-interactive setup derives it from a
+    /// `--collection inbox=<calendar>` flag.
+    pub inbox_collection: Option<String>,
     /// `list=collection` bindings from `--collection` flags (repeatable).
     pub collections: Vec<(String, String)>,
 }
 
 impl SetupArgs {
     /// Validates the §13.2 non-interactive flags (`--url`, `--username`, `--password-env`
-    /// are all required when `--non-interactive` is set).
+    /// are all required when `--non-interactive` is set). A binding named `inbox`
+    /// (case-insensitive) is lifted into [`SetupArgs::inbox_collection`].
     pub fn from_flags(
         vault: PathBuf,
         config_path: PathBuf,
         url: Option<String>,
         username: Option<String>,
         password_env: Option<String>,
-        collections: Vec<(String, String)>,
+        mut collections: Vec<(String, String)>,
     ) -> Result<Self, TaskresError> {
         let missing = |flag: &str| TaskresError::Validation {
             field: "setup",
             reason: format!("--{flag} is required with --non-interactive"),
         };
+        let inbox_index = collections
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case("inbox"));
+        let inbox_collection = inbox_index.map(|index| collections.remove(index).1);
         Ok(Self {
             vault,
             config_path,
@@ -102,6 +110,7 @@ impl SetupArgs {
             username: username.ok_or_else(|| missing("username"))?,
             password_env: Some(password_env.ok_or_else(|| missing("password-env"))?),
             password_file: None,
+            inbox_collection,
             collections,
         })
     }
@@ -181,54 +190,30 @@ pub async fn run_interactive(
     let passwd = dir.join("radicale.passwd");
     write_secret(&passwd, &password)?;
 
-    // Step 5 (§13.2): discover the vault's routed lists and the server's collections, then
-    // propose create / bind-existing / keep-local-only per list; the free-form
-    // `list=collection` prompt stays available for anything discovery did not cover.
-    let allow_create = MachineConfig::load(&config_path)
-        .map(|machine| machine.caldav.allow_create_lists)
-        .unwrap_or(true);
-    let lists = discover_vault_lists(&vault);
+    // Step 4 (§13.2): the one required binding — TODO.md (the inbox) is bound to a
+    // calendar chosen by name from the server's list. Other lists are declared by hand
+    // with `restask-list` frontmatter in the notes; no per-list wizard probing happens.
     let server_collections = client.list_collections().await?;
-    if !server_collections.is_empty() {
-        let names: Vec<&str> = server_collections.iter().map(|c| c.slug.as_str()).collect();
-        println!("server collections: {}", names.join(", "));
+    if server_collections.is_empty() {
+        return Err(TaskresError::Validation {
+            field: "collections",
+            reason: "no calendars found on the server; create one and re-run `restask setup` \
+                     — binding TODO.md is required for sync"
+                .to_string(),
+        });
     }
-    let mut collections = Vec::new();
-    for (display, slug) in &lists {
-        let existing = server_collections
-            .iter()
-            .find(|c| c.slug.eq_ignore_ascii_case(slug));
-        let mut options = Vec::new();
-        let mut actions: Vec<Option<String>> = Vec::new();
-        if let Some(collection) = existing {
-            options.push(format!("bind to existing collection `{}`", collection.slug));
-            actions.push(Some(collection.slug.clone()));
+    let names: Vec<&str> = server_collections
+        .iter()
+        .map(|collection| collection.slug.as_str())
+        .collect();
+    println!("Server calendars: {}", names.join(", "));
+    let inbox = loop {
+        let typed = crate::tui::prompt("Bind TODO.md to (insert one of the calendars above):")?;
+        match match_collection(&typed, &server_collections) {
+            Some(collection) => break collection.slug.clone(),
+            None => println!("`{typed}` is not one of: {}", names.join(", ")),
         }
-        if allow_create {
-            options.push(format!("create the `{slug}` collection"));
-            actions.push(Some(slug.clone()));
-        }
-        options.push("keep local-only (skip)".to_string());
-        actions.push(None);
-        let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
-        let choice =
-            crate::tui::select(&format!("List `{display}` (slug `{slug}`):"), &option_refs)?;
-        if let Some(collection) = &actions[choice] {
-            collections.push((display.clone(), collection.clone()));
-        }
-    }
-    loop {
-        let line = crate::tui::prompt("Bind list=collection (empty to finish):")?;
-        if line.is_empty() {
-            break;
-        }
-        match line.split_once('=') {
-            Some((name, collection)) if !name.is_empty() && !collection.is_empty() => {
-                collections.push((name.to_string(), collection.to_string()));
-            }
-            _ => println!("expected list=collection"),
-        }
-    }
+    };
 
     let args = SetupArgs {
         vault,
@@ -237,93 +222,25 @@ pub async fn run_interactive(
         username,
         password_env: None,
         password_file: Some(passwd),
-        collections,
+        inbox_collection: Some(inbox),
+        collections: Vec::new(),
     };
     let summary = prepare_and_sync(args, client, clock).await?;
     print_summary(&summary);
     Ok(())
 }
 
-/// Walks the vault (skipping hidden directories, so `.restask/` is never entered) and
-/// collects the distinct routed lists (§5): the engine-managed Inbox first, then every
-/// list resolved from `restask-list`/`restask-list-root` markers, in first-seen file
-/// order. Returns `(display name, slug)` pairs. Routing conflicts collapse to the
-/// Inbox-only set — `restask doctor` surfaces them.
-pub fn discover_vault_lists(vault: &Path) -> Vec<(String, String)> {
-    let cfg = VaultConfig::load(&vault.join("restask.toml")).unwrap_or_default();
-    let mut metas: Vec<NoteMeta> = Vec::new();
-    let mut displays: Vec<(String, String)> = Vec::new();
-    let mut stack = vec![vault.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut children: Vec<_> = entries.flatten().collect();
-        children.sort_by_key(|entry| entry.file_name());
-        for entry in children {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy().to_string();
-            if path.is_dir() {
-                if !name.starts_with('.') {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if !name.ends_with(".md") {
-                continue;
-            }
-            let Ok(rel) = path.strip_prefix(vault) else {
-                continue;
-            };
-            let rel = rel
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/");
-            if rel == cfg.inbox_file {
-                continue;
-            }
-            let Ok(contents) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let (file_list, folder_list) = scan_frontmatter(&contents);
-            if let Some(display) = file_list.as_ref().or(folder_list.as_ref()) {
-                if let Ok(slug) = ListSlug::from_name(display) {
-                    let slug = slug.as_str().to_string();
-                    if !displays.iter().any(|(s, _)| s == &slug) {
-                        displays.push((slug, display.clone()));
-                    }
-                }
-            }
-            metas.push(NoteMeta {
-                path: rel,
-                file_list,
-                folder_list,
-            });
-        }
-    }
-    let mut out = vec![("Inbox".to_string(), "inbox".to_string())];
-    let Ok(router) = Router::build(&metas) else {
-        return out;
-    };
-    for meta in &metas {
-        if let NoteRouting::List(slug) = router.resolve(&meta.path, meta.file_list.as_deref()) {
-            let slug = slug.as_str().to_string();
-            if out.iter().any(|(_, s)| s == &slug) {
-                continue;
-            }
-            let display = displays
-                .iter()
-                .find(|(s, _)| s == &slug)
-                .map(|(_, d)| d.clone())
-                .unwrap_or_else(|| {
-                    ListSlug::from_name(&slug)
-                        .map(|s| s.display_name())
-                        .unwrap_or(slug.clone())
-                });
-            out.push((display, slug));
-        }
-    }
-    out
+/// Case-insensitively matches a typed calendar name against the server's collections
+/// (§13.2 step 4), returning the canonical entry so the binding and the TODO.md
+/// frontmatter always use the server's own slug. `None` means the wizard re-prompts.
+pub fn match_collection<'a>(
+    typed: &str,
+    collections: &'a [CollectionInfo],
+) -> Option<&'a CollectionInfo> {
+    let typed = typed.trim();
+    collections
+        .iter()
+        .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
 }
 
 /// Shared setup body: vault scaffold, TODO.md adoption, machine-config records, bound
@@ -337,7 +254,7 @@ async fn prepare_and_sync<C: CaldavPort>(
 
     // Step 1 — vault: §14-default restask.toml when missing, plus `.restask/`.
     let config_path = vault.join("restask.toml");
-    let cfg = if config_path.is_file() {
+    let mut cfg = if config_path.is_file() {
         VaultConfig::load(&config_path).map_err(|error| config_error(&config_path, &error))?
     } else {
         let cfg = VaultConfig::default();
@@ -345,18 +262,32 @@ async fn prepare_and_sync<C: CaldavPort>(
             .map_err(|error| config_error(&config_path, &error))?;
         cfg
     };
+    // The user-chosen calendar becomes the inbox list (§5.2); restask.toml carries it so
+    // every synced device renders TODO.md identically (§7 determinism).
+    if let Some(inbox_collection) = &args.inbox_collection {
+        let slug = ListSlug::from_name(inbox_collection)?;
+        if cfg.inbox_list != slug.as_str() {
+            cfg.inbox_list = slug.as_str().to_string();
+            cfg.save(&config_path)
+                .map_err(|error| config_error(&config_path, &error))?;
+        }
+    }
     std::fs::create_dir_all(vault.join(".restask"))?;
 
     // Step 2 — TODO.md adoption, only when the file exists and lacks the §7 marker.
     let inbox = vault.join(&cfg.inbox_file);
     let mut backup = None;
     let mut migrated = 0usize;
+    let header = format!(
+        "---\nrestask-list: {}\n---\n\n# Tasks\n\n{MARKER}\n\n## Inbox\n",
+        cfg.inbox_list
+    );
     if inbox.is_file() {
         let existing = std::fs::read_to_string(&inbox)?;
         if !existing.contains(MARKER) {
             let outcome = adopt_todo_md(&existing, clock.as_ref());
             mutator::write_atomic(&vault.join(&outcome.backup), &existing)?;
-            let mut fresh = format!("# Tasks\n\n{MARKER}\n\n## Inbox\n");
+            let mut fresh = header.clone();
             for text in &outcome.migrated {
                 fresh.push_str(&format!("- [ ] {text}\n"));
             }
@@ -365,8 +296,7 @@ async fn prepare_and_sync<C: CaldavPort>(
             backup = Some(outcome.backup);
         }
     } else {
-        let fresh = format!("# Tasks\n\n{MARKER}\n\n## Inbox\n");
-        mutator::write_atomic(&inbox, &fresh)?;
+        mutator::write_atomic(&inbox, &header)?;
     }
 
     // Steps 3–5 — machine config (endpoint + secret reference, never the secret) and the
@@ -385,6 +315,17 @@ async fn prepare_and_sync<C: CaldavPort>(
         lists: Vec::new(),
     };
     let mut collections = Vec::new();
+    if let Some(inbox_collection) = &args.inbox_collection {
+        let slug = ListSlug::from_name(inbox_collection)?;
+        caldav
+            .ensure_collection(&slug, &slug.display_name())
+            .await?;
+        collections.push(slug.as_str().to_string());
+        machine.lists.push(ListBinding {
+            name: cfg.inbox_list.clone(),
+            collection: slug.as_str().to_string(),
+        });
+    }
     for (name, collection) in &args.collections {
         let slug = ListSlug::from_name(collection)?;
         caldav.ensure_collection(&slug, name).await?;

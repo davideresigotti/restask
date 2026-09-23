@@ -242,7 +242,7 @@ pub fn temp_vault() -> TempDir {
     write_vault_file(
         &dir,
         "TODO.md",
-        &format!("# Tasks\n\n{MARKER}\n\n## Inbox\n"),
+        &format!("---\nrestask-list: inbox\n---\n\n# Tasks\n\n{MARKER}\n\n## Inbox\n"),
     );
     dir
 }

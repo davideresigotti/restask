@@ -380,10 +380,7 @@ impl<C: CaldavPort> Engine<C> {
         let now = self.clock.now_utc();
         let task = Task {
             uid: TaskUid::generate(),
-            list: inbox_slug().ok_or_else(|| TaskresError::Validation {
-                field: "inbox",
-                reason: "cannot slugify the inbox list name".to_string(),
-            })?,
+            list: self.inbox_list()?,
             text: text.to_string(),
             status: Status::Active,
             priority,
@@ -518,10 +515,7 @@ impl<C: CaldavPort> Engine<C> {
             let (path, contents) = &files[i];
             let meta = &metas[i];
             let routing = if path.as_str() == self.cfg.inbox_file {
-                NoteRouting::List(inbox_slug().ok_or_else(|| TaskresError::Validation {
-                    field: "inbox",
-                    reason: "cannot slugify the inbox list name".to_string(),
-                })?)
+                NoteRouting::List(self.inbox_list()?)
             } else {
                 router.resolve(path, meta.file_list.as_deref())
             };
@@ -532,6 +526,18 @@ impl<C: CaldavPort> Engine<C> {
             self.scan_file(path, contents, &list, &mut scan, &mut seen)?;
         }
         Ok(scan)
+    }
+
+    /// The inbox list (§5.2): the inbox file routes to `vault.inbox_list` (§14.1), whose
+    /// slug names the CalDAV collection the user bound TODO.md to during setup.
+    fn inbox_list(&self) -> Result<ListSlug, TaskresError> {
+        ListSlug::from_name(&self.cfg.inbox_list).map_err(|_| TaskresError::Validation {
+            field: "inbox_list",
+            reason: format!(
+                "cannot slugify the inbox list name `{}`",
+                self.cfg.inbox_list
+            ),
+        })
     }
 
     /// Parses one routed note, registers unregistered lines, and records its tasks.
@@ -753,13 +759,6 @@ fn dominant_ending(contents: &str) -> &'static str {
 fn file_mtime(path: &Path) -> Result<DateTime<Utc>, TaskresError> {
     let modified = std::fs::metadata(path)?.modified()?;
     Ok(modified.into())
-}
-
-/// The engine-managed inbox list (§5.2): TODO.md routes to `Inbox` → `inbox`.
-fn inbox_slug() -> Option<ListSlug> {
-    static SLUG: std::sync::OnceLock<Option<ListSlug>> = std::sync::OnceLock::new();
-    SLUG.get_or_init(|| ListSlug::from_name("Inbox").ok())
-        .clone()
 }
 
 /// Recursively collects tracked files as `(vault-relative path, contents)` pairs.

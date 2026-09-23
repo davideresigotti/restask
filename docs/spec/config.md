@@ -9,6 +9,8 @@
 ```toml
 done_heading = "Done"      # heading text that starts the completed-records region
 inbox_file   = "TODO.md"   # engine-managed inbox + aggregation view
+inbox_list   = "inbox"     # list the inbox file routes to (§5.2); setup records the
+                           # user-chosen calendar's slug here
 track  = ["**/*.md"]       # globset patterns (applied after ignore)
 ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```
@@ -30,9 +32,10 @@ password_file = "~/.config/restask/radicale.passwd"  # chmod 600; OR password_en
 poll_secs = 300
 allow_create_lists = true           # MKCOL missing collections on first push
 
-# Wizard-recorded bindings (list display name → Radicale collection)
+# Wizard-recorded bindings (list name → Radicale collection; setup records the
+# TODO.md inbox binding, other lists are declared via frontmatter by the user)
 [[lists]]
-name = "Inbox"
+name = "inbox"
 collection = "inbox"
 
 [[lists]]
