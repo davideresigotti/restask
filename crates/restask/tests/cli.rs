@@ -508,7 +508,6 @@ async fn doctor_report(
         machine,
         Some(mock),
         &vault.path().join("machine.toml"),
-        None,
         clock(),
     )
     .await
@@ -546,9 +545,7 @@ async fn doctor_healthy_reports_all_ok_and_exit_zero() {
     assert_eq!(status_of(&report, "caldav-auth"), Some(DoctorStatus::Warn));
 
     // Through the CLI the report's exit code is the process exit code.
-    let code = run(Command::Doctor { server: None }, vault.path(), &mock)
-        .await
-        .unwrap();
+    let code = run(Command::Doctor {}, vault.path(), &mock).await.unwrap();
     assert_eq!(code, 0);
 }
 

@@ -48,12 +48,6 @@ pub struct Cli {
 pub enum Command {
     /// First-time setup wizard (§13.2).
     Setup {
-        /// SSH alias for read-only server discovery (§13.2 step 3).
-        #[arg(long)]
-        server: Option<String>,
-        /// Docker root used for server discovery.
-        #[arg(long, default_value = "/opt/docker")]
-        docker_root: String,
         /// CalDAV base URL (required with `--non-interactive`).
         #[arg(long)]
         url: Option<String>,
@@ -110,11 +104,7 @@ pub enum Command {
     /// Re-derive index and cache state from the vault; the server is never touched.
     Rebuild,
     /// Diagnose config, routing, vault, and server health (§13.3).
-    Doctor {
-        /// SSH alias for a read-only server-compose probe.
-        #[arg(long)]
-        server: Option<String>,
-    },
+    Doctor {},
     /// Manage list bindings (§13.2 step 5 records).
     List {
         /// The list action.
@@ -195,22 +185,13 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
     match command {
         Command::Setup {
             non_interactive,
-            server,
-            docker_root,
             url,
             username,
             password_env,
             collections,
         } => {
             if !non_interactive {
-                setup::run_interactive(
-                    vault,
-                    server,
-                    &docker_root,
-                    config_path,
-                    Arc::new(SystemClock),
-                )
-                .await?;
+                setup::run_interactive(vault, config_path, Arc::new(SystemClock)).await?;
                 return Ok(0);
             }
             let args = setup::SetupArgs::from_flags(
@@ -242,7 +223,7 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
             setup::print_summary(&summary);
             Ok(0)
         }
-        Command::Doctor { server } => {
+        Command::Doctor {} => {
             // Diagnostics must run even when the machine config is unusable, so the
             // client is best-effort here instead of the catch-all below.
             let caldav = daemon::build_client(&machine).ok();
@@ -251,7 +232,6 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
                 &machine,
                 caldav,
                 &config_path,
-                server.as_deref(),
                 Arc::new(SystemClock),
             )
             .await?;
@@ -300,15 +280,13 @@ pub async fn run_with<C: CaldavPort>(
     match command {
         Command::Setup {
             non_interactive,
-            server,
-            docker_root,
             url,
             username,
             password_env,
             collections,
         } => {
             if !non_interactive {
-                setup::run_interactive(vault, server, &docker_root, config_path, clock).await?;
+                setup::run_interactive(vault, config_path, clock).await?;
                 return Ok(0);
             }
             let args = setup::SetupArgs::from_flags(
@@ -369,16 +347,8 @@ pub async fn run_with<C: CaldavPort>(
         Command::Undone { selector } => {
             set_done(&vault, machine, caldav, clock, selector, false).await
         }
-        Command::Doctor { server } => {
-            let report = doctor(
-                &vault,
-                &machine,
-                Some(caldav),
-                &config_path,
-                server.as_deref(),
-                clock,
-            )
-            .await?;
+        Command::Doctor {} => {
+            let report = doctor(&vault, &machine, Some(caldav), &config_path, clock).await?;
             print_doctor(&report);
             Ok(report.exit_code)
         }
@@ -580,14 +550,13 @@ pub struct DoctorReport {
 /// `ListConflict`), vault scan, TODO marker, sync-conflict files, CalDAV reachability,
 /// and the §17 no-auth hard warning (config-layer when no password source is set, plus
 /// an active wrong-password probe against the real endpoint). `caldav` is `None` when no
-/// endpoint is configured; the optional `--server SSH` alias adds a read-only compose
-/// probe. Check failures land in the report with the derived exit code, never as `Err`.
+/// endpoint is configured. Check failures land in the report with the derived exit code,
+/// never as `Err`.
 pub async fn doctor<C: CaldavPort>(
     vault: &Path,
     machine: &MachineConfig,
     caldav: Option<C>,
     config_path: &Path,
-    server: Option<&str>,
     clock: Arc<dyn Clock>,
 ) -> Result<DoctorReport, TaskresError> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
@@ -706,36 +675,6 @@ pub async fn doctor<C: CaldavPort>(
             } else {
                 checks.push(check("sync-conflict", DoctorStatus::Ok, "none"));
             }
-        }
-    }
-
-    // Optional read-only SSH probe (§13.3 `--server`, default docker root of §13.2).
-    if let Some(alias) = server {
-        match std::process::Command::new("ssh")
-            .args([alias, "cat", "/opt/docker/radicale/docker-compose.yml"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let facts = setup::parse_radicale_compose(&String::from_utf8_lossy(&output.stdout));
-                if facts.host_port.is_some() {
-                    checks.push(check(
-                        "server-ssh",
-                        DoctorStatus::Ok,
-                        format!("{alias}: radicale compose readable"),
-                    ));
-                } else {
-                    checks.push(check(
-                        "server-ssh",
-                        DoctorStatus::Warn,
-                        format!("{alias}: compose has no 5232 mapping — confirm the URL manually"),
-                    ));
-                }
-            }
-            _ => checks.push(check(
-                "server-ssh",
-                DoctorStatus::Warn,
-                format!("{alias}: compose not readable via ssh"),
-            )),
         }
     }
 

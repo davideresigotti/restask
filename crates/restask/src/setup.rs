@@ -1,16 +1,16 @@
 //! Setup wizard (§13.2): composes the vault scaffold, TODO.md adoption, machine-config
 //! records, list bindings, and the first full reconcile. The pure/plan surfaces
-//! ([`parse_radicale_compose`], [`adopt_todo_md`], [`run_setup`]) carry the tested
-//! behavior; [`run_interactive`] is a thin TTY shell over them.
+//! ([`adopt_todo_md`], [`run_setup`]) carry the tested behavior; [`run_interactive`] is a
+//! thin TTY shell over them.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use crate::caldav::{CaldavClient, CaldavPort};
 use crate::config::{CaldavConfig, ListBinding, MachineConfig, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
 use crate::markdown::{mutator, parse, MARKER};
+use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::sync::{Engine, ReconcileReport};
 use crate::TaskresError;
 
@@ -27,79 +27,6 @@ pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, Taskre
             }),
         })
         .collect()
-}
-
-/// Compose discovery facts (§13.2 step 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ComposeFacts {
-    /// Host-side port of the Radicale mapping, when present.
-    pub host_port: Option<u16>,
-    /// Container-side port of the Radicale mapping, when present.
-    pub container_port: Option<u16>,
-}
-
-/// Parses a docker-compose file and extracts the Radicale service's `5232` port mapping
-/// (§13.2 step 3): the service whose `image` contains `radicale`; the short syntax
-/// (`[bind:]host:container[/proto]`) and the long syntax (`{ target, published }`) both
-/// work. A missing service or mapping yields `None` fields — the wizard prompts instead
-/// of guessing (§13.2: ambiguity never resolves by default).
-pub fn parse_radicale_compose(text: &str) -> ComposeFacts {
-    let mut facts = ComposeFacts::default();
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(text) else {
-        return facts;
-    };
-    let Some(services) = value
-        .get("services")
-        .and_then(serde_yaml::Value::as_mapping)
-    else {
-        return facts;
-    };
-    for (_, service) in services {
-        let image = service
-            .get("image")
-            .and_then(serde_yaml::Value::as_str)
-            .unwrap_or_default();
-        if !image.contains("radicale") {
-            continue;
-        }
-        let Some(ports) = service
-            .get("ports")
-            .and_then(serde_yaml::Value::as_sequence)
-        else {
-            continue;
-        };
-        for port in ports {
-            match port {
-                serde_yaml::Value::String(mapping) => {
-                    let parts: Vec<&str> = mapping.split(':').collect();
-                    let (host, container) = match parts.as_slice() {
-                        [host, container] => (*host, *container),
-                        [_, host, container] => (*host, *container),
-                        _ => continue,
-                    };
-                    let container = container.split('/').next().unwrap_or(container);
-                    if container == "5232" {
-                        facts.container_port = Some(5232);
-                        facts.host_port = host.parse::<u16>().ok();
-                    }
-                }
-                serde_yaml::Value::Mapping(long) => {
-                    let target = long
-                        .get(serde_yaml::Value::String("target".into()))
-                        .and_then(serde_yaml::Value::as_u64);
-                    let published = long
-                        .get(serde_yaml::Value::String("published".into()))
-                        .and_then(serde_yaml::Value::as_u64);
-                    if target == Some(5232) {
-                        facts.container_port = Some(5232);
-                        facts.host_port = published.and_then(|port| u16::try_from(port).ok());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    facts
 }
 
 /// The TODO.md adoption outcome (§13.2 step 2).
@@ -213,8 +140,6 @@ pub async fn run_setup<C: CaldavPort>(
 /// machine-local `radicale.passwd` (0600, §17), then shares the non-interactive plan.
 pub async fn run_interactive(
     vault: PathBuf,
-    server: Option<String>,
-    docker_root: &str,
     config_path: PathBuf,
     clock: Arc<dyn Clock>,
 ) -> Result<(), TaskresError> {
@@ -226,14 +151,7 @@ pub async fn run_interactive(
         });
     }
 
-    let discovered = match &server {
-        Some(alias) => discover_url_via_ssh(alias, docker_root)?,
-        None => None,
-    };
-    let url = match discovered {
-        Some(url) => url,
-        None => crate::tui::prompt("CalDAV URL (e.g. http://radicale.local:5232):")?,
-    };
+    let url = crate::tui::prompt("CalDAV URL (e.g. http://radicale.local:5232):")?;
     let username = crate::tui::prompt("CalDAV username:")?;
     let mut password = crate::tui::secret("CalDAV password:")?;
     let mut tries = 0;
@@ -263,7 +181,42 @@ pub async fn run_interactive(
     let passwd = dir.join("radicale.passwd");
     write_secret(&passwd, &password)?;
 
+    // Step 5 (§13.2): discover the vault's routed lists and the server's collections, then
+    // propose create / bind-existing / keep-local-only per list; the free-form
+    // `list=collection` prompt stays available for anything discovery did not cover.
+    let allow_create = MachineConfig::load(&config_path)
+        .map(|machine| machine.caldav.allow_create_lists)
+        .unwrap_or(true);
+    let lists = discover_vault_lists(&vault);
+    let server_collections = client.list_collections().await?;
+    if !server_collections.is_empty() {
+        let names: Vec<&str> = server_collections.iter().map(|c| c.slug.as_str()).collect();
+        println!("server collections: {}", names.join(", "));
+    }
     let mut collections = Vec::new();
+    for (display, slug) in &lists {
+        let existing = server_collections
+            .iter()
+            .find(|c| c.slug.eq_ignore_ascii_case(slug));
+        let mut options = Vec::new();
+        let mut actions: Vec<Option<String>> = Vec::new();
+        if let Some(collection) = existing {
+            options.push(format!("bind to existing collection `{}`", collection.slug));
+            actions.push(Some(collection.slug.clone()));
+        }
+        if allow_create {
+            options.push(format!("create the `{slug}` collection"));
+            actions.push(Some(slug.clone()));
+        }
+        options.push("keep local-only (skip)".to_string());
+        actions.push(None);
+        let option_refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let choice =
+            crate::tui::select(&format!("List `{display}` (slug `{slug}`):"), &option_refs)?;
+        if let Some(collection) = &actions[choice] {
+            collections.push((display.clone(), collection.clone()));
+        }
+    }
     loop {
         let line = crate::tui::prompt("Bind list=collection (empty to finish):")?;
         if line.is_empty() {
@@ -289,6 +242,88 @@ pub async fn run_interactive(
     let summary = prepare_and_sync(args, client, clock).await?;
     print_summary(&summary);
     Ok(())
+}
+
+/// Walks the vault (skipping hidden directories, so `.taskres/` is never entered) and
+/// collects the distinct routed lists (§5): the engine-managed Inbox first, then every
+/// list resolved from `restask-list`/`restask-list-root` markers, in first-seen file
+/// order. Returns `(display name, slug)` pairs. Routing conflicts collapse to the
+/// Inbox-only set — `restask doctor` surfaces them.
+pub fn discover_vault_lists(vault: &Path) -> Vec<(String, String)> {
+    let cfg = VaultConfig::load(&vault.join("restask.toml")).unwrap_or_default();
+    let mut metas: Vec<NoteMeta> = Vec::new();
+    let mut displays: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![vault.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut children: Vec<_> = entries.flatten().collect();
+        children.sort_by_key(|entry| entry.file_name());
+        for entry in children {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if path.is_dir() {
+                if !name.starts_with('.') {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !name.ends_with(".md") {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(vault) else {
+                continue;
+            };
+            let rel = rel
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if rel == cfg.inbox_file {
+                continue;
+            }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (file_list, folder_list) = scan_frontmatter(&contents);
+            if let Some(display) = file_list.as_ref().or(folder_list.as_ref()) {
+                if let Ok(slug) = ListSlug::from_name(display) {
+                    let slug = slug.as_str().to_string();
+                    if !displays.iter().any(|(s, _)| s == &slug) {
+                        displays.push((slug, display.clone()));
+                    }
+                }
+            }
+            metas.push(NoteMeta {
+                path: rel,
+                file_list,
+                folder_list,
+            });
+        }
+    }
+    let mut out = vec![("Inbox".to_string(), "inbox".to_string())];
+    let Ok(router) = Router::build(&metas) else {
+        return out;
+    };
+    for meta in &metas {
+        if let NoteRouting::List(slug) = router.resolve(&meta.path, meta.file_list.as_deref()) {
+            let slug = slug.as_str().to_string();
+            if out.iter().any(|(_, s)| s == &slug) {
+                continue;
+            }
+            let display = displays
+                .iter()
+                .find(|(s, _)| s == &slug)
+                .map(|(_, d)| d.clone())
+                .unwrap_or_else(|| {
+                    ListSlug::from_name(&slug)
+                        .map(|s| s.display_name())
+                        .unwrap_or(slug.clone())
+                });
+            out.push((display, slug));
+        }
+    }
+    out
 }
 
 /// Shared setup body: vault scaffold, TODO.md adoption, machine-config records, bound
@@ -397,36 +432,6 @@ fn write_secret(path: &Path, password: &str) -> Result<(), TaskresError> {
         std::fs::write(path, password.as_bytes())?;
         Ok(())
     }
-}
-
-/// Read-only server discovery over SSH (§13.2 step 3): `ssh <alias> cat
-/// <docker-root>/radicale/docker-compose.yml`, then `ssh -G <alias>` for the hostname.
-/// `None` on any failure or ambiguity — the wizard prompts instead of guessing.
-fn discover_url_via_ssh(alias: &str, docker_root: &str) -> Result<Option<String>, TaskresError> {
-    let compose = Command::new("ssh")
-        .args([
-            alias,
-            "cat",
-            &format!("{docker_root}/radicale/docker-compose.yml"),
-        ])
-        .output()?;
-    if !compose.status.success() {
-        return Ok(None);
-    }
-    let facts = parse_radicale_compose(&String::from_utf8_lossy(&compose.stdout));
-    let Some(host_port) = facts.host_port else {
-        return Ok(None);
-    };
-    let general = Command::new("ssh").args(["-G", alias]).output()?;
-    let host = String::from_utf8_lossy(&general.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("hostname "))
-        .map(str::to_string)
-        .ok_or_else(|| TaskresError::Validation {
-            field: "server",
-            reason: format!("`ssh -G {alias}` has no hostname line"),
-        })?;
-    Ok(Some(format!("http://{host}:{host_port}")))
 }
 
 /// Prints the §13.2 step-7 summary (backup, config, client wiring, next steps) to stdout.

@@ -1,5 +1,5 @@
-//! Setup wizard tests (§13.2): compose parsing (real tomsquest text), TODO.md adoption,
-//! and the non-interactive full setup against the in-memory CalDAV mock.
+//! Setup wizard tests (§13.2): vault-list discovery, TODO.md adoption, and the
+//! non-interactive full setup against the in-memory CalDAV mock.
 
 mod common;
 
@@ -13,9 +13,7 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
-use restask::setup::{
-    adopt_todo_md, parse_collections, parse_radicale_compose, run_setup, ComposeFacts, SetupArgs,
-};
+use restask::setup::{adopt_todo_md, parse_collections, run_setup, SetupArgs};
 use restask::store::Index;
 use restask::TaskresError;
 
@@ -47,66 +45,6 @@ fn args(vault: &TempDir) -> SetupArgs {
         password_file: None,
         collections: vec![("Home".to_string(), "home".to_string())],
     }
-}
-
-/// The canonical compose file from the tomsquest/docker-radicale README.
-const TOMSQUEST_COMPOSE: &str = r#"version: "3"
-
-services:
-  radicale:
-    image: tomsquest/docker-radicale
-    container_name: radicale
-    ports:
-      - 5232:5232
-    init: true
-    read_only: true
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:5232"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    volumes:
-      - ./data:/data
-      - ./config:/config
-"#;
-
-#[test]
-fn parses_the_tomsquest_compose() {
-    let facts = parse_radicale_compose(TOMSQUEST_COMPOSE);
-    assert_eq!(facts.host_port, Some(5232));
-    assert_eq!(facts.container_port, Some(5232));
-}
-
-#[test]
-fn compose_edges_never_guess() {
-    let none = ComposeFacts::default();
-
-    // Empty input and invalid YAML yield no facts.
-    assert_eq!(parse_radicale_compose(""), none);
-    assert_eq!(parse_radicale_compose("\tbroken: ["), none);
-
-    // Radicale present but ports behind a reverse proxy: no mapping to propose.
-    let proxied =
-        "services:\n  radicale:\n    image: tomsquest/docker-radicale\n    networks: [web]\n";
-    assert_eq!(parse_radicale_compose(proxied), none);
-
-    // Unrelated services are ignored.
-    let other = "services:\n  web:\n    image: nginx\n    ports:\n      - 5232:5232\n";
-    assert_eq!(parse_radicale_compose(other), none);
-
-    // Long syntax mapping.
-    let long = "services:\n  radicale:\n    image: tomsquest/docker-radicale\n    ports:\n      - target: 5232\n        published: 6000\n";
-    let facts = parse_radicale_compose(long);
-    assert_eq!(facts.host_port, Some(6000));
-    assert_eq!(facts.container_port, Some(5232));
-
-    // Bind address prefix and protocol suffix.
-    let bound = "services:\n  radicale:\n    image: tomsquest/docker-radicale\n    ports:\n      - \"127.0.0.1:5232:5232/tcp\"\n";
-    let facts = parse_radicale_compose(bound);
-    assert_eq!(facts.host_port, Some(5232));
-    assert_eq!(facts.container_port, Some(5232));
 }
 
 #[test]
@@ -269,5 +207,41 @@ fn setup_vault_prefers_flags_env_and_markers_over_the_fallback() {
         )
         .unwrap(),
         PathBuf::from("/srv/other")
+    );
+}
+
+#[test]
+fn discover_lists_reports_inbox_and_routed_markers() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::write(vault.path().join("TODO.md"), "- [ ] inbox only\n").unwrap();
+    std::fs::write(
+        vault.path().join("University.md"),
+        "---\nrestask-list: University\n---\n\n- [ ] study\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(vault.path().join("2. Areas/Home Lab")).unwrap();
+    std::fs::write(
+        vault.path().join("2. Areas/Home Lab/Home Lab.md"),
+        "---\nrestask-list-root: Home Lab\n---\n\n- [ ] server\n",
+    )
+    .unwrap();
+    std::fs::write(
+        vault.path().join("2. Areas/Home Lab/Security.md"),
+        "- [ ] inherit\n",
+    )
+    .unwrap();
+    std::fs::write(vault.path().join("Unmarked.md"), "- [ ] untouched\n").unwrap();
+    std::fs::create_dir_all(vault.path().join(".taskres")).unwrap();
+    std::fs::write(vault.path().join(".taskres/index.json"), "{}").unwrap();
+
+    let lists = restask::setup::discover_vault_lists(vault.path());
+
+    assert_eq!(
+        lists,
+        vec![
+            ("Inbox".to_string(), "inbox".to_string()),
+            ("University".to_string(), "university".to_string()),
+            ("Home Lab".to_string(), "home-lab".to_string()),
+        ]
     );
 }
