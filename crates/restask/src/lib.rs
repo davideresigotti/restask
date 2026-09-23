@@ -2,6 +2,7 @@
 
 pub mod caldav;
 pub mod config;
+pub mod daemon;
 pub mod domain;
 pub mod error;
 pub mod markdown;
