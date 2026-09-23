@@ -11,7 +11,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use crate::caldav::CaldavPort;
+use crate::caldav::{CaldavClient, CaldavPort};
 use crate::config::{
     machine_config_path, ConfigError, ListBinding, MachineConfig, VaultConfig, VaultMatchers,
 };
@@ -21,6 +21,7 @@ use crate::domain::{
 };
 use crate::markdown::{parse, parser::link_parents};
 use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
+use crate::setup;
 use crate::store::{cache_remove, cache_write, Index, IndexEntry};
 use crate::sync::Engine;
 use crate::{CaldavErrorKind, TaskresError};
@@ -45,6 +46,30 @@ pub struct Cli {
 /// Subcommands (§13.3 table).
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// First-time setup wizard (§13.2).
+    Setup {
+        /// SSH alias for read-only server discovery (§13.2 step 3).
+        #[arg(long)]
+        server: Option<String>,
+        /// Docker root used for server discovery.
+        #[arg(long, default_value = "/opt/docker")]
+        docker_root: String,
+        /// CalDAV base URL (required with `--non-interactive`).
+        #[arg(long)]
+        url: Option<String>,
+        /// CalDAV username (required with `--non-interactive`).
+        #[arg(long)]
+        username: Option<String>,
+        /// Environment variable holding the password (required with `--non-interactive`).
+        #[arg(long)]
+        password_env: Option<String>,
+        /// Bind a list to a collection as `list=collection` (repeatable).
+        #[arg(long = "collection")]
+        collections: Vec<String>,
+        /// Fail instead of prompting.
+        #[arg(long)]
+        non_interactive: bool,
+    },
     /// Run the single-writer reconciler until shutdown (§13.1).
     Daemon {
         /// Reconcile once and exit.
@@ -155,6 +180,55 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
     let config_path = machine_config_path();
     let machine = load_machine(&config_path)?;
     match command {
+        Command::Setup {
+            non_interactive,
+            server,
+            docker_root,
+            url,
+            username,
+            password_env,
+            collections,
+        } => {
+            if !non_interactive {
+                setup::run_interactive(
+                    vault,
+                    server,
+                    &docker_root,
+                    config_path,
+                    Arc::new(SystemClock),
+                )
+                .await?;
+                return Ok(0);
+            }
+            let args = setup::SetupArgs::from_flags(
+                vault,
+                config_path,
+                url,
+                username,
+                password_env,
+                setup::parse_collections(&collections)?,
+            )?;
+            let password_env = match &args.password_env {
+                Some(name) => name.clone(),
+                None => {
+                    return Err(TaskresError::Validation {
+                        field: "password-env",
+                        reason: "--password-env is required with --non-interactive".to_string(),
+                    })
+                }
+            };
+            let password = std::env::var(&password_env)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| TaskresError::Validation {
+                    field: "password-env",
+                    reason: format!("${password_env} is not set"),
+                })?;
+            let caldav = CaldavClient::new(&args.url, args.username.clone(), Some(password))?;
+            let summary = setup::run_setup(args, caldav, Arc::new(SystemClock)).await?;
+            setup::print_summary(&summary);
+            Ok(0)
+        }
         Command::Status { json } => print_status(&vault, Arc::new(SystemClock), json),
         Command::Rebuild => run_rebuild(&vault, Arc::new(SystemClock)),
         Command::List {
@@ -195,6 +269,31 @@ pub async fn run_with<C: CaldavPort>(
     clock: Arc<dyn Clock>,
 ) -> Result<i32, TaskresError> {
     match command {
+        Command::Setup {
+            non_interactive,
+            server,
+            docker_root,
+            url,
+            username,
+            password_env,
+            collections,
+        } => {
+            if !non_interactive {
+                setup::run_interactive(vault, server, &docker_root, config_path, clock).await?;
+                return Ok(0);
+            }
+            let args = setup::SetupArgs::from_flags(
+                vault,
+                config_path,
+                url,
+                username,
+                password_env,
+                setup::parse_collections(&collections)?,
+            )?;
+            let summary = setup::run_setup(args, caldav, clock).await?;
+            setup::print_summary(&summary);
+            Ok(0)
+        }
         Command::Daemon { once } => {
             let dc = DaemonConfig {
                 debounce_ms: 300,
