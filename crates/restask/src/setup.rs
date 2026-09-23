@@ -298,6 +298,11 @@ async fn prepare_and_sync<C: CaldavPort>(
             migrated = outcome.migrated.len();
             mutator::write_atomic(&inbox, &fresh)?;
             backup = Some(outcome.backup);
+        } else {
+            println!(
+                "{} already engine-managed — no backup created",
+                cfg.inbox_file
+            );
         }
     } else {
         mutator::write_atomic(&inbox, &header)?;
