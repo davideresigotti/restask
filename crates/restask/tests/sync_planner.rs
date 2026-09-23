@@ -261,7 +261,7 @@ fn r2_new_local_task_is_pushed() {
     assert_eq!(e.caldav_etag, None);
     assert_eq!(e.defer_count, 0);
     assert!(p.markdown_ops.is_empty() && p.caldav_deletes.is_empty());
-    assert!(!p.todo_refresh);
+    assert!(p.todo_refresh);
 }
 
 #[test]
@@ -460,6 +460,26 @@ fn r5_foreign_task_is_adopted_with_a_fresh_uid() {
 }
 
 // ── R6 ────────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn vault_side_deletion_purges_cache_and_remote() {
+    // The note line is gone; cache and server still hold the task. Never resurrect.
+    let t = task(1, "home", "alpha");
+    let s = snapshots(
+        vec![],
+        vec![t.clone()],
+        remote_map(vec![("home", uid(1).as_str(), remote_of(&t))]),
+        vec![],
+        vec![entry_for(&t, Some("\"e1\""))],
+    );
+    let p = plan_now(s);
+    assert_eq!(p.cache_deletes, vec![t.uid.clone()]);
+    assert_eq!(p.caldav_deletes.len(), 1);
+    assert_eq!(p.caldav_deletes[0].list, slug("home"));
+    assert_eq!(p.caldav_deletes[0].name, t.uid.as_str());
+    assert_eq!(p.index_removals, vec![t.uid.clone()]);
+    assert!(p.markdown_ops.is_empty() && p.caldav_puts.is_empty());
+}
 
 #[test]
 fn r6_stale_cache_entry_is_deleted() {
@@ -802,7 +822,7 @@ fn r9_recovers_a_copy_stranded_in_the_wrong_collection() {
 
 #[test]
 fn r10_todo_refresh_flags() {
-    // A pure push changes no vault render.
+    // A push grows the routed task set: mirror lines must appear in TODO.md.
     let t = task(1, "home", "alpha");
     let push = plan_now(snapshots(
         vec![t.clone()],
@@ -811,7 +831,7 @@ fn r10_todo_refresh_flags() {
         vec![],
         vec![],
     ));
-    assert!(!push.todo_refresh);
+    assert!(push.todo_refresh);
     // A markdown mutation does.
     let mut local = t.clone();
     local.last_modified = at(0);

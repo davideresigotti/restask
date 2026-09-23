@@ -187,6 +187,21 @@ pub fn plan(s: Snapshots, now: DateTime<Utc>) -> Plan {
                         p.index_removals.push(uid.clone());
                     }
                 }
+            } else if cache.is_some() {
+                // Vault-side deletion: the note line is gone while the cache and the
+                // server still hold the task. Purge every surviving copy — never
+                // resurrect (vault authority; the in-flight plugin window is R1/R6).
+                p.cache_deletes.push(uid.clone());
+                for (slug, name, _) in copies {
+                    p.caldav_deletes.push(DeleteOp {
+                        list: slug.clone(),
+                        name: name.to_string(),
+                        etag: None,
+                    });
+                }
+                if entry.is_some() {
+                    p.index_removals.push(uid.clone());
+                }
             } else {
                 reconcile_remote_only(&mut p, &s, &uid, copies, entry, now);
             }
@@ -331,8 +346,9 @@ pub fn plan(s: Snapshots, now: DateTime<Utc>) -> Plan {
             });
         }
     }
-    // R10 — any markdown op or routed task set change re-renders TODO.md.
-    p.todo_refresh = !p.markdown_ops.is_empty() || !p.caldav_moves.is_empty();
+    // R10 — any markdown op, push (routed task set changed), or list move re-renders TODO.md.
+    p.todo_refresh =
+        !p.markdown_ops.is_empty() || !p.caldav_puts.is_empty() || !p.caldav_moves.is_empty();
     p
 }
 
