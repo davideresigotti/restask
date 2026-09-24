@@ -58,20 +58,26 @@ Unmarked notes are left completely untouched (local-only). Quick tasks live in `
 
 ## 4. Keep it running (sync node)
 
-On any machine with a systemd user session, `restask setup` already installed and enabled the daemon (step 6 of the wizard): it starts immediately, restarts on failure, and survives logout/login (`loginctl enable-linger`).
+On any machine with a systemd user session, `restask setup` already installed and enabled the daemon (step 6 of the wizard): it starts immediately, restarts on failure, and survives logout/login (`loginctl enable-linger`). Your PC and the server may each run a daemon on their own vault copy; multiple daemons are safe (`.restask/` state is reconstructible, reconciliation is idempotent). Never run two daemons on the *same* vault folder. The always-on server daemon is the anchor: it keeps vault ⇄ Radicale converging even when every other device is off — the vault stays the source of truth.
 
-Run setup **once per machine that owns a vault copy** — your PC and the home server may each run a daemon on their own copy; multiple daemons are safe (`.restask/` state is reconstructible, reconciliation is idempotent). Never run two daemons on the *same* vault folder.
-
-**Adding the always-on server later:** let Syncthing carry the vault there (`restask.toml` + `.restask/` travel with it), then run `restask setup` inside the server's vault copy and re-enter the credentials — the password is machine-local by design. Setup recreates `TODO.md` (existing tasks return from the calendar on the first sync), so do it after the vault has fully synced.
-
-Manual fallback (e.g. a machine where you skip the wizard):
+**Adding the server daemon (no `setup` re-run):** Syncthing already carries the whole vault — `restask.toml` and `.restask/` included — so the vault itself needs nothing. Only the machine-local pieces must exist on the server, because secrets never ride the vault:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp contrib/restask.service ~/.config/systemd/user/   # edit the --vault path
-systemctl --user daemon-reload && systemctl --user enable --now restask
-loginctl enable-linger $USER
+# 1. the binary (any one of: a clone + cargo install, or copy the built binary)
+cargo install --path /path/to/restask
+
+# 2. the machine config, once, from the PC (endpoint + password, modes preserved)
+rsync -a ~/.config/restask/ server:'.config/restask/'
+
+# 3. the user unit, pointed at the server's vault copy
+scp contrib/restask.service server:'.config/systemd/user/restask.service'
+ssh server
+  $EDITOR ~/.config/systemd/user/restask.service   # fix the --vault path
+  systemctl --user daemon-reload && systemctl --user enable --now restask
+  loginctl enable-linger $USER
 ```
+
+The unit's `--vault` path wins over the copied machine config, which you can leave as-is. Verify from the server's vault copy with `restask doctor`.
 
 **Docker** (matches an `/opt/docker` style server — see `contrib/docker/docker-compose.yml`):
 
