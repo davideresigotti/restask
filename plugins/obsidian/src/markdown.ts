@@ -3,7 +3,7 @@
  *
  * Pure string → data port of the Rust `markdown::parser` module: same regexes, same
  * codepoints, same canonical metadata tail order. No Obsidian API, no I/O, no wall
- * clock — unit-testable under Vitest (AGENTS.md §3).
+ * clock — unit-testable under Vitest.
  */
 
 /** Priority keywords in canonical order (§3.2 / §7 section order). */
@@ -288,12 +288,22 @@ export function parse(contents: string, cfg: ParseCfg = { doneHeading: DEFAULT_D
 
 /**
  * Nearest-ancestor checkbox by indent (§6.2): ancestors without a UID yield undefined
- * (unknown/unregistered ancestor → child treated as root, never transitive).
+ * (unknown/unregistered ancestor → child treated as root, never transitive). Nesting
+ * never crosses a heading, and tasks in the done region have no parent.
  */
 export function linkParents(tasks: ParsedTask[]): (string | undefined)[] {
 	const parents: (string | undefined)[] = [];
-	const stack: { indent: number; uid: string | undefined }[] = [];
+	let stack: { indent: number; uid: string | undefined }[] = [];
+	let section: string | undefined | null = null;
 	for (const task of tasks) {
+		if (section !== task.heading) {
+			stack = [];
+			section = task.heading;
+		}
+		if (task.inDoneRegion) {
+			parents.push(undefined);
+			continue;
+		}
 		while (stack.length > 0 && stack[stack.length - 1].indent >= task.indentChars) stack.pop();
 		const top = stack[stack.length - 1];
 		parents.push(top !== undefined ? top.uid : undefined);

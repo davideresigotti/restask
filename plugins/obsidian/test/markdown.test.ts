@@ -347,4 +347,30 @@ describe("§6.2 file-level rules", () => {
 		expect(parents[4]).toBeUndefined();
 		expect(parents[5]).toBeUndefined();
 	});
+
+	it("nesting never crosses a heading and done records are flat", () => {
+		const f = parse(
+			"# Tasks\n" +
+				"- [ ] parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n" +
+				"    - [ ] child 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n" +
+				"# Other\n" +
+				"    - [ ] indented under a new heading 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpd\n" +
+				"## Done\n" +
+				"- [x] done parent ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpe\n" +
+				"    - [x] done child ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpf\n",
+		);
+		expect(linkParents(f.tasks)).toEqual([
+			undefined,
+			"restask-01jzq4tsvg2c9xkw7n5m8rhdpb",
+			undefined,
+			undefined,
+			undefined,
+		]);
+	});
+
+	it("legacy uid prefix is still a uid token", () => {
+		const line = parseLine("- [ ] old task 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpf");
+		expect(line?.draft.uid).toBe("taskres-01jzq4tsvg2c9xkw7n5m8rhdpf");
+		expect(line?.draft.text).toBe("old task");
+	});
 });

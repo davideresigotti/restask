@@ -375,5 +375,5 @@ fn daemon_unit_content_is_a_valid_user_unit() {
     assert!(content.contains("Restart=on-failure"));
     assert!(content.contains("RestartSec=5"));
     assert!(content.contains("WantedBy=default.target"));
-    assert!(content.contains("Description=Restask sync daemon (vault <-> Radicale)"));
+    assert!(content.contains("Description=restask sync daemon (vault <-> CalDAV)"));
 }

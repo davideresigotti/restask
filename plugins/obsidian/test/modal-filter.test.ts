@@ -2,7 +2,7 @@
 //! case-insensitivity, keyword table inserts, today/tomorrow date arithmetic.
 
 import { describe, expect, it } from "vitest";
-import { addDays, MIN_FRAGMENT_LENGTH, suggestionsFor } from "../src/modal";
+import { addDays, MIN_FRAGMENT_LENGTH, suggestionsFor, triggerAt } from "../src/modal";
 
 const TODAY = "2026-09-23";
 
@@ -65,5 +65,28 @@ describe("§15.2 modal filter", () => {
 		expect(addDays("2028-02-28", 1)).toBe("2028-02-29");
 		expect(addDays("2026-02-28", 1)).toBe("2026-03-01");
 		expect(addDays("2026-12-31", 1)).toBe("2027-01-01");
+	});
+});
+
+describe("§15.2 typing trigger", () => {
+	it("opens on a keyword fragment at the end of a task line", () => {
+		expect(triggerAt("- [ ] buy milk hi", TODAY)).toEqual({ start: 15, query: "hi" });
+		expect(triggerAt("  * [x] call tom", TODAY)).toEqual({ start: 13, query: "tom" });
+		// Right after the checkbox too.
+		expect(triggerAt("- [ ] du", TODAY)).toEqual({ start: 6, query: "du" });
+	});
+
+	it("stays closed outside task lines, below two letters, and on non-keywords", () => {
+		expect(triggerAt("plain prose hi", TODAY)).toBeUndefined();
+		expect(triggerAt("- not a checkbox hi", TODAY)).toBeUndefined();
+		expect(triggerAt("- [ ] buy milk h", TODAY)).toBeUndefined();
+		expect(triggerAt("- [ ] buy milk", TODAY)).toBeUndefined();
+		expect(triggerAt("- [ ] buy milk ", TODAY)).toBeUndefined();
+	});
+
+	it("only whole words trigger: a keyword inside a longer word does not", () => {
+		expect(triggerAt("- [ ] delhi", TODAY)).toBeUndefined();
+		expect(triggerAt("- [ ] x2hi", TODAY)).toBeUndefined();
+		expect(triggerAt("- [ ] highway", TODAY)).toBeUndefined();
 	});
 });

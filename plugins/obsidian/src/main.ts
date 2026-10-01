@@ -1,49 +1,77 @@
 /**
- * Restask Obsidian plugin (docs/spec/integrations.md §15.4): commands + settings.
+ * restask Obsidian plugin (docs/spec/integrations.md §15): commands, suggestions and
+ * settings.
  *
- * This file isolates every Obsidian API call; markdown.ts, modal.ts and vtodo.ts stay
- * API-free and unit-testable (AGENTS.md §3). The plugin mutates Markdown and mirrors
- * mutations into `.restask/tasks/<uid>.ics`; it never talks CalDAV — that is the
- * daemon's job (§15).
+ * This file isolates every Obsidian API call; markdown.ts, modal.ts and toggle.ts stay
+ * API-free and unit-testable. The plugin only edits Markdown — on the desktop and on
+ * the phone alike. The restask daemon picks the edits up from the vault (carried by
+ * file sync) and talks to the CalDAV server; the plugin never does.
  */
 
-import { App, Editor, MarkdownView, Notice, Plugin, SuggestModal, TFile, normalizePath } from "obsidian";
-import { linkParents, parse, parseLine, type TaskDraft } from "./markdown";
-import { suggestionsFor, type Suggestion } from "./modal";
-import { formatUtc, writeCacheFile, type AdapterPort, type CacheTask } from "./vtodo";
+import {
+	App,
+	Editor,
+	EditorPosition,
+	EditorSuggest,
+	EditorSuggestContext,
+	EditorSuggestTriggerInfo,
+	Notice,
+	Plugin,
+	SuggestModal,
+} from "obsidian";
+import { suggestionsFor, triggerAt, type Suggestion } from "./modal";
 import { DEFAULT_SETTINGS, RestaskSettingTab, type RestaskSettings } from "./settings";
+import { toggleDone } from "./toggle";
 
-/** Device-local calendar date `YYYY-MM-DD` (§3.3) — wall clock is allowed only here. */
+/** Device-local calendar date `YYYY-MM-DD` (§3.3) — the wall clock is read only here. */
 function localToday(now: Date): string {
 	const m = String(now.getMonth() + 1).padStart(2, "0");
 	const d = String(now.getDate()).padStart(2, "0");
 	return `${now.getFullYear()}-${m}-${d}`;
 }
 
-/** Flips the checkbox of a §6.1 task line, preserving everything else byte-for-byte. */
-function flipCheck(raw: string, checked: boolean): string {
-	return raw.replace(/^([ \t]*[-*+][ \t]+\[)([ xX])(\])/, (_m, pre: string, _c: string, post: string) =>
-		`${pre}${checked ? "x" : " "}${post}`,
-	);
+function renderSuggestion(suggestion: Suggestion, el: HTMLElement): void {
+	el.createEl("div", { text: suggestion.keyword });
+	el.createEl("small", { text: suggestion.insert.trim() });
 }
 
-/** Appends `✅ <today>` in canonical tail position: before ➕/🆔 when present (§6.1). */
-function withCompletedToken(raw: string, today: string): string {
-	const insertion = `✅ ${today}`;
-	const plus = raw.search(/➕[ \t]+\d{4}-\d{2}-\d{2}/);
-	const anchor = plus >= 0 ? plus : raw.search(/🆔[ \t]+(?:restask|taskres)-/);
-	if (anchor >= 0) {
-		return `${raw.slice(0, anchor).replace(/[ \t]+$/, "")} ${insertion} ${raw.slice(anchor)}`;
+/** Suggestions while typing (§15.2): opens on a keyword fragment in a task line. */
+class MetadataSuggest extends EditorSuggest<Suggestion> {
+	private readonly plugin: RestaskPlugin;
+
+	constructor(app: App, plugin: RestaskPlugin) {
+		super(app);
+		this.plugin = plugin;
 	}
-	return `${raw.replace(/[ \t]+$/, "")} ${insertion}`;
+
+	onTrigger(cursor: EditorPosition, editor: Editor): EditorSuggestTriggerInfo | null {
+		if (!this.plugin.settings.suggestWhileTyping) return null;
+		const before = editor.getLine(cursor.line).slice(0, cursor.ch);
+		const trigger = triggerAt(before, localToday(new Date()));
+		if (trigger === undefined) return null;
+		return { start: { line: cursor.line, ch: trigger.start }, end: cursor, query: trigger.query };
+	}
+
+	getSuggestions(context: EditorSuggestContext): Suggestion[] {
+		return suggestionsFor(context.query, localToday(new Date()));
+	}
+
+	renderSuggestion(suggestion: Suggestion, el: HTMLElement): void {
+		renderSuggestion(suggestion, el);
+	}
+
+	selectSuggestion(suggestion: Suggestion): void {
+		const context = this.context;
+		if (context === null) return;
+		// The typed fragment is replaced by the metadata it stood for.
+		context.editor.replaceRange(suggestion.insert, context.start, context.end);
+		const ch = context.start.ch + suggestion.insert.length;
+		context.editor.setCursor({ line: context.start.line, ch });
+		this.close();
+	}
 }
 
-/** Removes the `✅ <date>` token (uncomplete); the completed date is discarded per §15.4. */
-function withoutCompletedToken(raw: string): string {
-	return raw.replace(/[ \t]*✅[ \t]+\d{4}-\d{2}-\d{2}/, "").replace(/[ \t]+$/, "");
-}
-
-/** Autocomplete modal (§15.2): suggestions appear at ≥ 2 letters, insert on choose. */
+/** The same suggestions on demand (§15.2), for the command palette and hotkeys. */
 class MetadataModal extends SuggestModal<Suggestion> {
 	private readonly editor: Editor;
 	private readonly today: string;
@@ -52,6 +80,7 @@ class MetadataModal extends SuggestModal<Suggestion> {
 		super(app);
 		this.editor = editor;
 		this.today = today;
+		this.setPlaceholder("high, medium, low, due, start, scheduled, today, tomorrow…");
 	}
 
 	getSuggestions(query: string): Suggestion[] {
@@ -59,8 +88,7 @@ class MetadataModal extends SuggestModal<Suggestion> {
 	}
 
 	renderSuggestion(suggestion: Suggestion, el: HTMLElement): void {
-		el.createEl("div", { text: suggestion.keyword });
-		el.createEl("small", { text: suggestion.insert.trim() });
+		renderSuggestion(suggestion, el);
 	}
 
 	onChooseSuggestion(suggestion: Suggestion): void {
@@ -71,21 +99,19 @@ class MetadataModal extends SuggestModal<Suggestion> {
 	}
 }
 
-/** The Restask plugin: three commands (§15.4) over the pure markdown/modal/vtodo cores. */
+/** The restask plugin (§15.4). */
 export default class RestaskPlugin extends Plugin {
 	settings: RestaskSettings = DEFAULT_SETTINGS;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.addSettingTab(new RestaskSettingTab(this.app, this));
+		this.registerEditorSuggest(new MetadataSuggest(this.app, this));
 
 		this.addCommand({
 			id: "toggle-task-done",
 			name: "Toggle task done",
-			editorCallback: (editor, ctx) => {
-				const file = ctx instanceof TFile ? ctx : ctx.file;
-				void this.toggleTaskDone(editor, file);
-			},
+			editorCallback: (editor) => this.toggleTaskDone(editor),
 		});
 
 		this.addCommand({
@@ -93,14 +119,6 @@ export default class RestaskPlugin extends Plugin {
 			name: "Add metadata",
 			editorCallback: (editor) => {
 				new MetadataModal(this.app, editor, localToday(new Date())).open();
-			},
-		});
-
-		this.addCommand({
-			id: "sync-now",
-			name: "Sync now",
-			callback: () => {
-				void this.syncNow();
 			},
 		});
 	}
@@ -113,128 +131,22 @@ export default class RestaskPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
-	/** The Obsidian vault adapter behind the API-free AdapterPort (§15.3), paths normalized. */
-	private get adapter(): AdapterPort {
-		const adapter = this.app.vault.adapter;
-		return {
-			exists: (path) => adapter.exists(normalizePath(path)),
-			mkdir: (path) => adapter.mkdir(normalizePath(path)),
-			write: (path, data) => adapter.write(normalizePath(path), data),
-		};
-	}
-
-	/** Best-effort cache mirror: enabled only by the §15.4 setting, failures logged. */
-	private async mirrorCache(cacheTask: CacheTask): Promise<void> {
-		if (!this.settings.enableCacheMirror) return;
-		try {
-			await writeCacheFile(this.adapter, cacheTask, formatUtc(new Date()));
-		} catch (error) {
-			console.error("Restask: cache mirror failed", error);
-		}
-	}
-
 	/**
-	 * `Restask: Toggle task done` (§15.4): flips the cursor line's checkbox, adds/removes
-	 * `✅ <today>`, on completion moves the line under the Done heading newest-on-top
-	 * (creating a level-3 heading at EOF per §6.3), then updates the cache file.
+	 * `Toggle task done` (§15.3): completes or reopens the task on the cursor line, in a
+	 * note or in TODO.md alike (the daemon carries a TODO.md toggle to the source note).
 	 */
-	private async toggleTaskDone(editor: Editor, file: TFile | null): Promise<void> {
-		const lineIdx = editor.getCursor().line;
-		const raw = editor.getLine(lineIdx);
-		const task = parseLine(raw);
-		if (task === undefined) {
-			new Notice("Restask: the cursor is not on a task line.");
+	private toggleTaskDone(editor: Editor): void {
+		const result = toggleDone(
+			editor.getValue(),
+			editor.getCursor().line,
+			localToday(new Date()),
+			this.settings.doneHeading,
+		);
+		if (result === undefined) {
+			new Notice("restask: the cursor is not on a task line.");
 			return;
 		}
-
-		const doc = editor.getValue();
-		const fileParsed = parse(doc, { doneHeading: this.settings.doneHeading });
-		const taskIdx = fileParsed.tasks.findIndex((t) => t.lineNo === lineIdx + 1);
-		const parent = taskIdx >= 0 ? linkParents(fileParsed.tasks)[taskIdx] : undefined;
-
-		const completing = !task.draft.checked;
-		const today = localToday(new Date());
-		const newRaw = completing
-			? withCompletedToken(flipCheck(raw, true), today)
-			: withoutCompletedToken(flipCheck(raw, false));
-
-		// Line surgery over doc.split("\n"): join("\n") reconstructs the document exactly.
-		const lines = doc.split("\n");
-		let trailingNewline = false;
-		let cursorLine: number;
-
-		if (completing) {
-			lines.splice(lineIdx, 1);
-			let doneIdx = fileParsed.doneHeadingLine !== undefined ? fileParsed.doneHeadingLine - 1 : undefined;
-			if (doneIdx !== undefined && doneIdx > lineIdx) doneIdx -= 1;
-			if (doneIdx !== undefined) {
-				lines.splice(doneIdx + 1, 0, newRaw);
-				cursorLine = doneIdx + 1;
-			} else {
-				if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-				lines.push("", `### ${this.settings.doneHeading}`, newRaw);
-				cursorLine = lines.length - 1;
-				trailingNewline = true;
-			}
-		} else {
-			lines[lineIdx] = newRaw;
-			cursorLine = lineIdx;
-		}
-
-		editor.setValue(lines.join("\n") + (trailingNewline ? "\n" : ""));
-		editor.setCursor({ line: cursorLine, ch: 0 });
-
-		const newDraft = parseLine(newRaw)?.draft;
-		if (newDraft !== undefined && newDraft.uid !== undefined && file !== null) {
-			await this.mirrorCache(this.cacheTaskFor(newDraft, newDraft.uid, parent, file, completing ? today : undefined));
-		}
-	}
-
-	/** `Restask: Sync now` (§15.4): best-effort cache refresh of the visible file's tasks. */
-	private async syncNow(): Promise<void> {
-		if (!this.settings.enableCacheMirror) return;
-		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-		if (view === null || view.file === null) return;
-		const file = view.file;
-		const parsed = parse(view.editor.getValue(), { doneHeading: this.settings.doneHeading });
-		const parents = linkParents(parsed.tasks);
-		let refreshed = 0;
-		for (let i = 0; i < parsed.tasks.length; i++) {
-			const draft = parsed.tasks[i].draft;
-			if (draft.uid === undefined) continue;
-			try {
-				await writeCacheFile(
-					this.adapter,
-					this.cacheTaskFor(draft, draft.uid, parents[i], file, draft.completedOn),
-					formatUtc(new Date()),
-				);
-				refreshed += 1;
-			} catch (error) {
-				console.error("Restask: cache refresh failed", error);
-			}
-		}
-		new Notice(`Restask: refreshed ${refreshed} cache ${refreshed === 1 ? "entry" : "entries"}.`);
-	}
-
-	private cacheTaskFor(
-		draft: TaskDraft,
-		uid: string,
-		parent: string | undefined,
-		file: TFile,
-		completedOn: string | undefined,
-	): CacheTask {
-		return {
-			uid: uid,
-			text: draft.text,
-			done: draft.checked,
-			completedOn: completedOn,
-			priority: draft.priority,
-			due: draft.due,
-			start: draft.start,
-			scheduled: draft.scheduled,
-			created: draft.created,
-			parent: parent,
-			sourcePath: file.path,
-		};
+		editor.setValue(result.doc);
+		editor.setCursor({ line: result.line, ch: 0 });
 	}
 }

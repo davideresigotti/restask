@@ -1,4 +1,4 @@
--- Restask toggle (§16): cursor-line toggle and inbox add, backed by the restask CLI.
+-- restask toggle (§16): cursor-line toggle and inbox add, backed by the restask CLI.
 -- Reads the cursor line/file and shells out to `restask done|undone|add`; the CLI
 -- resolves the vault and does all parsing. The buffer is refreshed after a mutation.
 local M = {}
@@ -47,27 +47,42 @@ end
 
 --- Reloads the buffer from disk after the CLI mutated the file.
 local function refresh_buffer()
-	vim.cmd("checktime")
+	vim.cmd("silent! checktime")
+end
+
+--- Classifies a buffer line: "done" for an unchecked task, "undone" for a checked one,
+-- nil for anything else. Mirrors the §6.1 task-line shape (`- [ ] `, `* [x] `, `+ [X] `).
+---@param line string
+---@return string|nil
+function M.action_for(line)
+	local box = line:match("^%s*[-*+]%s+%[([ xX])%]%s")
+	if box == " " then
+		return "done"
+	elseif box then
+		return "undone"
+	end
+	return nil
 end
 
 --- Toggles the task under the cursor (§16): an unchecked `[ ]` line runs
--- `restask done --file <bufname> --line <lnum>`, a checked `[x]`/`[X]` line runs
--- `restask undone …`; other lines are ignored. Refreshes the buffer on success.
+-- `restask done --file <absolute path> --line <lnum>`, a checked `[x]`/`[X]` line runs
+-- `restask undone …`; other lines are ignored. The buffer is written first (the CLI
+-- edits the file on disk) and reloaded on success. The CLI finds the vault from the
+-- file's own location, so Neovim's working directory does not matter.
 function M.toggle()
-	local line = vim.fn.getline(".")
-	local lnum = vim.fn.line(".")
-	local file = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p")
-	local args
-	if line:find("%[ %]", 1, true) then
-		args = { BIN, "done", "--file", file, "--line", tostring(lnum) }
-	elseif line:find("%[[xX]%]") then
-		args = { BIN, "undone", "--file", file, "--line", tostring(lnum) }
-	else
+	local action = M.action_for(vim.fn.getline("."))
+	if not action then
 		return
 	end
-	run(args, function()
-		refresh_buffer()
-	end)
+	local file = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p")
+	if file == "" then
+		notify_error("the buffer has no file")
+		return
+	end
+	if vim.bo.modified then
+		vim.cmd("silent write")
+	end
+	run({ BIN, action, "--file", file, "--line", tostring(vim.fn.line(".")) }, refresh_buffer)
 end
 
 --- Prompts for a task and appends it to the TODO.md inbox: `restask add "<text>"`.
@@ -83,8 +98,8 @@ end
 
 --- Registers the global keymaps (§16): `<leader>td` toggle, `<leader>ta` add.
 function M.register_keymaps()
-	vim.keymap.set("n", "<leader>td", M.toggle, { silent = true, desc = "Restask: toggle task" })
-	vim.keymap.set("n", "<leader>ta", M.add, { silent = true, desc = "Restask: add task" })
+	vim.keymap.set("n", "<leader>td", M.toggle, { silent = true, desc = "restask: toggle task" })
+	vim.keymap.set("n", "<leader>ta", M.add, { silent = true, desc = "restask: add task" })
 end
 
 return M

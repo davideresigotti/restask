@@ -16,7 +16,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
   plugin:
     runs-on: ubuntu-latest
@@ -41,3 +41,5 @@ jobs:
         run: sudo apt-get install -y lua5.4
       - name: Syntax gate
         run: luac5.4 -p neovim/lua/restask/*.lua
+      - name: Behaviour
+        run: lua5.4 neovim/test/toggle_test.lua

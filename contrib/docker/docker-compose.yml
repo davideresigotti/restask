@@ -1,6 +1,9 @@
 services:
   restask:
-    build: .
+    build:
+      # The image is built from the repository root (workspace + lockfile).
+      context: ../..
+      dockerfile: contrib/docker/Dockerfile
     image: restask
     container_name: restask
     restart: unless-stopped
@@ -10,4 +13,5 @@ services:
       - /opt/docker/syncthing/data/obsidian:/vault
       - ./data:/home/restask/.config/restask
     # Machine config (./data/config.toml + radicale.passwd, mode 0600) must point the
-    # CalDAV endpoint at http://<radicale-host>:5232 — see INSTALL.md.
+    # CalDAV endpoint at http://<radicale-host>:5232 — see INSTALL.md. Set TZ to your
+    # zone: timed due dates from other clients are shown in the container's local time.

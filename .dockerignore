@@ -1,0 +1,7 @@
+target/
+.git/
+plugins/
+neovim/
+docs/
+test-vault/
+**/node_modules/

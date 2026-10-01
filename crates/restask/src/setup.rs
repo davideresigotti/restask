@@ -386,7 +386,7 @@ pub fn systemd_user_available() -> bool {
 /// with spaces survive systemd's argv splitter.
 pub fn daemon_unit_content(vault: &Path, exec: &Path) -> String {
     format!(
-        "[Unit]\nDescription=Restask sync daemon (vault <-> Radicale)\n\n[Service]\n\
+        "[Unit]\nDescription=restask sync daemon (vault <-> CalDAV)\n\n[Service]\n\
          ExecStart=\"{}\" daemon --vault \"{}\"\nRestart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n",
         exec.display(),

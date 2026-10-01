@@ -1,9 +1,10 @@
 /**
- * Pure autocomplete core for the Restask metadata modal (docs/spec/integrations.md §15.2).
+ * Pure autocomplete core (docs/spec/integrations.md §15.2): the keyword table, the
+ * case-insensitive prefix filter, and the rule for when typing triggers suggestions.
  *
- * Keyword table + case-insensitive prefix filter. No Obsidian API, no I/O, no wall
- * clock: the local date is injected so `today`/`tomorrow` entries stay pure and
- * testable. The Obsidian SuggestModal subclass consuming this lives in main.ts.
+ * No Obsidian API, no I/O, no wall clock: the local date is injected so
+ * `today`/`tomorrow` entries stay pure and testable. The Obsidian suggest classes
+ * consuming this live in main.ts.
  */
 
 /** One autocomplete entry: what the user types and what gets inserted (§15.2 table). */
@@ -57,4 +58,29 @@ export function suggestionsFor(fragment: string, today: string): Suggestion[] {
 	return [...PRIORITY_SUGGESTIONS, ...DATE_FIELD_SUGGESTIONS, ...dated].filter((s) =>
 		s.keyword.startsWith(query),
 	);
+}
+
+/** Where a keyword fragment being typed starts, and the fragment itself. */
+export interface Trigger {
+	/** 0-based column of the fragment's first letter. */
+	start: number;
+	/** The letters typed so far. */
+	query: string;
+}
+
+// A task line up to the cursor: checkbox, then a body ending in a whole word of letters.
+const TYPING_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\][ \t]+(?:.*[ \t])?([A-Za-z]+)$/;
+
+/**
+ * Decides whether suggestions should open while typing (§15.2). `beforeCursor` is the
+ * current line up to the cursor. Suggestions open only inside a task line, when the
+ * cursor ends a whole word of at least {@link MIN_FRAGMENT_LENGTH} letters that is a
+ * prefix of some keyword — so ordinary prose only triggers on words that could be one.
+ */
+export function triggerAt(beforeCursor: string, today: string): Trigger | undefined {
+	const m = TYPING_RE.exec(beforeCursor);
+	if (m === null) return undefined;
+	const query = m[1];
+	if (suggestionsFor(query, today).length === 0) return undefined;
+	return { start: beforeCursor.length - query.length, query };
 }
