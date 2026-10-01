@@ -5,7 +5,8 @@ import builtins from "builtin-modules";
 const context = await esbuild.context({
 	entryPoints: ["src/main.ts"],
 	bundle: true,
-	external: ["obsidian", ...builtins],
+	// CodeMirror is Obsidian's own copy at run time: bundling a second one would break it.
+	external: ["obsidian", "@codemirror/state", "@codemirror/view", ...builtins],
 	format: "cjs",
 	target: "es2022",
 	minify: true,

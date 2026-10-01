@@ -48,7 +48,9 @@ application). Adding or changing a dependency is a recorded decision (`AGENTS.md
 `vitest 2.1`; lockfile committed. `manifest.json`: `id: "restask"`, `name: "restask"`,
 `minAppVersion: "1.5.0"`, `isDesktopOnly: false`. `tsconfig.json`: `strict: true`,
 ES2022, bundler resolution. `esbuild.config.mjs` bundles `src/main.ts` → `main.js` (cjs,
-minified, `obsidian` external) and then copies `main.js`, `manifest.json` and `styles.css`
+minified; `obsidian`, `@codemirror/state` and `@codemirror/view` external — Obsidian
+provides all three at run time, and the CodeMirror typings come with the `obsidian`
+package) and then copies `main.js`, `manifest.json` and `styles.css`
 to `crates/restask/assets/obsidian/`. `plugins/obsidian/main.js` is git-ignored; the
 copies under `assets/` are **committed** — the crate embeds them with `include_str!` so
 `restask setup` can install the plugin (§13.2 step 1) from a binary built without Node

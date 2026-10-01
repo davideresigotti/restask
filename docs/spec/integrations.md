@@ -54,18 +54,63 @@ note (§7.1).
 - Commands: `Toggle task done` (cursor line), `Add metadata` (the suggestions as a
   modal).
 - An `EditorSuggest` for §15.2's while-typing behaviour.
+- The editor extension and the reading-view post-processor of §15.5.
 - Settings: `doneHeading` (must equal `done_heading` in `restask.toml`; setup seeds it
   for a non-default heading when the plugin has no settings yet),
-  `suggestWhileTyping` (default on).
+  `suggestWhileTyping` (default on), `hideTaskIds` (default on; switching it takes
+  effect in open notes at once).
+
+### 15.5 `conceal.ts`, `editor.ts` — the `🆔` token is not shown
+
+The token is the task's identity and **stays in the file**; the plugin only keeps it off
+the screen. Nothing in the engine, the grammar or the vault changes.
+
+- **What is hidden** (`uidToken`, pure): on a task line (§6.1 shape), the token the
+  parser reads the UID from — the first `🆔` match, with a valid ULID — together with the
+  blanks before it. A token on a non-task line, a malformed one and a second one on the
+  same line stay visible: they are not a task's identity, and the user should see them.
+  The check is per line (a task-shaped line inside a code fence counts).
+- **Editor** (`editor.ts`, the only file that uses CodeMirror — Obsidian's own copy,
+  external to the bundle): a replace decoration hides the range in Live Preview and in
+  source mode. Copying a line still copies its token, so moving a task keeps its UID.
+- **Reading view**: a post-processor removes the token from the text of each rendered
+  task item (`stripUid`).
+
+A token nobody sees is easy to destroy, and a destroyed or displaced token is a deleted
+task plus a new one on the server. So `editor.ts` also installs a transaction filter
+(`uidGuard`) that makes the hidden range behave like the end of the line:
+
+| Situation | Result |
+|---|---|
+| Cursor sent behind or into the token (End, click, arrow keys) | rests in front of it; moving right from there passes the token |
+| Selection started inside the line's text and extended to the line end | ends in front of the token |
+| Text typed or inserted inside / right behind the token | goes in front of it |
+| Line break at the token (Enter, Shift+Enter, multi-line paste) | goes behind it: the token stays on its line, the new line has none |
+| Deletion or replacement that covers part of the line and the token | cut around the token |
+| Backspace / Delete that would hit only the token | takes the visible character before / after it (Delete at the line end: nothing) |
+| Deletion that covers the task's whole body, the whole line or whole lines | removes the token with it |
+
+The filter leaves alone transactions that replay valid documents: a reload from disk
+(Obsidian's `set` event — the daemon may rewrite a token, §6.4), undo and redo.
+Everything else is guarded, whether or not it carries a user event. With `hideTaskIds`
+off neither the decoration nor the filter is installed.
 
 ## §16 Neovim (`neovim/lua/restask/`)
 
-A thin wrapper over the CLI — no Markdown logic in Lua beyond recognising a task line.
+A thin wrapper over the CLI — no Markdown logic in Lua beyond recognising a task line
+and the `🆔` token.
 
 - `toggle.lua`: `action_for(line)` classifies the cursor line (`[ ]` → `done`,
   `[x]`/`[X]` → `undone`, else nothing). `toggle()` writes the buffer if modified, runs
   `restask <action> --file <absolute path> --line <n>`, and reloads the buffer. `add()`
   prompts and runs `restask add`.
-- `init.lua`: `require("restask").setup({ keymaps = true })` → `<leader>td` toggle,
-  `<leader>ta` add. Errors surface through `vim.notify`.
+- `conceal.lua`: hides the `🆔` token (and the blanks before it) in windows that show a
+  Markdown file of a vault (a `restask.toml` or `.restask/` above the file). The file is
+  not changed: a window match conceals the text, `conceallevel` is raised to 2 and the
+  modes of `concealcursor` (default `nc`) are added to the window's option; all three
+  are undone when the window shows something else. Insert mode is not among the default
+  modes, so the line being typed in shows its token — Neovim has no guard like §15.5's.
+- `init.lua`: `require("restask").setup({ keymaps = true, conceal = true })` →
+  `<leader>td` toggle, `<leader>ta` add, tokens concealed (`conceal = false` turns that
+  off, `concealcursor = "…"` chooses the modes). Errors surface through `vim.notify`.
 - Gates: `luac -p neovim/lua/restask/*.lua`; `lua neovim/test/toggle_test.lua`.

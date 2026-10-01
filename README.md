@@ -21,7 +21,7 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 | 🔁 | repeats | `🔁 every week`, `🔁 every 2 weeks on Monday, Thursday`, `🔁 every month on the 15th`, `🔁 every month on the last Friday`, `🔁 every year`, `… for 5 times`, `… until 2026-12-31` |
 | ✅ | completed on | `✅ 2026-09-19` |
 | ➕ | created on (added automatically) | `➕ 2026-09-17` |
-| 🆔 | the task's UID (added automatically; leave it alone) | `🆔 restask-01jz…` |
+| 🆔 | the task's UID (added automatically; leave it alone — the Obsidian plugin and the Neovim integration keep it out of sight) | `🆔 restask-01jz…` |
 
 # Task Structure & Workflow
 
@@ -89,5 +89,5 @@ restask follows a strict **local-first and offline-first** philosophy. All core 
 
 ## Desktop / PC
 - **Obsidian Vault**: View and manage tasks directly within Markdown notes and `TODO.md`.
-- **NeoVim**: `<leader>td` toggles the task under the cursor, `<leader>ta` captures one.
+- **NeoVim**: `<leader>td` toggles the task under the cursor, `<leader>ta` captures one; the `🆔` tokens are concealed.
 - **CalDAV Clients (Thunderbird)**: View and interact with tasks in desktop applications like Mozilla Thunderbird, kept in sync with the vault via Radicale and VTODO.

@@ -1,9 +1,9 @@
 /**
- * restask Obsidian plugin (docs/spec/integrations.md §15): commands, suggestions and
- * settings.
+ * restask Obsidian plugin (docs/spec/integrations.md §15): commands, suggestions,
+ * settings, and hiding the `🆔` token.
  *
- * This file isolates every Obsidian API call; markdown.ts, modal.ts and toggle.ts stay
- * API-free and unit-testable. The plugin only edits Markdown — on the desktop and on
+ * This file isolates every Obsidian API call; markdown.ts, modal.ts, toggle.ts and
+ * conceal.ts stay API-free and unit-testable, and editor.ts uses CodeMirror only. The plugin only edits Markdown — on the desktop and on
  * the phone alike. The restask daemon picks the edits up from the vault (carried by
  * file sync) and talks to the CalDAV server; the plugin never does.
  */
@@ -15,10 +15,14 @@ import {
 	EditorSuggest,
 	EditorSuggestContext,
 	EditorSuggestTriggerInfo,
+	MarkdownView,
 	Notice,
 	Plugin,
 	SuggestModal,
 } from "obsidian";
+import type { Extension } from "@codemirror/state";
+import { stripUid } from "./conceal";
+import { uidConcealment } from "./editor";
 import { suggestionsFor, triggerAt, type Suggestion } from "./modal";
 import { DEFAULT_SETTINGS, RestaskSettingTab, type RestaskSettings } from "./settings";
 import { toggleDone } from "./toggle";
@@ -99,14 +103,40 @@ class MetadataModal extends SuggestModal<Suggestion> {
 	}
 }
 
+/**
+ * Reading view (§15.5): drops the `🆔` token from the text of each rendered task item.
+ * Only the rendering changes; the note is not touched.
+ */
+function hideUids(el: HTMLElement): void {
+	for (const item of Array.from(el.querySelectorAll("li.task-list-item"))) {
+		const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+		for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+			// The text of a nested item belongs to that item.
+			if (node.parentElement?.closest("li") !== item) continue;
+			const text = node.nodeValue ?? "";
+			const stripped = stripUid(text);
+			if (stripped === text) continue;
+			node.nodeValue = stripped;
+			break;
+		}
+	}
+}
+
 /** The restask plugin (§15.4). */
 export default class RestaskPlugin extends Plugin {
 	settings: RestaskSettings = DEFAULT_SETTINGS;
+	/** Registered once; its contents follow the `hideTaskIds` setting. */
+	private readonly editorExtensions: Extension[] = [];
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.addSettingTab(new RestaskSettingTab(this.app, this));
 		this.registerEditorSuggest(new MetadataSuggest(this.app, this));
+		this.registerEditorExtension(this.editorExtensions);
+		this.registerMarkdownPostProcessor((el) => {
+			if (this.settings.hideTaskIds) hideUids(el);
+		});
+		this.applyConcealment();
 
 		this.addCommand({
 			id: "toggle-task-done",
@@ -125,6 +155,16 @@ export default class RestaskPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	/** Brings open editors and reading views in line with the `hideTaskIds` setting (§15.5). */
+	applyConcealment(): void {
+		this.editorExtensions.length = 0;
+		if (this.settings.hideTaskIds) this.editorExtensions.push(uidConcealment());
+		this.app.workspace.updateOptions();
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			if (leaf.view instanceof MarkdownView) leaf.view.previewMode.rerender(true);
+		});
 	}
 
 	private async loadSettings(): Promise<void> {

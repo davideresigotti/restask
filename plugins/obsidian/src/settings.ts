@@ -8,12 +8,15 @@ export interface RestaskSettings {
 	doneHeading: string;
 	/** Offer metadata suggestions while typing in a task line (§15.2). */
 	suggestWhileTyping: boolean;
+	/** Keep the `🆔` token of task lines off the screen (§15.5); it stays in the note. */
+	hideTaskIds: boolean;
 }
 
 /** Defaults per §15.4. */
 export const DEFAULT_SETTINGS: RestaskSettings = {
 	doneHeading: DEFAULT_DONE_HEADING,
 	suggestWhileTyping: true,
+	hideTaskIds: true,
 };
 
 /** Settings tab exposing the §15.4 options. */
@@ -48,6 +51,19 @@ export class RestaskSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.suggestWhileTyping).onChange(async (value) => {
 					this.plugin.settings.suggestWhileTyping = value;
 					await this.plugin.saveSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Hide task IDs")
+			.setDesc(
+				"Do not show the 🆔 token of task lines, in the editor and in reading view. The token stays in the note: it is what links the line to its task on the server. Turn this off to see it, for instance when a task does not sync.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.hideTaskIds).onChange(async (value) => {
+					this.plugin.settings.hideTaskIds = value;
+					await this.plugin.saveSettings();
+					this.plugin.applyConcealment();
 				}),
 			);
 	}

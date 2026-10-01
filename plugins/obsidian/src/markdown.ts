@@ -101,7 +101,8 @@ const ULID_BODY_RE = /^[0-9a-hjkmnp-tv-z]{26}$/;
 const HEADING_RE = /^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 const FENCE_RE = /^\s*(`{3,}|~{3,})/;
 
-interface Span {
+/** A half-open range of UTF-16 offsets in a line or body. */
+export interface Span {
 	start: number;
 	end: number;
 }
@@ -247,6 +248,24 @@ function collectRecurrence(body: string): { value: string | undefined; spans: Sp
 	if (length === undefined) return { value: undefined, spans: [] };
 	const start = at + "🔁".length + gap;
 	return { value: rule.slice(0, length), spans: [{ start: at, end: start + length }] };
+}
+
+/** Offset at which the body of a task line starts (§6.1), or undefined when the line is not a task. */
+export function bodyStart(line: string): number | undefined {
+	const m = LINE_RE.exec(line);
+	if (m === null || m.groups === undefined) return undefined;
+	return m[0].length - m.groups["body"].length;
+}
+
+/**
+ * The token that gives `body` its UID (§6.1): the first `🆔` match, and only when its
+ * value is a valid ULID — the same token `parseLine` reads the `uid` field from.
+ */
+export function uidSpan(body: string): Span | undefined {
+	UID_RE.lastIndex = 0;
+	const m = UID_RE.exec(body);
+	if (m === null || !ULID_BODY_RE.test(m[1].slice(UID_PREFIX_LENGTH))) return undefined;
+	return { start: m.index, end: m.index + m[0].length };
 }
 
 /** Parses one line against the §6.1 grammar; non-task lines (including `1. [ ]`, `-[ ]`) → undefined. */
