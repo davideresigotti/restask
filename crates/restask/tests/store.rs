@@ -149,7 +149,7 @@ fn tombstones_prune_old_entries() {
     tombstones.insert(uid(UID1), now - Duration::days(400));
     tombstones.insert(uid(UID2), now - Duration::hours(1));
 
-    tombstones.prune(Duration::days(365));
+    tombstones.prune(Duration::days(365), now);
     assert!(
         !tombstones.contains(&uid(UID1)),
         "400-day-old tombstone must be pruned"
@@ -169,6 +169,37 @@ fn tombstones_prune_old_entries() {
 #[test]
 fn tombstones_prune_empty_is_noop() {
     let mut tombstones = Tombstones::default();
-    tombstones.prune(Duration::days(365));
+    tombstones.prune(Duration::days(365), Utc::now());
     assert!(!tombstones.contains(&uid(UID1)));
+}
+
+#[test]
+fn tombstones_remove_clears_a_marker() {
+    let mut tombstones = Tombstones::default();
+    tombstones.insert(uid(UID1), Utc::now());
+    assert!(tombstones.remove(&uid(UID1)));
+    assert!(!tombstones.remove(&uid(UID1)));
+    assert_eq!(tombstones.uids().count(), 0);
+}
+
+#[test]
+fn unchanged_state_files_are_not_rewritten() {
+    // An idempotent sync pass must not bump mtimes: every rewrite is a file-sync event
+    // on every device.
+    let dir = tempdir().unwrap();
+    let mut tombstones = Tombstones::default();
+    tombstones.insert(uid(UID1), Utc::now());
+    tombstones.save(dir.path()).unwrap();
+    Index::default().save(dir.path()).unwrap();
+    let stamp = |name: &str| {
+        std::fs::metadata(dir.path().join(name))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let before = (stamp("tombstones.json"), stamp("index.json"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    tombstones.save(dir.path()).unwrap();
+    Index::default().save(dir.path()).unwrap();
+    assert_eq!(before, (stamp("tombstones.json"), stamp("index.json")));
 }

@@ -1,16 +1,13 @@
-//! Persistent per-vault state under `.restask/` (§9). Adapter layer — together with
-//! `sync::engine`, `setup`, and `daemon`, the only place that touches `std::fs`.
+//! Persistent per-vault state under `.restask/` (§9): the index, the base snapshots and
+//! the tombstones. Adapter layer over [`crate::fsio`].
 //!
-//! Every state file is written atomically (hidden `.<name>.restask-tmp` + fsync + rename,
-//! shared with the markdown mutator) once per reconcile cycle and is fully reconstructible
-//! via `restask rebuild` from vault + Radicale.
+//! Every file is written atomically and only when its content changes; all of it is
+//! disposable — the next reconcile re-derives it from vault + server.
 
 pub mod cache;
 pub mod index;
-pub mod outbox;
 pub mod tombstones;
 
 pub use cache::{cache_path, cache_read, cache_remove, cache_write};
 pub use index::{Index, IndexEntry};
-pub use outbox::{OutboundOp, Outbox};
 pub use tombstones::Tombstones;

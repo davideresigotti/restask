@@ -79,9 +79,18 @@ fn created_date_synthesizes_midnight_utc() {
 }
 
 #[test]
-fn created_absent_falls_back_to_now_utc() {
+fn created_absent_emits_no_created_and_round_trips_as_absent() {
+    // A line without ➕ must not gain a creation date by being pushed: the serializer
+    // inventing one would make the server copy differ from the vault forever.
     let out = to_vcalendar(&base_task(), clock().now_utc());
-    assert!(out.contains("CREATED:20260922T143000Z\r\n"));
+    assert!(!out.contains("CREATED"));
+    let back = from_vcalendar(&out, &clock().local_offset(), &list()).unwrap();
+    assert_eq!(back.task.created, None);
+    assert_eq!(back.task.thumbprint(), {
+        let mut expected = base_task();
+        expected.list = list();
+        expected.thumbprint()
+    });
 }
 
 #[test]
@@ -165,7 +174,7 @@ fn reverse_created_formats_the_utc_calendar_date() {
         "CREATED:20260919T233000Z\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, tz, &list()).unwrap();
+    let remote = from_vcalendar(text, &tz, &list()).unwrap();
     assert_eq!(
         remote.task.created,
         Some(LocalDate::parse("2026-09-19").unwrap())
@@ -183,7 +192,7 @@ fn reverse_completed_formats_the_utc_calendar_date() {
         "COMPLETED:20260920T033000Z\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, clock().local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(text, &clock().local_offset(), &list()).unwrap();
     assert_eq!(
         remote.task.status,
         Status::Completed {
@@ -201,7 +210,7 @@ fn reverse_utc_due_becomes_device_local_wall_time() {
         "DUE:20260919T170000Z\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, clock().local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(text, &clock().local_offset(), &list()).unwrap();
     assert_eq!(
         remote.task.due,
         Some(When::parse_date_or_datetime("2026-09-19 19:00").unwrap())
@@ -218,7 +227,7 @@ fn reverse_tzid_due_becomes_device_local_wall_time() {
         "DUE;TZID=America/New_York:20260919T170000\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, clock().local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(text, &clock().local_offset(), &list()).unwrap();
     assert_eq!(
         remote.task.due,
         Some(When::parse_date_or_datetime("2026-09-19 23:00").unwrap())
@@ -234,7 +243,7 @@ fn reverse_value_date_stays_date_only() {
         "DUE;VALUE=DATE:20260919\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, clock().local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(text, &clock().local_offset(), &list()).unwrap();
     assert_eq!(
         remote.task.due,
         Some(When::Date(LocalDate::parse("2026-09-19").unwrap()))
@@ -250,7 +259,7 @@ fn reverse_floating_due_stays_floating() {
         "DUE:20260919T170000\r\n",
         "END:VTODO\r\n",
     );
-    let remote = from_vcalendar(text, clock().local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(text, &clock().local_offset(), &list()).unwrap();
     assert_eq!(
         remote.task.due,
         Some(When::parse_date_or_datetime("2026-09-19 17:00").unwrap())
@@ -273,7 +282,7 @@ fn contract_round_trips_both_directions() {
     task.scheduled = Some(When::parse_date_or_datetime("2026-09-23 07:30").unwrap());
 
     let serialized = to_vcalendar(&task, clock.now_utc());
-    let remote = from_vcalendar(&serialized, clock.local_offset(), &list()).unwrap();
+    let remote = from_vcalendar(&serialized, &clock.local_offset(), &list()).unwrap();
     assert_eq!(remote.task.created, task.created);
     assert_eq!(remote.task.status, task.status);
     assert_eq!(remote.task.priority, task.priority);

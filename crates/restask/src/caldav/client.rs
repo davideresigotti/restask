@@ -6,31 +6,30 @@
 //!
 //! Retry budget (§10.4): network errors, `5xx` and `429` are retried with 1 s / 2 s / 4 s
 //! backoff (4 attempts total). `401/403` are fatal for the cycle (`CaldavErrorKind::Auth`);
-//! `412` on `PUT` returns `CaldavErrorKind::Conflict` immediately (no budget consumed) so
-//! the engine can re-fetch and re-plan that UID.
+//! `412` returns `CaldavErrorKind::Conflict` immediately (no budget consumed): the engine
+//! leaves that task unsettled and the next cycle re-plans it from a fresh snapshot.
+//!
+//! The client holds no sync state: etags come from the caller (§10.2).
 
-use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, Utc};
 use reqwest::header::{ETAG, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Client, Method, RequestBuilder, Response};
 
-use crate::caldav::port::{CaldavPort, CollectionInfo};
+use crate::caldav::port::{CaldavPort, CollectionInfo, RemoteResource};
 use crate::caldav::protocol::{
-    mkcol_body, parse_collections, parse_etags, propfind_collections_body, report_vtodo_etags,
+    mkcol_body, parse_collections, parse_report, propfind_collections_body, report_vtodos,
 };
 use crate::domain::{ListSlug, Task};
-use crate::vtodo::{from_vcalendar, to_vcalendar, RemoteTask};
+use crate::vtodo::{from_vcalendar, to_vcalendar_with};
 use crate::{CaldavErrorKind, RestaskError};
 
 /// Standard retry budget (§10.4): 1 s, 2 s, 4 s — four attempts total.
 const DEFAULT_RETRY_DELAYS: [u64; 3] = [1, 2, 4];
 
-/// The concrete [`CaldavPort`] over HTTP (§10.3). Cloneable; the etag memo is shared
-/// between clones.
+/// The concrete [`CaldavPort`] over HTTP (§10.3).
 #[derive(Clone)]
 pub struct CaldavClient {
     http: Client,
@@ -38,11 +37,6 @@ pub struct CaldavClient {
     username: String,
     password: Option<String>,
     delays: Vec<Duration>,
-    tz: chrono::FixedOffset,
-    /// Etags observed for managed resources, keyed by resource path
-    /// (`/{user}/{slug}/{name}.ics`). Filled by `fetch`/`put` responses; `put` uses it to
-    /// choose `If-Match` over `If-None-Match: *` (§10.2).
-    etags: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl fmt::Debug for CaldavClient {
@@ -94,8 +88,6 @@ impl CaldavClient {
             username,
             password,
             delays,
-            tz: *Local::now().offset(),
-            etags: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -112,27 +104,6 @@ impl CaldavClient {
     /// `{url}/{username}/{slug}/{name}.ics` (§10.2).
     fn resource_url(&self, slug: &ListSlug, name: &str) -> String {
         format!("{}{}.ics", self.collection_url(slug), name)
-    }
-
-    /// Stable map key for the etag memo.
-    fn resource_path(&self, slug: &ListSlug, name: &str) -> String {
-        format!("/{}/{}/{}.ics", self.username, slug.as_str(), name)
-    }
-
-    fn lock_etags(&self) -> MutexGuard<'_, HashMap<String, String>> {
-        self.etags.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn known_etag(&self, path: &str) -> Option<String> {
-        self.lock_etags().get(path).cloned()
-    }
-
-    fn remember_etag(&self, path: &str, etag: &str) {
-        self.lock_etags().insert(path.to_string(), etag.to_string());
-    }
-
-    fn forget_etag(&self, path: &str) {
-        self.lock_etags().remove(path);
     }
 
     /// Adds the `Basic` header only when a password is configured (§17: with auth
@@ -240,19 +211,35 @@ impl CaldavClient {
         })
     }
 
-    /// Reads the `ETag` response header; a missing one is a protocol violation because
-    /// every later `If-Match` depends on it.
-    fn response_etag(response: &Response, operation: &str) -> Result<String, RestaskError> {
+    /// Reads the `ETag` response header; empty when the server sends none (allowed by
+    /// RFC 4791 when it stored a modified body — the next listing supplies the real one).
+    fn response_etag(response: &Response) -> String {
         response
             .headers()
             .get(ETAG)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_string)
-            .ok_or_else(|| RestaskError::Caldav {
-                kind: CaldavErrorKind::Protocol,
-                status: None,
-                detail: format!("{operation}: response lacks an ETag header"),
-            })
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// `GET`s one resource body; `None` when it is gone.
+    async fn get_body(&self, slug: &ListSlug, name: &str) -> Result<Option<String>, RestaskError> {
+        let response = self
+            .request(Method::GET, &self.resource_url(slug, name), None, None)
+            .await?;
+        match response.status().as_u16() {
+            404 => Ok(None),
+            200 => response
+                .text()
+                .await
+                .map(Some)
+                .map_err(|error| RestaskError::Caldav {
+                    kind: CaldavErrorKind::Network,
+                    status: None,
+                    detail: format!("fetch: body read failed: {error}"),
+                }),
+            status => Err(Self::status_error(status, "fetch")),
+        }
     }
 }
 
@@ -340,71 +327,68 @@ impl CaldavPort for CaldavClient {
         }
     }
 
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError> {
+    async fn list_tasks(
+        &self,
+        slug: &ListSlug,
+    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
         let response = self
             .request(
                 webdav_method("REPORT")?,
                 &self.collection_url(slug),
-                Some(report_vtodo_etags()),
+                Some(report_vtodos()),
                 Some(1),
             )
             .await?;
-        let body = Self::expect_body(response, &[207], "list_etags").await?;
-        Ok(parse_etags(&body))
-    }
-
-    async fn fetch(
-        &self,
-        slug: &ListSlug,
-        name: &str,
-    ) -> Result<Option<(RemoteTask, String)>, RestaskError> {
-        let response = self
-            .request(Method::GET, &self.resource_url(slug, name), None, None)
-            .await?;
-        match response.status().as_u16() {
-            404 => Ok(None),
-            200 => {
-                let etag = Self::response_etag(&response, "fetch")?;
-                let body = response
-                    .text()
-                    .await
-                    .map_err(|error| RestaskError::Caldav {
-                        kind: CaldavErrorKind::Network,
-                        status: None,
-                        detail: format!("fetch: body read failed: {error}"),
-                    })?;
-                let remote = from_vcalendar(&body, self.tz, slug)?;
-                self.remember_etag(&self.resource_path(slug, name), &etag);
-                Ok(Some((remote, etag)))
-            }
-            status => Err(Self::status_error(status, "fetch")),
+        if response.status().as_u16() == 404 {
+            return Ok(None);
         }
+        let body = Self::expect_body(response, &[207], "list_tasks").await?;
+        let mut resources = Vec::new();
+        for item in parse_report(&body) {
+            // Servers that do not inline calendar-data get one GET per resource.
+            let data = if item.data.is_empty() {
+                match self.get_body(slug, &item.name).await? {
+                    Some(data) => data,
+                    None => continue,
+                }
+            } else {
+                item.data
+            };
+            // `Local` resolves the device offset valid at each instant (DST-correct, §4).
+            match from_vcalendar(&data, &Local, slug) {
+                Ok(task) => resources.push(RemoteResource {
+                    name: item.name,
+                    etag: item.etag,
+                    task,
+                }),
+                Err(error) => {
+                    tracing::warn!(list = %slug.as_str(), name = %item.name, %error, "unreadable remote resource skipped");
+                }
+            }
+        }
+        Ok(Some(resources))
     }
 
-    async fn put(&self, task: &Task) -> Result<String, RestaskError> {
-        let name = task.uid.as_str();
+    async fn put(
+        &self,
+        task: &Task,
+        name: &str,
+        extras: &[String],
+        if_match: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<String, RestaskError> {
         let url = self.resource_url(&task.list, name);
-        let path = self.resource_path(&task.list, name);
         let mut builder = self
             .authenticate(self.http.request(Method::PUT, &url))
             .header("Content-Type", "text/calendar; charset=utf-8")
-            .body(to_vcalendar(task, Utc::now()));
-        match self.known_etag(&path) {
-            Some(etag) => builder = builder.header(IF_MATCH, etag),
-            None => builder = builder.header(IF_NONE_MATCH, "*"),
-        }
+            .body(to_vcalendar_with(task, now, extras));
+        builder = match if_match {
+            Some(etag) => builder.header(IF_MATCH, etag),
+            None => builder.header(IF_NONE_MATCH, "*"),
+        };
         let response = self.send(builder).await?;
         match response.status().as_u16() {
-            201 | 204 => {
-                let etag = Self::response_etag(&response, "put")?;
-                self.remember_etag(&path, &etag);
-                Ok(etag)
-            }
-            // The memo (if any) is stale; the engine re-fetches and re-plans (§10.4).
-            412 => {
-                self.forget_etag(&path);
-                Err(Self::status_error(412, "put"))
-            }
+            200 | 201 | 204 => Ok(Self::response_etag(&response)),
             status => Err(Self::status_error(status, "put")),
         }
     }
@@ -425,10 +409,7 @@ impl CaldavPort for CaldavClient {
         let response = self.send(builder).await?;
         match response.status().as_u16() {
             // 404 is success: the resource is already gone (idempotent cleanup).
-            200 | 204 | 404 => {
-                self.forget_etag(&self.resource_path(slug, name));
-                Ok(())
-            }
+            200 | 204 | 404 => Ok(()),
             status => Err(Self::status_error(status, "delete")),
         }
     }

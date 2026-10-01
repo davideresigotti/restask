@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::task::ListSlug;
 use crate::domain::uid::TaskUid;
-use crate::markdown::mutator::write_atomic;
+use crate::fsio::write_if_changed;
 use crate::RestaskError;
 
 /// Name of the index file inside `.restask/`.
@@ -17,8 +17,10 @@ const FILE_NAME: &str = "index.json";
 
 /// Bookkeeping for one known task UID (§9.1).
 ///
-/// `caldav_etag: Some(_)` means "was on the server" — the flag that distinguishes a *new
-/// local task* (push) from a *server-side deletion* (tombstone locally).
+/// `caldav_etag: Some(_)` means "the vault and the server agreed on this task": it
+/// distinguishes a *new local task* (push) from a *server-side deletion* (remove the
+/// line), and it vouches for the base snapshot in `.restask/tasks/` whose thumbprint
+/// equals `thumbprint`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
     /// Eternal task identifier (duplicated from the map key for entry-wise access).
@@ -27,7 +29,7 @@ pub struct IndexEntry {
     pub list: ListSlug,
     /// Vault-relative path of the source note.
     pub source_path: String,
-    /// Content thumbprint (`Task::thumbprint`) at last reconciliation.
+    /// Thumbprint (`Task::thumbprint`) of the base snapshot written at the last settle.
     pub thumbprint: u64,
     /// ETag of the server copy; `None` = never pushed.
     pub caldav_etag: Option<String>,
@@ -60,7 +62,7 @@ impl Index {
     }
 
     /// Saves the index to `dir/index.json` atomically (tmp + fsync + rename), creating
-    /// `dir` if needed.
+    /// `dir` if needed. An unchanged index is not rewritten (no mtime churn).
     pub fn save(&self, dir: &Path) -> Result<(), RestaskError> {
         std::fs::create_dir_all(dir)?;
         let mut json =
@@ -69,7 +71,8 @@ impl Index {
                 reason: e.to_string(),
             })?;
         json.push('\n');
-        write_atomic(&dir.join(FILE_NAME), &json)
+        write_if_changed(&dir.join(FILE_NAME), &json)?;
+        Ok(())
     }
 
     /// Returns the entry for `uid`, if known.

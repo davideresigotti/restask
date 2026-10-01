@@ -10,10 +10,10 @@ use chrono::{FixedOffset, TimeZone, Utc};
 use tempfile::TempDir;
 
 use common::{sample_task, temp_vault, write_vault_file, FixedClock, MockCaldav};
-use restask::cli::{self, Cli, Command, DoctorStatus, ListAction, Selector};
-use restask::config::{CaldavConfig, ListBinding, MachineConfig};
-use restask::domain::{ListSlug, Priority, TaskUid};
-use restask::store::{cache_path, cache_write, Index, IndexEntry};
+use restask::cli::{self, Cli, Command, DoctorStatus, Selector};
+use restask::config::{CaldavConfig, MachineConfig};
+use restask::domain::{Priority, TaskUid};
+use restask::store::{cache_path, Index};
 use restask::vtodo::to_vcalendar;
 use restask::{CaldavErrorKind, RestaskError};
 
@@ -26,15 +26,9 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// Machine config with the inbox pre-bound (§13.2 step 5 pattern).
+/// Machine config as setup leaves it (endpoint fields are irrelevant to the mock port).
 fn machine() -> MachineConfig {
-    MachineConfig {
-        lists: vec![ListBinding {
-            name: "Inbox".to_string(),
-            collection: "inbox".to_string(),
-        }],
-        ..MachineConfig::default()
-    }
+    MachineConfig::default()
 }
 
 /// Runs one command against the temp vault and mock server.
@@ -224,7 +218,7 @@ async fn done_by_file_and_line() {
 }
 
 #[tokio::test]
-async fn status_counts_active_done_and_backlog() {
+async fn status_counts_active_done_and_pending() {
     let vault = temp_vault();
     let mock = MockCaldav::new();
     let first = add(&vault, &mock, "alpha", None, None).await;
@@ -234,8 +228,23 @@ async fn status_counts_active_done_and_backlog() {
     assert_eq!(report.lists.get("inbox"), Some(&2));
     assert_eq!(report.priorities.get("high"), Some(&1));
     assert_eq!(report.done_today, 0);
-    assert_eq!(report.outbox_backlog, 0);
+    assert_eq!(report.pending, 0);
     assert!(report.last_sync.is_some());
+
+    // A line typed by hand that no sync has seen yet is pending.
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    let gamma = "restask-01jz0000000000000000000009";
+    std::fs::write(
+        vault.path().join("TODO.md"),
+        format!("{todo}- [ ] gamma 🆔 {gamma}\n"),
+    )
+    .unwrap();
+    let report = cli::status_report(vault.path(), clock().as_ref()).unwrap();
+    assert_eq!(report.pending, 1);
+    assert_eq!(report.lists.get("inbox"), Some(&3));
+    run(Command::Sync, vault.path(), &mock).await.unwrap();
+    let report = cli::status_report(vault.path(), clock().as_ref()).unwrap();
+    assert_eq!(report.pending, 0);
 
     run(
         Command::Done {
@@ -252,7 +261,7 @@ async fn status_counts_active_done_and_backlog() {
     .unwrap();
 
     let report = cli::status_report(vault.path(), clock().as_ref()).unwrap();
-    assert_eq!(report.lists.get("inbox"), Some(&1));
+    assert_eq!(report.lists.get("inbox"), Some(&2));
     assert_eq!(report.priorities.get("high"), Some(&1));
     assert_eq!(report.done_today, 1);
 }
@@ -267,58 +276,56 @@ async fn status_json_is_serializable() {
     let json = serde_json::to_string(&report).unwrap();
     assert!(json.contains("\"lists\":{\"inbox\":1}"));
     assert!(json.contains("\"done_today\":0"));
-    assert!(json.contains("\"outbox_backlog\":0"));
+    assert!(json.contains("\"pending\":0"));
     assert!(json.contains("\"last_sync\":"));
 }
 
 #[tokio::test]
-async fn rebuild_rederives_state_preserves_etags_and_prunes() {
+async fn rebuild_drops_the_sync_state_and_the_next_sync_rederives_it() {
     let vault = temp_vault();
     let mock = MockCaldav::new();
     let alpha = add(&vault, &mock, "alpha", None, None).await;
     add(&vault, &mock, "beta", None, None).await;
     let state = vault.path().join(".restask");
-    let now = Utc.with_ymd_and_hms(2026, 9, 23, 12, 0, 0).unwrap();
-
     let alpha_uid = TaskUid::parse(&alpha).unwrap();
-    let alpha_etag = Index::load(&state)
-        .unwrap()
-        .get(&alpha_uid)
-        .unwrap()
-        .caldav_etag
-        .clone()
-        .unwrap();
+    assert!(cache_path(&state, &alpha_uid).exists());
 
-    // A stale entry + cache from a task no longer in the vault.
+    // A deletion that must stay remembered across the rebuild.
     let ghost = TaskUid::generate();
-    let mut index = Index::load(&state).unwrap();
-    index.upsert(IndexEntry {
-        uid: ghost.clone(),
-        list: ListSlug::from_name("Ghost").unwrap(),
-        source_path: "gone.md".to_string(),
-        thumbprint: 0,
-        caldav_etag: Some("stale".to_string()),
-        seen_at: now,
-        defer_count: 0,
-    });
-    index.save(&state).unwrap();
-    cache_write(&state, &sample_task(ghost.as_str(), "ghost", "ghost"), now).unwrap();
-    assert!(cache_path(&state, &ghost).exists());
+    let mut tombstones = restask::store::Tombstones::load(&state).unwrap();
+    tombstones.insert(
+        ghost.clone(),
+        Utc.with_ymd_and_hms(2026, 9, 22, 11, 0, 0).unwrap(),
+    );
+    tombstones.save(&state).unwrap();
+    let todo_before = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    let puts_before = mock.counters().0;
 
     let code = run(Command::Rebuild, vault.path(), &mock).await.unwrap();
     assert_eq!(code, 0);
+    assert!(Index::load(&state).unwrap().entries.is_empty());
+    assert!(!state.join("tasks").exists());
+    assert!(restask::store::Tombstones::load(&state)
+        .unwrap()
+        .contains(&ghost));
+    // Neither the vault nor the server was touched.
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("TODO.md")).unwrap(),
+        todo_before
+    );
+    assert_eq!(mock.resource_names("inbox").len(), 2);
 
+    // The next sync finds both sides equal and simply settles again: no push, no edit.
+    run(Command::Sync, vault.path(), &mock).await.unwrap();
     let after = Index::load(&state).unwrap();
     assert_eq!(after.entries.len(), 2);
-    assert!(after.get(&ghost).is_none());
-    assert!(!cache_path(&state, &ghost).exists());
-    assert_eq!(
-        after.get(&alpha_uid).unwrap().caldav_etag.as_deref(),
-        Some(alpha_etag.as_str())
-    );
+    assert!(after.get(&alpha_uid).unwrap().caldav_etag.is_some());
     assert!(cache_path(&state, &alpha_uid).exists());
-    // Remote untouched: only the two add-pushes ever happened.
-    assert_eq!(mock.resource_names("inbox").len(), 2);
+    assert_eq!(mock.counters().0, puts_before);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("TODO.md")).unwrap(),
+        todo_before
+    );
 }
 
 #[tokio::test]
@@ -353,50 +360,58 @@ async fn daemon_once_reconciles() {
 }
 
 #[tokio::test]
-async fn list_bind_persists_and_create_mkcollections() {
+async fn lists_and_local_commands_need_no_server() {
     let vault = temp_vault();
-    let mock = MockCaldav::new();
+    write_vault_file(
+        &vault,
+        "notes/home.md",
+        "---\nrestask-list-root: Home Lab\n---\n\n- [ ] rack the switch\n",
+    );
+    // `lists` is read-only and offline.
+    let code = run(Command::Lists, vault.path(), &MockCaldav::new())
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    assert!(
+        !std::fs::read_to_string(vault.path().join("notes/home.md"))
+            .unwrap()
+            .contains('🆔'),
+        "a read-only command registers nothing"
+    );
 
-    let code = run(
-        Command::List {
-            action: ListAction::Bind {
-                name: "Home".to_string(),
-                collection: "home".to_string(),
-            },
+    // `add` on a machine without a CalDAV endpoint saves to the vault and exits 0.
+    let code = cli::run_with(
+        Command::Add {
+            text: "captured offline".to_string(),
+            priority: None,
+            due: None,
         },
-        vault.path(),
-        &mock,
+        vault.path().to_path_buf(),
+        machine(),
+        vault.path().join("machine.toml"),
+        restask::caldav::Offline,
+        clock(),
     )
     .await
     .unwrap();
     assert_eq!(code, 0);
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.contains("- [ ] captured offline"));
+}
 
-    let saved = MachineConfig::load(&vault.path().join("machine.toml")).unwrap();
-    assert_eq!(saved.lists.len(), 2); // the pre-bound Inbox + Home
-    assert!(saved
-        .lists
-        .iter()
-        .any(|b| b.name == "Home" && b.collection == "home"));
-
-    let code = run(
-        Command::List {
-            action: ListAction::Create {
-                name: "Work".to_string(),
-            },
-        },
-        vault.path(),
-        &mock,
-    )
-    .await
-    .unwrap();
-    assert_eq!(code, 0);
-    assert!(mock.collection_names().iter().any(|slug| slug == "work"));
-
-    let saved = MachineConfig::load(&vault.path().join("machine.toml")).unwrap();
-    assert!(saved
-        .lists
-        .iter()
-        .any(|b| b.name == "Work" && b.collection == "work"));
+#[test]
+fn an_absolute_file_selector_finds_its_vault_from_the_file() {
+    let vault = temp_vault();
+    write_vault_file(&vault, "deep/er/note.md", "- [ ] x\n");
+    let file = vault.path().join("deep/er/note.md");
+    let resolved = cli::resolve_vault_for_file(None, file.to_str()).unwrap();
+    assert_eq!(resolved, vault.path());
+    // An explicit --vault still wins.
+    let flag = PathBuf::from("/elsewhere");
+    assert_eq!(
+        cli::resolve_vault_for_file(Some(&flag), file.to_str()).unwrap(),
+        flag
+    );
 }
 
 #[test]
@@ -587,7 +602,7 @@ async fn doctor_reports_an_invalid_vault_config_as_exit_four() {
 }
 
 #[tokio::test]
-async fn doctor_flags_uid_conflicts_as_exit_one() {
+async fn doctor_reports_duplicated_lines_as_a_warning() {
     let vault = temp_vault();
     let uid = TaskUid::generate();
     let line = format!("- [ ] shared 🆔 {uid}");
@@ -605,17 +620,27 @@ async fn doctor_flags_uid_conflicts_as_exit_one() {
     std::fs::write(&passwd, "secret").unwrap();
     let machine = doctor_machine(Some(passwd));
 
+    // A copied line is something the next sync repairs, not a broken vault.
     let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
-    assert_eq!(report.exit_code, 1);
+    assert_eq!(report.exit_code, 0);
     assert_eq!(status_of(&report, "routing"), Some(DoctorStatus::Ok));
-    assert_eq!(status_of(&report, "scan"), Some(DoctorStatus::Fail));
+    assert_eq!(status_of(&report, "scan"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "duplicates"), Some(DoctorStatus::Warn));
+    // Doctor itself changed nothing.
+    assert!(std::fs::read_to_string(vault.path().join("notes/b.md"))
+        .unwrap()
+        .contains(uid.as_str()));
 }
 
 #[tokio::test]
 async fn doctor_warns_on_missing_marker_and_conflict_files_without_failing() {
     let vault = temp_vault();
     std::fs::write(vault.path().join("TODO.md"), "- [ ] plain without marker\n").unwrap();
-    write_vault_file(&vault, "notes/sync-conflict-20260922.md", "junk\n");
+    write_vault_file(
+        &vault,
+        "notes/home.sync-conflict-20260922-101500-ABCDEFG.md",
+        "junk\n",
+    );
     let passwd = vault.path().join("radicale.passwd");
     std::fs::write(&passwd, "secret").unwrap();
     let machine = doctor_machine(Some(passwd));

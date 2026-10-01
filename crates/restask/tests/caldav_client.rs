@@ -1,6 +1,7 @@
 //! §10.2–10.4 client tests against an in-process blocking HTTP mock backed by
-//! `std::net::TcpListener`: MKCOL/REPORT/GET/PUT etag flows, 401/412/5xx handling, retry
-//! budget, and Basic auth headers. Also covers the shared `MockCaldav` fixture.
+//! `std::net::TcpListener`: MKCOL / one-REPORT listing / PUT preconditions, 401/412/5xx
+//! handling, retry budget, and Basic auth headers. Also covers the shared `MockCaldav`
+//! fixture.
 
 mod common;
 
@@ -13,7 +14,7 @@ use std::time::Duration;
 use chrono::NaiveDate;
 
 use common::{sample_task, MockCaldav};
-use restask::caldav::protocol::report_vtodo_etags;
+use restask::caldav::protocol::report_vtodos;
 use restask::caldav::{CaldavClient, CaldavPort};
 use restask::domain::{ListSlug, LocalDate, When};
 use restask::{CaldavErrorKind, RestaskError};
@@ -322,80 +323,157 @@ async fn list_collections_missing_user_home_is_empty() {
     assert!(collections.is_empty());
 }
 
-#[tokio::test]
-async fn list_etags_sends_the_report_query_and_parses_pairs() {
-    let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "REPORT" if request.path == "/me/inbox/" => RawResponse::xml(207, ETAGS_XML),
-        _ => RawResponse::status(500),
-    }));
-    let etags = client(&server.base_url)
-        .list_etags(&slug("inbox"))
-        .await
-        .unwrap();
-    assert_eq!(
-        etags,
-        vec![
-            (UID_A.to_string(), "\"etag-a\"".to_string()),
-            (UID_B.to_string(), "\"etag-b\"".to_string()),
-        ]
-    );
-    let requests = server.requests.lock().unwrap();
-    assert_eq!(requests[0].header("depth"), Some("1"));
-    assert_eq!(requests[0].body, report_vtodo_etags());
+/// Escapes an iCalendar body the way a server inlines it into `calendar-data`.
+fn xml_text(body: &str) -> String {
+    body.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// A REPORT answer inlining the bodies of two managed VTODOs.
+fn report_xml() -> String {
+    let item = |uid: &str, etag: &str, summary: &str| {
+        format!(
+            "<D:response><D:href>/me/inbox/{uid}.ics</D:href><D:propstat><D:prop>\
+             <D:getetag>\"{etag}\"</D:getetag><C:calendar-data>{}</C:calendar-data>\
+             </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
+            xml_text(&vtodo(uid, summary))
+        )
+    };
+    format!(
+        "<D:multistatus xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">{}{}</D:multistatus>",
+        item(UID_A, "etag-a", "First & foremost"),
+        item(UID_B, "etag-b", "Second")
+    )
+}
+
+fn stamp() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-09-22T14:30:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc)
 }
 
 #[tokio::test]
-async fn fetch_missing_resource_returns_none() {
+async fn list_tasks_is_one_report_carrying_every_body() {
     let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "GET" if request.path == "/me/inbox/gone.ics" => RawResponse::status(404),
+        "REPORT" if request.path == "/me/inbox/" => RawResponse::xml(207, &report_xml()),
         _ => RawResponse::status(500),
     }));
-    let fetched = client(&server.base_url)
-        .fetch(&slug("inbox"), "gone")
+    let resources = client(&server.base_url)
+        .list_tasks(&slug("inbox"))
         .await
+        .unwrap()
         .unwrap();
-    assert!(fetched.is_none());
-}
-
-#[tokio::test]
-async fn fetch_parses_vtodo_and_put_reuses_the_etag() {
-    let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "GET" => {
-            RawResponse::xml(200, &vtodo(UID_A, "Sync from remote")).header("ETag", "\"remote-1\"")
-        }
-        "PUT" => RawResponse::status(204).header("ETag", "\"remote-2\""),
-        _ => RawResponse::status(500),
-    }));
-    let port_client = client(&server.base_url);
-    let inbox = slug("inbox");
-
-    let (remote, etag) = port_client.fetch(&inbox, UID_A).await.unwrap().unwrap();
-    assert_eq!(remote.raw_uid, UID_A);
-    assert!(remote.managed);
-    assert_eq!(remote.task.text, "Sync from remote");
+    assert_eq!(resources.len(), 2);
+    assert_eq!(resources[0].name, UID_A);
+    assert_eq!(resources[0].etag, "\"etag-a\"");
+    assert!(resources[0].task.managed);
+    assert_eq!(resources[0].task.task.text, "First & foremost");
     assert_eq!(
-        remote.task.due,
+        resources[0].task.task.due,
         Some(When::Date(LocalDate(
             NaiveDate::from_ymd_opt(2026, 9, 25).unwrap()
         )))
     );
-    assert_eq!(etag, "\"remote-1\"");
+    assert_eq!(resources[1].etag, "\"etag-b\"");
+    // The whole snapshot of a list costs exactly one request.
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].header("depth"), Some("1"));
+    assert_eq!(requests[0].body, report_vtodos());
+}
 
-    let pushed = port_client
-        .put(&sample_task(UID_A, "inbox", "Sync from remote"))
+#[tokio::test]
+async fn list_tasks_reports_a_missing_collection_as_none() {
+    let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
+    let listed = client(&server.base_url)
+        .list_tasks(&slug("nowhere"))
+        .await
+        .unwrap();
+    assert!(listed.is_none());
+}
+
+#[tokio::test]
+async fn list_tasks_fetches_bodies_the_server_did_not_inline() {
+    let server = spawn_server(Box::new(|request| match request.method.as_str() {
+        "REPORT" => RawResponse::xml(207, ETAGS_XML),
+        "GET" if request.path.ends_with(&format!("{UID_A}.ics")) => {
+            RawResponse::xml(200, &vtodo(UID_A, "Fetched separately"))
+        }
+        // The second resource vanished between the REPORT and the GET.
+        "GET" => RawResponse::status(404),
+        _ => RawResponse::status(500),
+    }));
+    let resources = client(&server.base_url)
+        .list_tasks(&slug("inbox"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].task.task.text, "Fetched separately");
+    assert_eq!(resources[0].etag, "\"etag-a\"");
+}
+
+#[tokio::test]
+async fn list_tasks_skips_resources_without_a_vtodo() {
+    let xml = format!(
+        "<D:multistatus xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">\
+         <D:response><D:href>/me/inbox/junk.ics</D:href><D:propstat><D:prop>\
+         <D:getetag>\"j\"</D:getetag><C:calendar-data>not a calendar</C:calendar-data>\
+         </D:prop></D:propstat></D:response>\
+         <D:response><D:href>/me/inbox/{UID_A}.ics</D:href><D:propstat><D:prop>\
+         <D:getetag>\"a\"</D:getetag><C:calendar-data>{}</C:calendar-data>\
+         </D:prop></D:propstat></D:response></D:multistatus>",
+        xml_text(&vtodo(UID_A, "Fine"))
+    );
+    let server = spawn_server(Box::new(move |_request| RawResponse::xml(207, &xml)));
+    let resources = client(&server.base_url)
+        .list_tasks(&slug("inbox"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resources.len(),
+        1,
+        "one odd resource must not fail the listing"
+    );
+    assert_eq!(resources[0].name, UID_A);
+}
+
+#[tokio::test]
+async fn put_replaces_exactly_the_version_the_caller_saw() {
+    let server = spawn_server(Box::new(|request| match request.method.as_str() {
+        "PUT" => RawResponse::status(204).header("ETag", "\"remote-2\""),
+        _ => RawResponse::status(500),
+    }));
+    let extras = vec!["DESCRIPTION:kept".to_string()];
+    let pushed = client(&server.base_url)
+        .put(
+            &sample_task(UID_A, "inbox", "Edited locally"),
+            UID_A,
+            &extras,
+            Some("\"remote-1\""),
+            stamp(),
+        )
         .await
         .unwrap();
     assert_eq!(pushed, "\"remote-2\"");
     let requests = server.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].method, "PUT");
-    assert_eq!(requests[1].path, format!("/me/inbox/{UID_A}.ics"));
-    assert_eq!(requests[1].header("if-match"), Some("\"remote-1\""));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, format!("/me/inbox/{UID_A}.ics"));
+    assert_eq!(requests[0].header("if-match"), Some("\"remote-1\""));
+    assert!(requests[0].header("if-none-match").is_none());
     assert_eq!(
-        requests[1].header("content-type"),
+        requests[0].header("content-type"),
         Some("text/calendar; charset=utf-8")
     );
-    assert!(requests[1].body.contains(&format!("UID:{UID_A}")));
+    assert!(requests[0].body.contains(&format!("UID:{UID_A}\r\n")));
+    // The caller's instant, not the wall clock, stamps the body.
+    assert!(requests[0]
+        .body
+        .contains("LAST-MODIFIED:20260922T143000Z\r\n"));
+    // Unmanaged content of the replaced resource is written back.
+    assert!(requests[0].body.contains("DESCRIPTION:kept\r\n"));
 }
 
 #[tokio::test]
@@ -405,7 +483,13 @@ async fn put_create_uses_if_none_match_star() {
         _ => RawResponse::status(500),
     }));
     let etag = client(&server.base_url)
-        .put(&sample_task(UID_A, "inbox", "New task"))
+        .put(
+            &sample_task(UID_A, "inbox", "New task"),
+            UID_A,
+            &[],
+            None,
+            stamp(),
+        )
         .await
         .unwrap();
     assert_eq!(etag, "\"fresh\"");
@@ -416,20 +500,35 @@ async fn put_create_uses_if_none_match_star() {
 }
 
 #[tokio::test]
+async fn put_without_an_etag_header_still_succeeds() {
+    let server = spawn_server(Box::new(|_request| RawResponse::status(201)));
+    let etag = client(&server.base_url)
+        .put(
+            &sample_task(UID_A, "inbox", "New task"),
+            UID_A,
+            &[],
+            None,
+            stamp(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(etag, "");
+}
+
+#[tokio::test]
 async fn put_precondition_conflict_without_retry() {
     let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "GET" => RawResponse::xml(200, &vtodo(UID_A, "remote edit")).header("ETag", "\"current\""),
         "PUT" => RawResponse::status(412),
         _ => RawResponse::status(500),
     }));
-    let port_client = client(&server.base_url);
-    port_client
-        .fetch(&slug("inbox"), UID_A)
-        .await
-        .unwrap()
-        .unwrap();
-    let result = port_client
-        .put(&sample_task(UID_A, "inbox", "local edit"))
+    let result = client(&server.base_url)
+        .put(
+            &sample_task(UID_A, "inbox", "local edit"),
+            UID_A,
+            &[],
+            Some("\"stale\""),
+            stamp(),
+        )
         .await;
     match result {
         Err(RestaskError::Caldav {
@@ -439,8 +538,8 @@ async fn put_precondition_conflict_without_retry() {
         }) => {}
         other => panic!("expected a 412 conflict, got {other:?}"),
     }
-    // The 412 is returned immediately: exactly GET + PUT, no retries.
-    assert_eq!(server.requests.lock().unwrap().len(), 2);
+    // The 412 is returned immediately: no retries.
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -469,21 +568,22 @@ async fn server_errors_retry_and_recover() {
         if counter.fetch_add(1, Ordering::SeqCst) < 2 {
             RawResponse::status(500)
         } else {
-            RawResponse::xml(207, ETAGS_XML)
+            RawResponse::xml(207, &report_xml())
         }
     }));
-    let etags = client(&server.base_url)
-        .list_etags(&slug("inbox"))
+    let resources = client(&server.base_url)
+        .list_tasks(&slug("inbox"))
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(etags.len(), 2);
+    assert_eq!(resources.len(), 2);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
 async fn server_errors_exhaust_retry_budget() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(429)));
-    let result = client(&server.base_url).list_etags(&slug("inbox")).await;
+    let result = client(&server.base_url).list_tasks(&slug("inbox")).await;
     match result {
         Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
@@ -519,12 +619,9 @@ async fn network_errors_exhaust_retry_budget() {
 
 #[tokio::test]
 async fn basic_auth_header_is_sent() {
-    let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "GET" => RawResponse::status(404),
-        _ => RawResponse::status(500),
-    }));
+    let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
     client(&server.base_url)
-        .fetch(&slug("inbox"), UID_A)
+        .list_tasks(&slug("inbox"))
         .await
         .unwrap();
     let requests = server.requests.lock().unwrap();
@@ -536,10 +633,7 @@ async fn basic_auth_header_is_sent() {
 
 #[tokio::test]
 async fn no_password_omits_authorization_header() {
-    let server = spawn_server(Box::new(|request| match request.method.as_str() {
-        "GET" => RawResponse::status(404),
-        _ => RawResponse::status(500),
-    }));
+    let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
     let anonymous = CaldavClient::with_retry_delays(
         &server.base_url,
         "me".to_string(),
@@ -547,7 +641,7 @@ async fn no_password_omits_authorization_header() {
         vec![Duration::ZERO; 3],
     )
     .unwrap();
-    anonymous.fetch(&slug("inbox"), UID_A).await.unwrap();
+    anonymous.list_tasks(&slug("inbox")).await.unwrap();
     let requests = server.requests.lock().unwrap();
     assert!(requests[0].header("authorization").is_none());
 }
@@ -577,29 +671,45 @@ async fn delete_sends_if_match_and_tolerates_404() {
 }
 
 #[tokio::test]
-async fn mock_caldav_put_fetch_roundtrip() {
+async fn mock_caldav_enforces_preconditions_like_a_server() {
     let mock = MockCaldav::new();
-    mock.seed_collection("inbox", "Inbox");
     let inbox = slug("inbox");
-    assert_eq!(mock.collection_names(), vec!["inbox".to_string()]);
+    let task = sample_task(UID_A, "inbox", "Mocked task");
 
-    let etag = mock
-        .put(&sample_task(UID_A, "inbox", "Mocked task"))
-        .await
-        .unwrap();
-    assert_eq!(mock.resource_names("inbox"), vec![UID_A.to_string()]);
+    // No collection yet: listing says so, writing fails.
+    assert!(mock.list_tasks(&inbox).await.unwrap().is_none());
+    assert!(mock.put(&task, UID_A, &[], None, stamp()).await.is_err());
 
-    let (remote, stored) = mock.fetch(&inbox, UID_A).await.unwrap().unwrap();
-    assert!(remote.managed);
-    assert_eq!(remote.task.text, "Mocked task");
-    assert_eq!(stored, etag);
+    mock.seed_collection("inbox", "Inbox");
+    let etag = mock.put(&task, UID_A, &[], None, stamp()).await.unwrap();
+    let listed = mock.list_tasks(&inbox).await.unwrap().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].name.as_str(), listed[0].etag.as_str()),
+        (UID_A, etag.as_str())
+    );
+    assert_eq!(listed[0].task.task.text, "Mocked task");
 
+    // Creating twice and replacing a stale version are both precondition failures.
+    for stale in [None, Some("\"nope\"")] {
+        match mock.put(&task, UID_A, &[], stale, stamp()).await {
+            Err(RestaskError::Caldav {
+                kind: CaldavErrorKind::Conflict,
+                ..
+            }) => {}
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+    }
     let rewritten = mock
-        .put(&sample_task(UID_A, "inbox", "Edited"))
+        .put(&task, UID_A, &[], Some(&etag), stamp())
         .await
         .unwrap();
     assert_ne!(etag, rewritten);
-    assert!(mock.fetch(&inbox, UID_B).await.unwrap().is_none());
+
+    assert!(mock.delete(&inbox, UID_A, Some(&etag)).await.is_err());
+    mock.delete(&inbox, UID_A, Some(&rewritten)).await.unwrap();
+    mock.delete(&inbox, UID_A, None).await.unwrap();
+    assert!(mock.resource_names("inbox").is_empty());
 }
 
 #[tokio::test]
@@ -607,7 +717,7 @@ async fn mock_caldav_scripted_failures_fire_once() {
     let mock = MockCaldav::new();
     let inbox = slug("inbox");
     mock.fail_next(CaldavErrorKind::Network);
-    match mock.list_etags(&inbox).await {
+    match mock.list_tasks(&inbox).await {
         Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             ..
@@ -615,5 +725,5 @@ async fn mock_caldav_scripted_failures_fire_once() {
         other => panic!("expected the scripted network failure, got {other:?}"),
     }
     // The script is consumed: the next call succeeds again.
-    assert!(mock.list_etags(&inbox).await.is_ok());
+    assert!(mock.list_tasks(&inbox).await.is_ok());
 }

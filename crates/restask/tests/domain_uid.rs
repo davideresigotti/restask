@@ -81,3 +81,20 @@ fn legacy_prefix_parses_and_is_kept_verbatim() {
     );
     assert!(TaskUid::generate().as_str().starts_with("restask-"));
 }
+
+#[test]
+fn derived_uids_are_deterministic_valid_and_time_ordered() {
+    use chrono::{TimeZone, Utc};
+    let early = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+    let late = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+    let a = TaskUid::derived("abc@tasks.org", Some(early));
+    assert_eq!(a, TaskUid::derived("abc@tasks.org", Some(early)));
+    assert_eq!(TaskUid::parse(a.as_str()).unwrap(), a, "a well-formed UID");
+    assert_ne!(a, TaskUid::derived("abd@tasks.org", Some(early)));
+    // The creation instant leads the ULID, so adopted tasks sort by creation.
+    assert!(a < TaskUid::derived("abc@tasks.org", Some(late)));
+    assert!(TaskUid::derived("zzz", Some(early)) < TaskUid::derived("aaa", Some(late)));
+    // No creation instant: still deterministic (epoch-stamped).
+    assert_eq!(TaskUid::derived("x", None), TaskUid::derived("x", None));
+    assert!(TaskUid::derived("x", None) < a);
+}

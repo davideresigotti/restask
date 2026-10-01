@@ -5,7 +5,7 @@
 //! * **Vault config** — `restask.toml` at the vault root (synced, safe to commit): scanning
 //!   knobs such as `track`/`ignore` globs.
 //! * **Machine config** — `$XDG_CONFIG_HOME/restask/config.toml` (chmod 600, never synced):
-//!   CalDAV endpoint, secret sources and wizard-recorded list bindings.
+//!   CalDAV endpoint and secret sources.
 //!
 //! Secrets never live in config files (§17): a literal `password` key anywhere in a config
 //! document is rejected at parse time. Passwords resolve at call time from the environment or
@@ -14,8 +14,7 @@
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thiserror::Error;
@@ -30,9 +29,6 @@ pub const ENV_CALDAV_URL: &str = "RESTASK_CALDAV_URL";
 pub const ENV_CALDAV_USERNAME: &str = "RESTASK_CALDAV_USERNAME";
 /// Environment variable holding the CalDAV password; always wins over `password_file` (§14.3).
 pub const ENV_CALDAV_PASSWORD: &str = "RESTASK_CALDAV_PASSWORD";
-
-/// Suffix for temporary files used by atomic config writes (gitignored as `*.restask-tmp`).
-const ATOMIC_TMP_SUFFIX: &str = "restask-tmp";
 
 /// Errors produced while loading, validating or saving configuration files.
 #[derive(Debug, Error)]
@@ -133,45 +129,13 @@ pub fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
     }
 }
 
-/// Atomically writes `contents` to `path`: temp file in the same directory
-/// (`<name>.restask-tmp`), fsync, optional Unix mode, then rename over the destination.
+/// Atomically writes a config file through [`crate::fsio`], mapping failures to
+/// [`ConfigError::Io`].
 fn write_atomic(path: &Path, contents: &str, unix_mode: Option<u32>) -> Result<(), ConfigError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().ok_or_else(|| ConfigError::Io {
-        path: path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"),
-    })?;
-    let tmp = dir.join(format!(
-        "{}.{}",
-        file_name.to_string_lossy(),
-        ATOMIC_TMP_SUFFIX
-    ));
-    let _ = fs::remove_file(&tmp);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(unix_mode.unwrap_or(0o644));
-    }
-    #[cfg(not(unix))]
-    let _ = unix_mode;
-    let mut file = options.open(&tmp).map_err(|source| ConfigError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    file.write_all(contents.as_bytes())
-        .and_then(|()| file.flush())
-        .and_then(|()| file.sync_all())
-        .map_err(|source| ConfigError::Io {
-            path: tmp.clone(),
-            source,
-        })?;
-    fs::rename(&tmp, path).map_err(|source| ConfigError::Io {
+    crate::fsio::write_atomic_mode(path, contents, unix_mode).map_err(|source| ConfigError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(())
+    })
 }
 
 fn default_done_heading() -> String {
@@ -288,6 +252,11 @@ impl VaultMatchers {
         }
         self.track.is_match(vault_relative_path)
     }
+
+    /// Whether a vault-relative path is excluded by an `ignore` pattern.
+    pub fn is_ignored(&self, vault_relative_path: &str) -> bool {
+        self.ignore.is_match(vault_relative_path)
+    }
 }
 
 fn compile_globset(patterns: &[String]) -> Result<GlobSet, ConfigError> {
@@ -346,15 +315,6 @@ impl Default for CaldavConfig {
     }
 }
 
-/// One `[[lists]]` binding: Restask list display name → Radicale collection (§14.2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListBinding {
-    /// Display name used in `restask-list` frontmatter.
-    pub name: String,
-    /// Radicale collection the list is bound to.
-    pub collection: String,
-}
-
 /// Machine configuration — `$XDG_CONFIG_HOME/restask/config.toml` (§14.2: chmod 600, never synced).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -363,8 +323,6 @@ pub struct MachineConfig {
     pub vault: VaultSection,
     /// CalDAV endpoint and secret sources.
     pub caldav: CaldavConfig,
-    /// Wizard-recorded list bindings.
-    pub lists: Vec<ListBinding>,
 }
 
 impl MachineConfig {

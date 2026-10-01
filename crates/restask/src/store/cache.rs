@@ -1,14 +1,16 @@
-//! `.restask/tasks/<uid>.ics`: VTODO cache holding the same bytes pushed to Radicale (§9).
+//! `.restask/tasks/<uid>.ics`: the **base snapshots** (§9) — for every settled task, the
+//! content the vault and the server last agreed on, stored as a VTODO. The planner's
+//! three-way merge (§11) uses it as the common ancestor.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 
 use crate::domain::task::{ListSlug, Task};
 use crate::domain::uid::TaskUid;
-use crate::markdown::mutator::write_atomic;
+use crate::fsio::write_atomic;
 use crate::vtodo::{from_vcalendar, to_vcalendar};
 use crate::RestaskError;
 
@@ -36,7 +38,7 @@ fn cache_list() -> Option<ListSlug> {
 /// or unparseable (a corrupt cache is disposable — `rebuild` re-derives it).
 ///
 /// The returned `Task`'s `list` field is a placeholder; overwrite it from the index.
-pub fn cache_read(dir: &Path, uid: &TaskUid, tz: FixedOffset) -> Option<Task> {
+pub fn cache_read<Z: TimeZone>(dir: &Path, uid: &TaskUid, tz: &Z) -> Option<Task> {
     let path = cache_path(dir, uid);
     let contents = match std::fs::read_to_string(&path) {
         Ok(contents) => contents,
@@ -61,12 +63,12 @@ pub fn cache_read(dir: &Path, uid: &TaskUid, tz: FixedOffset) -> Option<Task> {
     Some(remote.task)
 }
 
-/// Serializes `task` (with `now_utc` as DTSTAMP/LAST-MODIFIED) and writes it to the cache
-/// atomically, creating the `tasks/` directory if needed. The bytes match what is pushed
-/// to Radicale for the same task and instant.
+/// Serializes `task` (with `now_utc` as DTSTAMP/LAST-MODIFIED) and writes it as the base
+/// snapshot atomically, creating the `tasks/` directory if needed.
 pub fn cache_write(dir: &Path, task: &Task, now_utc: DateTime<Utc>) -> Result<(), RestaskError> {
     std::fs::create_dir_all(dir.join(TASKS_DIR))?;
-    write_atomic(&cache_path(dir, &task.uid), &to_vcalendar(task, now_utc))
+    write_atomic(&cache_path(dir, &task.uid), &to_vcalendar(task, now_utc))?;
+    Ok(())
 }
 
 /// Removes the cached VTODO for `uid`; a missing entry is not an error.

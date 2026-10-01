@@ -1,29 +1,25 @@
 //! CLI surface (§13.3): clap definition, vault resolution, and command dispatch. A thin
-//! adapter: every state mutation routes through [`crate::sync::Engine`], [`crate::daemon`],
-//! or the store APIs; the read-only scan mirrors the engine's registration pass without
-//! minting UIDs or writing files.
+//! adapter: every vault or server mutation routes through [`crate::sync::Engine`]; the
+//! read-only commands share the engine's scan ([`crate::vault::scan`]) in read-only mode.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::SecondsFormat;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use crate::caldav::{CaldavClient, CaldavPort};
-use crate::config::{
-    machine_config_path, ConfigError, ListBinding, MachineConfig, VaultConfig, VaultMatchers,
-};
+use crate::caldav::{CaldavClient, CaldavPort, Offline};
+use crate::config::{machine_config_path, ConfigError, MachineConfig, VaultConfig};
 use crate::daemon::{self, DaemonConfig};
-use crate::domain::{
-    Clock, ListSlug, Priority, SourceRef, Status, SystemClock, Task, TaskUid, When,
-};
-use crate::markdown::{parse, parser::link_parents, MARKER};
-use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
+use crate::domain::{Clock, Priority, Status, SystemClock, TaskUid, When};
+use crate::markdown::{parse, MARKER};
 use crate::setup;
-use crate::store::{cache_remove, cache_write, Index, IndexEntry};
+use crate::store::{cache_read, Index};
+use crate::sync::merge::fields_differ;
 use crate::sync::Engine;
+use crate::vault::{self, Scan, ScanMode, STATE_DIR};
 use crate::{CaldavErrorKind, RestaskError};
 
 /// `RESTASK_VAULT` (§14.3; ARCHITECTURE naming map).
@@ -101,16 +97,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Re-derive index and cache state from the vault; the server is never touched.
+    /// Drop the sync state under `.restask/` (tombstones are kept); the next sync
+    /// re-derives it from the vault and the server. Neither of them is touched.
     Rebuild,
     /// Diagnose config, routing, vault, and server health (§13.3).
     Doctor {},
-    /// Manage list bindings (§13.2 step 5 records).
-    List {
-        /// The list action.
-        #[command(subcommand)]
-        action: ListAction,
-    },
+    /// Show the lists the vault routes to, with their notes and collection URLs.
+    Lists,
 }
 
 /// Task selector for `done`/`undone` (§13.3): `--uid`, or `--file` together with `--line`.
@@ -133,25 +126,6 @@ pub struct Selector {
     pub line: Option<usize>,
 }
 
-/// List-binding actions (§13.3 `restask list`).
-#[derive(Debug, Subcommand)]
-pub enum ListAction {
-    /// Show the recorded bindings.
-    Show,
-    /// Create the collection for a list and record the binding.
-    Create {
-        /// List display name.
-        name: String,
-    },
-    /// Record a binding to an existing collection.
-    Bind {
-        /// List display name.
-        name: String,
-        /// Radicale collection name.
-        collection: String,
-    },
-}
-
 /// Vault and sync-state summary (§13.3 `restask status`).
 #[derive(Debug, Serialize)]
 pub struct StatusReport {
@@ -161,15 +135,17 @@ pub struct StatusReport {
     pub priorities: BTreeMap<String, usize>,
     /// Tasks completed today (device-local date).
     pub done_today: usize,
-    /// Operations parked in `.restask/outbox.json`.
-    pub outbox_backlog: usize,
-    /// RFC 3339 instant of the most recent reconciliation known to the index.
+    /// Tasks whose current vault content the server has not confirmed yet (new, edited,
+    /// or waiting for a reachable server).
+    pub pending: usize,
+    /// RFC 3339 instant of the most recent change settled with the server.
     pub last_sync: Option<String>,
 }
 
 /// Environment entry point (§13.3): resolves the vault and machine config, builds the
-/// CalDAV client for server-bound commands, and dispatches. Offline commands ([`Command::Status`],
-/// [`Command::Rebuild`], `list show`/`list bind`) never construct a server client.
+/// CalDAV client for server-bound commands, and dispatches. Offline commands
+/// ([`Command::Status`], [`Command::Rebuild`], [`Command::Lists`]) never construct a
+/// server client; `add`/`done`/`undone` work on a machine without one (vault-side only).
 pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
     let Cli { vault, command } = cli;
     // `setup` carries its own vault fallback (§13.2 step 1): cwd, confirmed or
@@ -178,6 +154,11 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Setup {
             non_interactive, ..
         } => resolve_setup_vault(vault.as_deref(), *non_interactive)?,
+        // `done/undone --file <absolute path>` (editor integrations) locate the vault
+        // from the file itself, wherever the editor's working directory is.
+        Command::Done { selector } | Command::Undone { selector } => {
+            resolve_vault_for_file(vault.as_deref(), selector.file.as_deref())?
+        }
         _ => resolve_vault(vault.as_deref())?,
     };
     let config_path = machine_config_path();
@@ -251,18 +232,58 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             Ok(report.exit_code)
         }
         Command::Status { json } => print_status(&vault, Arc::new(SystemClock), json),
-        Command::Rebuild => run_rebuild(&vault, Arc::new(SystemClock)),
-        Command::List {
-            action: ListAction::Show,
-        } => {
-            list_show(&machine);
+        Command::Rebuild => run_rebuild(&vault),
+        Command::Lists => print_lists(&vault, &machine, Arc::new(SystemClock)),
+        Command::Daemon { once } => {
+            let caldav = daemon::build_client(&machine)?;
+            let dc = DaemonConfig {
+                poll_secs: machine.caldav.poll_secs,
+                once,
+                ..DaemonConfig::default()
+            };
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            tokio::spawn(async move {
+                wait_for_shutdown_signal().await;
+                let _ = shutdown_tx.send(true);
+            });
+            daemon::run_with(
+                vault,
+                machine,
+                dc,
+                shutdown_rx,
+                caldav,
+                Arc::new(SystemClock),
+            )
+            .await?;
             Ok(0)
         }
-        Command::List {
-            action: ListAction::Bind { name, collection },
-        } => {
-            save_binding(&config_path, machine, ListBinding { name, collection })?;
-            Ok(0)
+        local @ (Command::Add { .. } | Command::Done { .. } | Command::Undone { .. }) => {
+            // The vault part of these commands needs no server; without a configured
+            // endpoint they still save locally and say so.
+            match daemon::build_client(&machine) {
+                Ok(caldav) => {
+                    run_with(
+                        local,
+                        vault,
+                        machine,
+                        config_path,
+                        caldav,
+                        Arc::new(SystemClock),
+                    )
+                    .await
+                }
+                Err(_) => {
+                    run_with(
+                        local,
+                        vault,
+                        machine,
+                        config_path,
+                        Offline,
+                        Arc::new(SystemClock),
+                    )
+                    .await
+                }
+            }
         }
         server => {
             let caldav = daemon::build_client(&machine)?;
@@ -276,6 +297,30 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             )
             .await
         }
+    }
+}
+
+/// Resolves when the process is asked to stop: `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM`
+/// (what `systemctl stop` sends).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
@@ -317,9 +362,9 @@ pub async fn run_with<C: CaldavPort>(
         }
         Command::Daemon { once } => {
             let dc = DaemonConfig {
-                debounce_ms: 300,
                 poll_secs: machine.caldav.poll_secs,
                 once,
+                ..DaemonConfig::default()
             };
             let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             daemon::run_with(vault, machine, dc, shutdown_rx, caldav, clock).await?;
@@ -328,9 +373,10 @@ pub async fn run_with<C: CaldavPort>(
         Command::Sync => {
             let report = daemon::run_once_with(&vault, &machine, clock, caldav).await?;
             println!(
-                "scanned {} registered {} pushed {} moved {} deleted {} mutations {} inserts {} adopted {} deferred {} parked {}",
+                "scanned {} registered {} normalized {} pushed {} moved {} deleted {} mutations {} inserts {} adopted {} deferred {} failed {}",
                 report.scanned_files,
                 report.registered,
+                report.normalized,
                 report.pushes,
                 report.moves,
                 report.deletes,
@@ -338,7 +384,7 @@ pub async fn run_with<C: CaldavPort>(
                 report.inserts,
                 report.adoptions,
                 report.deferred,
-                report.parked
+                report.failed
             );
             Ok(0)
         }
@@ -367,30 +413,8 @@ pub async fn run_with<C: CaldavPort>(
             Ok(report.exit_code)
         }
         Command::Status { json } => print_status(&vault, clock, json),
-        Command::Rebuild => run_rebuild(&vault, clock),
-        Command::List { action } => match action {
-            ListAction::Show => {
-                list_show(&machine);
-                Ok(0)
-            }
-            ListAction::Bind { name, collection } => {
-                save_binding(&config_path, machine, ListBinding { name, collection })?;
-                Ok(0)
-            }
-            ListAction::Create { name } => {
-                let slug = ListSlug::from_name(&name)?;
-                caldav.ensure_collection(&slug, &name).await?;
-                save_binding(
-                    &config_path,
-                    machine,
-                    ListBinding {
-                        collection: slug.as_str().to_string(),
-                        name,
-                    },
-                )?;
-                Ok(0)
-            }
-        },
+        Command::Rebuild => run_rebuild(&vault),
+        Command::Lists => print_lists(&vault, &machine, clock),
     }
 }
 
@@ -465,6 +489,22 @@ pub fn resolve_vault(flag: Option<&Path>) -> Result<PathBuf, RestaskError> {
     resolve_vault_with(flag, env.as_deref(), &cwd)
 }
 
+/// [`resolve_vault`] for commands addressing a task by file: when `file` is absolute the
+/// upward search starts at the file's own directory instead of the working directory.
+pub fn resolve_vault_for_file(
+    flag: Option<&Path>,
+    file: Option<&str>,
+) -> Result<PathBuf, RestaskError> {
+    let env = std::env::var(ENV_VAULT).ok();
+    match file.map(Path::new).filter(|file| file.is_absolute()) {
+        Some(file) => {
+            let start = file.parent().unwrap_or(file);
+            resolve_vault_with(flag, env.as_deref(), start)
+        }
+        None => resolve_vault(flag),
+    }
+}
+
 /// Process exit code for `error` (§12.1): 4 config invalid (incl. no vault found), 3
 /// CalDAV unreachable, 1 any other runtime failure; clap reports usage errors as 2.
 pub fn exit_code(error: &RestaskError) -> i32 {
@@ -479,16 +519,27 @@ pub fn exit_code(error: &RestaskError) -> i32 {
 }
 
 /// Computes the [`StatusReport`] for `vault` (§13.3): a read-only vault scan plus the
-/// index and outbox state under `.restask/`.
+/// index under `.restask/`.
 pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, RestaskError> {
     let cfg = load_vault_config(vault)?;
-    let tasks = scan_local(vault, &cfg, clock)?;
-    let index = Index::load(&vault.join(".restask"))?;
+    let index = Index::load(&vault.join(STATE_DIR))?;
+    let tasks = scan_read_only(vault, &cfg, clock, &index)?.local;
     let mut lists: BTreeMap<String, usize> = BTreeMap::new();
     let mut priorities: BTreeMap<String, usize> = BTreeMap::new();
     let mut done_today = 0usize;
+    let mut pending = 0usize;
     let today = clock.today_local();
+    let state_dir = vault.join(STATE_DIR);
     for task in tasks.values() {
+        // Settled = the server confirmed exactly what the vault line says now.
+        let settled = index
+            .get(&task.uid)
+            .is_some_and(|entry| entry.caldav_etag.is_some())
+            && cache_read(&state_dir, &task.uid, &chrono::Utc)
+                .is_some_and(|base| !fields_differ(&base, task));
+        if !settled {
+            pending += 1;
+        }
         match task.status {
             Status::Active => {
                 *lists.entry(task.list.as_str().to_string()).or_default() += 1;
@@ -512,9 +563,19 @@ pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, Re
         lists,
         priorities,
         done_today,
-        outbox_backlog: outbox_backlog(&vault.join(".restask")),
+        pending,
         last_sync,
     })
+}
+
+/// The read-only vault scan shared by `status`, `doctor` and `lists`.
+fn scan_read_only(
+    vault: &Path,
+    cfg: &VaultConfig,
+    clock: &dyn Clock,
+    index: &Index,
+) -> Result<Scan, RestaskError> {
+    vault::scan(vault, cfg, clock, index, ScanMode::ReadOnly)
 }
 
 /// Check outcome severity (§13.3 `restask doctor`).
@@ -610,14 +671,45 @@ pub async fn doctor<C: CaldavPort>(
     };
 
     // Routing and vault scan over one read-only pass.
-    match scan_local(vault, &cfg, clock.as_ref()) {
-        Ok(tasks) => {
+    let index = Index::load(&vault.join(STATE_DIR)).unwrap_or_default();
+    match scan_read_only(vault, &cfg, clock.as_ref(), &index) {
+        Ok(scan) => {
             checks.push(check("routing", DoctorStatus::Ok, "no list conflicts"));
             checks.push(check(
                 "scan",
                 DoctorStatus::Ok,
-                format!("{} routed task(s)", tasks.len()),
+                format!(
+                    "{} routed task(s) in {} file(s), {} list(s)",
+                    scan.local.len(),
+                    scan.files_scanned,
+                    scan.homes.len()
+                ),
             ));
+            if !scan.duplicates.is_empty() {
+                checks.push(check(
+                    "duplicates",
+                    DoctorStatus::Warn,
+                    format!(
+                        "{} copied task line(s) share a UID (first in {}) — the next sync \
+                         gives each copy its own",
+                        scan.duplicates.len(),
+                        scan.duplicates[0].1
+                    ),
+                ));
+            }
+            if scan.conflict_files.is_empty() {
+                checks.push(check("sync-conflict", DoctorStatus::Ok, "none"));
+            } else {
+                checks.push(check(
+                    "sync-conflict",
+                    DoctorStatus::Warn,
+                    format!(
+                        "{} file(s), e.g. {} — merge what you need and delete them",
+                        scan.conflict_files.len(),
+                        scan.conflict_files[0]
+                    ),
+                ));
+            }
         }
         Err(RestaskError::ListConflict { dir, a, b }) => {
             checks.push(check(
@@ -625,12 +717,6 @@ pub async fn doctor<C: CaldavPort>(
                 DoctorStatus::Fail,
                 format!("{dir}: {a} vs {b}"),
             ));
-            exit_code = 1;
-        }
-        Err(error @ RestaskError::UidConflict { .. }) => {
-            // Routing succeeded (no list conflict); the duplicate UID broke the scan.
-            checks.push(check("routing", DoctorStatus::Ok, "no list conflicts"));
-            checks.push(check("scan", DoctorStatus::Fail, error));
             exit_code = 1;
         }
         Err(RestaskError::Config { path, reason }) => {
@@ -661,7 +747,7 @@ pub async fn doctor<C: CaldavPort>(
             "todo-marker",
             DoctorStatus::Warn,
             format!(
-                "{} lacks the Restask marker (restask setup writes it)",
+                "{} lacks the restask marker (the next sync rewrites it)",
                 cfg.inbox_file
             ),
         )),
@@ -670,26 +756,6 @@ pub async fn doctor<C: CaldavPort>(
             DoctorStatus::Warn,
             format!("{} is missing", cfg.inbox_file),
         )),
-    }
-
-    // Syncthing conflict artifacts signal unresolved divergences.
-    if let Ok(matchers) = cfg.matchers() {
-        let mut files: Vec<(String, String)> = Vec::new();
-        if walk(vault, "", &matchers, &mut files).is_ok() {
-            let conflicts = files
-                .iter()
-                .filter(|(path, _)| path.contains("sync-conflict"))
-                .count();
-            if conflicts > 0 {
-                checks.push(check(
-                    "sync-conflict",
-                    DoctorStatus::Warn,
-                    format!("{conflicts} file(s) — resolve and delete them"),
-                ));
-            } else {
-                checks.push(check("sync-conflict", DoctorStatus::Ok, "none"));
-            }
-        }
     }
 
     // CalDAV reachability and the §17 no-auth hard warning.
@@ -849,6 +915,7 @@ fn resolve_selector(
             })
         }
     };
+    // `vault.join` keeps an absolute `--file` as-is (editor integrations pass one).
     let contents = std::fs::read_to_string(vault.join(file))?;
     parse(&contents, cfg)
         .tasks
@@ -905,7 +972,7 @@ fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, 
             println!("  {priority}: {count}");
         }
         println!("done today: {}", report.done_today);
-        println!("outbox backlog: {}", report.outbox_backlog);
+        println!("pending sync: {}", report.pending);
         println!(
             "last sync: {}",
             report.last_sync.as_deref().unwrap_or("never")
@@ -914,74 +981,65 @@ fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, 
     Ok(0)
 }
 
-/// Re-derives state and prints the outcome (§13.3 `restask rebuild`).
-fn run_rebuild(vault: &Path, clock: Arc<dyn Clock>) -> Result<i32, RestaskError> {
-    let cfg = load_vault_config(vault)?;
-    let count = rebuild_state(vault, &cfg, clock.as_ref())?;
-    println!("re-derived {count} task(s)");
+/// Drops the sync state (§13.3 `restask rebuild`): the index, the base snapshots and the
+/// remembered TODO.md render. Tombstones stay, so deleted tasks are not resurrected. The
+/// next sync starts from "nothing agreed yet": equal content settles silently, differing
+/// content is merged as a conflict (the vault wins unless the server copy is newer).
+fn run_rebuild(vault: &Path) -> Result<i32, RestaskError> {
+    let state_dir = vault.join(STATE_DIR);
+    let known = Index::load(&state_dir)
+        .map(|index| index.entries.len())
+        .unwrap_or(0);
+    for file in [
+        "index.json",
+        crate::sync::engine::RENDERED_FILE,
+        "outbox.json",
+    ] {
+        match std::fs::remove_file(state_dir.join(file)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match std::fs::remove_dir_all(state_dir.join("tasks")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    println!("dropped the sync state of {known} task(s); run `restask sync` to re-derive it");
     Ok(0)
 }
 
-/// Re-derives `.restask/` index + cache from the vault (§13.3 `restask rebuild`): entries
-/// whose thumbprint is unchanged keep their etag, stale entries and caches are dropped,
-/// and the server is never contacted.
-fn rebuild_state(
+/// Prints the routed lists (§13.3 `restask lists`): slug, active tasks, home note, and
+/// the collection URL to point other clients at.
+fn print_lists(
     vault: &Path,
-    cfg: &VaultConfig,
-    clock: &dyn Clock,
-) -> Result<usize, RestaskError> {
-    let state_dir = vault.join(".restask");
-    let tasks = scan_local(vault, cfg, clock)?;
-    let now = clock.now_utc();
-    let old = Index::load(&state_dir)?;
-    let mut index = Index::default();
-    for (uid, task) in &tasks {
-        let thumbprint = task.thumbprint();
-        let caldav_etag = old
-            .get(uid)
-            .filter(|entry| entry.thumbprint == thumbprint)
-            .and_then(|entry| entry.caldav_etag.clone());
-        index.upsert(IndexEntry {
-            uid: uid.clone(),
-            list: task.list.clone(),
-            source_path: task.source.path.clone(),
-            thumbprint,
-            caldav_etag,
-            seen_at: now,
-            defer_count: 0,
-        });
-        cache_write(&state_dir, task, now)?;
+    machine: &MachineConfig,
+    clock: Arc<dyn Clock>,
+) -> Result<i32, RestaskError> {
+    let cfg = load_vault_config(vault)?;
+    let index = Index::load(&vault.join(STATE_DIR))?;
+    let scan = scan_read_only(vault, &cfg, clock.as_ref(), &index)?;
+    let inbox = vault::inbox_list(&cfg)?;
+    let mut homes = scan.homes.clone();
+    homes.insert(inbox, cfg.inbox_file.clone());
+    let base = match (&machine.caldav.url, &machine.caldav.username) {
+        (Some(url), Some(username)) => Some(format!("{}/{}", url.trim_end_matches('/'), username)),
+        _ => None,
+    };
+    for (list, home) in &homes {
+        let active = scan
+            .local
+            .values()
+            .filter(|task| task.list == *list && task.status == Status::Active)
+            .count();
+        let url = match &base {
+            Some(base) => format!("{base}/{}/", list.as_str()),
+            None => "(no CalDAV endpoint configured)".to_string(),
+        };
+        println!("{}\t{active} active\t{home}\t{url}", list.as_str());
     }
-    for uid in old.entries.keys() {
-        if index.get(uid).is_none() {
-            cache_remove(&state_dir, uid)?;
-        }
-    }
-    index.save(&state_dir)?;
-    Ok(index.entries.len())
-}
-
-/// Prints the recorded list bindings (§13.3 `restask list show`).
-fn list_show(machine: &MachineConfig) {
-    for binding in &machine.lists {
-        println!("{}\t{}", binding.name, binding.collection);
-    }
-}
-
-/// Upserts `binding` (by list name) into the machine config at `path` and saves it.
-fn save_binding(
-    path: &Path,
-    mut machine: MachineConfig,
-    binding: ListBinding,
-) -> Result<(), RestaskError> {
-    machine
-        .lists
-        .retain(|existing| existing.name != binding.name);
-    machine.lists.push(binding);
-    machine.save(path).map_err(|error| RestaskError::Config {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })
+    Ok(0)
 }
 
 /// Loads the machine config (§14.2) with §14.3 env overrides; a missing file yields the
@@ -1011,168 +1069,4 @@ fn load_vault_config(vault: &Path) -> Result<VaultConfig, RestaskError> {
         path: path.display().to_string(),
         reason: error.to_string(),
     })
-}
-
-/// Number of operations parked in `.restask/outbox.json` (0 when absent or unreadable).
-fn outbox_backlog(state_dir: &Path) -> usize {
-    let contents = match std::fs::read_to_string(state_dir.join("outbox.json")) {
-        Ok(contents) => contents,
-        Err(_) => return 0,
-    };
-    match serde_json::from_str::<serde_json::Value>(&contents) {
-        Ok(value) => value
-            .get("queue")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, |queue| queue.len()),
-        Err(_) => 0,
-    }
-}
-
-/// Read-only vault scan: every routed, registered task (§13.3 `status`/`rebuild`). Mirrors
-/// the engine's scan (routing, inbox mirror-line skip, UID conflict check) without
-/// registering new lines or writing any file.
-fn scan_local(
-    vault: &Path,
-    cfg: &VaultConfig,
-    clock: &dyn Clock,
-) -> Result<BTreeMap<TaskUid, Task>, RestaskError> {
-    let matchers = cfg.matchers().map_err(|error| RestaskError::Config {
-        path: vault.join("restask.toml").display().to_string(),
-        reason: error.to_string(),
-    })?;
-    let mut files: Vec<(String, String)> = Vec::new();
-    walk(vault, "", &matchers, &mut files)?;
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let metas: Vec<NoteMeta> = files
-        .iter()
-        .map(|(path, contents)| {
-            let (file_list, folder_list) = scan_frontmatter(contents);
-            NoteMeta {
-                path: path.to_string(),
-                file_list,
-                folder_list,
-            }
-        })
-        .collect();
-    let router = Router::build(&metas)?;
-    let inbox = ListSlug::from_name(&cfg.inbox_list).map_err(|_| RestaskError::Validation {
-        field: "inbox_list",
-        reason: format!("cannot slugify the inbox list name `{}`", cfg.inbox_list),
-    })?;
-
-    let mut local: BTreeMap<TaskUid, Task> = BTreeMap::new();
-    let mut seen: BTreeMap<TaskUid, String> = BTreeMap::new();
-    // Notes first, then the inbox file: mirror lines lose to their source note's line.
-    let mut order: Vec<usize> = (0..files.len())
-        .filter(|&i| files[i].0 != cfg.inbox_file)
-        .collect();
-    order.extend((0..files.len()).filter(|&i| files[i].0 == cfg.inbox_file));
-    for i in order {
-        let (path, contents) = &files[i];
-        let meta = &metas[i];
-        let routing = if path.as_str() == cfg.inbox_file {
-            NoteRouting::List(inbox.clone())
-        } else {
-            router.resolve(path, meta.file_list.as_deref())
-        };
-        let NoteRouting::List(list) = routing else {
-            continue;
-        };
-        let parsed = parse(contents, cfg);
-        let parents = link_parents(&parsed.tasks);
-        let mtime = file_mtime(&vault.join(path))?;
-        for (task, parent) in parsed.tasks.iter().zip(parents) {
-            // Mirror lines in the inbox file are rendered views, never sources.
-            if path.as_str() == cfg.inbox_file
-                && (task.raw.contains("[[")
-                    || task
-                        .draft
-                        .uid
-                        .as_ref()
-                        .is_some_and(|uid| seen.contains_key(uid)))
-            {
-                continue;
-            }
-            let Some(uid) = task.draft.uid.clone() else {
-                continue;
-            };
-            if let Some(first) = seen.insert(uid.clone(), path.clone()) {
-                return Err(RestaskError::UidConflict {
-                    uid,
-                    a: first,
-                    b: path.clone(),
-                });
-            }
-            let status = if task.in_done_region || task.draft.checked {
-                Status::Completed {
-                    on: task
-                        .draft
-                        .completed_on
-                        .unwrap_or_else(|| clock.today_local()),
-                }
-            } else {
-                Status::Active
-            };
-            local.insert(
-                uid.clone(),
-                Task {
-                    uid,
-                    list: list.clone(),
-                    text: task.draft.text.clone(),
-                    status,
-                    priority: task.draft.priority,
-                    due: task.draft.due,
-                    start: task.draft.start,
-                    scheduled: task.draft.scheduled,
-                    created: task.draft.created,
-                    parent,
-                    source: SourceRef {
-                        path: path.clone(),
-                        line: task.line_no,
-                    },
-                    source_heading: task.heading.clone(),
-                    source_mtime: mtime,
-                    last_modified: mtime,
-                },
-            );
-        }
-    }
-    Ok(local)
-}
-
-/// File mtime as a UTC instant (the engine's scan semantics).
-fn file_mtime(path: &Path) -> Result<DateTime<Utc>, RestaskError> {
-    Ok(std::fs::metadata(path)?.modified()?.into())
-}
-
-/// Recursively collects tracked files as `(vault-relative path, contents)` pairs
-/// (mirrors the engine's scan walk; `ignore` beats `track`).
-fn walk(
-    dir: &Path,
-    relative: &str,
-    matchers: &VaultMatchers,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), RestaskError> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let child = if relative.is_empty() {
-            name.clone()
-        } else {
-            format!("{relative}/{name}")
-        };
-        if entry.file_type()?.is_dir() {
-            walk(&entry.path(), &child, matchers, out)?;
-        } else if matchers.is_tracked(&child) && !name.contains(".pre-restask-") {
-            // Setup backup files are engine artifacts, never scanned (mirrors the engine).
-            match std::fs::read_to_string(entry.path()) {
-                Ok(contents) => out.push((child, contents)),
-                Err(error) => {
-                    tracing::warn!(path = %child, %error, "unreadable vault file skipped");
-                }
-            }
-        }
-    }
-    Ok(())
 }

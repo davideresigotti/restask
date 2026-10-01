@@ -1,7 +1,7 @@
 //! VTODO serialization (§8.1): a `Task` → `VCALENDAR`/`VTODO` with CRLF line endings,
 //! exact property order, iCalendar TEXT escaping, and 75-octet line folding. Pure — no I/O;
-//! determinism invariant: same `Task` + same `now_utc` → byte-identical output
-//! (ARCHITECTURE.md invariant 10).
+//! determinism invariant: same `Task` + same `now_utc` (+ same extras) → byte-identical
+//! output.
 
 use chrono::{DateTime, Utc};
 
@@ -14,13 +14,23 @@ const PRODID: &str = "-//restask//restask 0.1.0//EN";
 /// Maximum octets per physical line before folding (§8.1).
 const FOLD_LIMIT: usize = 75;
 
+/// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1) with no foreign content.
+pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
+    to_vcalendar_with(task, now_utc, &[])
+}
+
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1), terminated by CRLF.
 ///
-/// Properties are emitted in the exact §8.1 order; `PRIORITY`, `DTSTART`, `DUE`,
-/// `COMPLETED`, `RELATED-TO`, and `X-RESTASK-SCHEDULED` are omitted when their source
-/// value is `None`. `DTSTAMP` and `LAST-MODIFIED` carry `now_utc`; `CREATED` derives from
-/// the creation date (midnight UTC) or falls back to `now_utc`.
-pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
+/// Managed properties are emitted in the exact §8.1 order; `CREATED`, `PRIORITY`,
+/// `DTSTART`, `DUE`, `COMPLETED`, `RELATED-TO`, and `X-RESTASK-SCHEDULED` are omitted when
+/// their source value is `None`. `DTSTAMP` and `LAST-MODIFIED` carry `now_utc`.
+///
+/// `extras` are the unmanaged content lines of the resource being replaced
+/// ([`crate::vtodo::RemoteTask::extras`]): they are written back verbatim (re-folded)
+/// before `END:VTODO`, so descriptions, reminders, recurrence rules and other clients'
+/// properties survive a push. A `DURATION` extra is dropped when a `DUE` is written (RFC
+/// 5545 forbids both).
+pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> String {
     let mut out = String::with_capacity(512);
     push_line(&mut out, "BEGIN:VCALENDAR");
     push_line(&mut out, "VERSION:2.0");
@@ -29,11 +39,9 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
     push_line(&mut out, &format!("UID:{}", task.uid.as_str()));
     let now = format_utc_instant(now_utc);
     push_line(&mut out, &format!("DTSTAMP:{now}"));
-    let created = match task.created {
-        Some(day) => format_utc_midnight(day.0),
-        None => now.clone(),
-    };
-    push_line(&mut out, &format!("CREATED:{created}"));
+    if let Some(day) = task.created {
+        push_line(&mut out, &format!("CREATED:{}", format_utc_midnight(day.0)));
+    }
     push_line(&mut out, &format!("LAST-MODIFIED:{now}"));
     push_line(&mut out, &format!("SUMMARY:{}", escape_text(&task.text)));
     let (status, percent) = match task.status {
@@ -60,7 +68,7 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
     if let Some(parent) = &task.parent {
         push_line(
             &mut out,
-            &format!("RELATED-TO;TOREL=PARENT:{}", parent.as_str()),
+            &format!("RELATED-TO;RELTYPE=PARENT:{}", parent.as_str()),
         );
     }
     if let Some(scheduled) = task.scheduled {
@@ -73,9 +81,26 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
             escape_text(&task.source.path)
         ),
     );
+    let mut nested = 0usize;
+    for extra in extras {
+        let upper = extra.to_ascii_uppercase();
+        if upper.starts_with("BEGIN:") {
+            nested += 1;
+        } else if upper.starts_with("END:") {
+            nested = nested.saturating_sub(1);
+        } else if nested == 0 && task.due.is_some() && property_name(&upper) == "DURATION" {
+            continue;
+        }
+        push_line(&mut out, extra);
+    }
     push_line(&mut out, "END:VTODO");
     push_line(&mut out, "END:VCALENDAR");
     out
+}
+
+/// The property name of an (upper-cased) content line: the text before the first `;`/`:`.
+fn property_name(line: &str) -> &str {
+    line.split([';', ':']).next().unwrap_or(line)
 }
 
 /// Formats a UTC instant as iCalendar `YYYYMMDDTHHMMSSZ` (§4).

@@ -11,10 +11,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::{DateTime, FixedOffset, Offset as _, TimeZone, Utc};
 use tempfile::TempDir;
 
-use restask::caldav::{CaldavPort, CollectionInfo};
+use restask::caldav::{CaldavPort, CollectionInfo, RemoteResource};
 use restask::domain::{Clock, ListSlug, LocalDate, Task, TaskUid};
 use restask::markdown::MARKER;
-use restask::vtodo::{from_vcalendar, to_vcalendar, RemoteTask};
+use restask::vtodo::{from_vcalendar, to_vcalendar_with};
 use restask::{CaldavErrorKind, RestaskError};
 
 /// Fixed-instant clock (§3.3): `now_utc` is the first field, the device-local offset the
@@ -51,10 +51,14 @@ struct MockState {
     resources: BTreeMap<(String, String), MockResource>,
     etag_counter: u64,
     failures: VecDeque<CaldavErrorKind>,
+    puts: usize,
+    deletes: usize,
+    reports: usize,
 }
 
-/// In-memory [`CaldavPort`] stand-in behaving like a correct Radicale: collections are
-/// VTODO-only, etags change on every write, reads are consistent with writes. Operations
+/// In-memory [`CaldavPort`] stand-in behaving like a correct Radicale: bodies go through
+/// the real codec both ways, etags change on every write, `If-Match`/`If-None-Match`
+/// preconditions are enforced, and writing into a missing collection fails. Operations
 /// scripted via [`MockCaldav::fail_next`] fail once each, in call order.
 #[derive(Debug, Clone, Default)]
 pub struct MockCaldav {
@@ -74,16 +78,29 @@ impl MockCaldav {
             .insert(slug.to_string(), display.to_string());
     }
 
-    /// Pre-creates a resource with a generated etag.
+    /// Stores a resource the way another CalDAV client would (fresh etag); the
+    /// collection is created when missing.
     pub fn seed_resource(&self, slug: &str, name: &str, body: &str) {
         let etag = self.next_etag();
-        self.lock().resources.insert(
+        let mut state = self.lock();
+        state
+            .collections
+            .entry(slug.to_string())
+            .or_insert_with(|| slug.to_string());
+        state.resources.insert(
             (slug.to_string(), name.to_string()),
             MockResource {
                 body: body.to_string(),
                 etag,
             },
         );
+    }
+
+    /// Removes a resource the way another CalDAV client would.
+    pub fn remove_resource(&self, slug: &str, name: &str) {
+        self.lock()
+            .resources
+            .remove(&(slug.to_string(), name.to_string()));
     }
 
     /// Scripts the next operation of any kind to fail with `kind` (§10.4 paths).
@@ -114,6 +131,12 @@ impl MockCaldav {
             .collect()
     }
 
+    /// `(puts, deletes, reports)` served so far.
+    pub fn counters(&self) -> (usize, usize, usize) {
+        let state = self.lock();
+        (state.puts, state.deletes, state.reports)
+    }
+
     fn lock(&self) -> MutexGuard<'_, MockState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -133,6 +156,14 @@ impl MockCaldav {
                 status: None,
                 detail: "scripted mock failure".to_string(),
             })
+    }
+}
+
+fn mock_error(kind: CaldavErrorKind, status: u16, detail: &str) -> RestaskError {
+    RestaskError::Caldav {
+        kind,
+        status: Some(status),
+        detail: detail.to_string(),
     }
 }
 
@@ -165,53 +196,72 @@ impl CaldavPort for MockCaldav {
         Ok(())
     }
 
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError> {
-        if let Some(error) = self.scripted_failure() {
-            return Err(error);
-        }
-        let state = self.lock();
-        Ok(state
-            .resources
-            .iter()
-            .filter(|((list, _), _)| list == slug.as_str())
-            .map(|((_, name), resource)| (name.clone(), resource.etag.clone()))
-            .collect())
-    }
-
-    async fn fetch(
+    async fn list_tasks(
         &self,
         slug: &ListSlug,
-        name: &str,
-    ) -> Result<Option<(RemoteTask, String)>, RestaskError> {
+    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
-        let state = self.lock();
-        match state
-            .resources
-            .get(&(slug.as_str().to_string(), name.to_string()))
-        {
-            Some(resource) => {
-                let remote = from_vcalendar(&resource.body, Utc.fix(), slug)?;
-                Ok(Some((remote, resource.etag.clone())))
-            }
-            None => Ok(None),
+        let mut state = self.lock();
+        state.reports += 1;
+        if !state.collections.contains_key(slug.as_str()) {
+            return Ok(None);
         }
+        let mut resources = Vec::new();
+        for ((list, name), resource) in &state.resources {
+            if list != slug.as_str() {
+                continue;
+            }
+            // Like the real client: a body without a VTODO is skipped, never fatal.
+            if let Ok(task) = from_vcalendar(&resource.body, &Utc.fix(), slug) {
+                resources.push(RemoteResource {
+                    name: name.clone(),
+                    etag: resource.etag.clone(),
+                    task,
+                });
+            }
+        }
+        Ok(Some(resources))
     }
 
-    async fn put(&self, task: &Task) -> Result<String, RestaskError> {
+    async fn put(
+        &self,
+        task: &Task,
+        name: &str,
+        extras: &[String],
+        if_match: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<String, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
         let etag = self.next_etag();
-        let body = to_vcalendar(task, Utc::now());
-        self.lock().resources.insert(
-            (
-                task.list.as_str().to_string(),
-                task.uid.as_str().to_string(),
-            ),
+        let mut state = self.lock();
+        let key = (task.list.as_str().to_string(), name.to_string());
+        if !state.collections.contains_key(&key.0) {
+            return Err(mock_error(
+                CaldavErrorKind::Protocol,
+                409,
+                "put into a missing collection",
+            ));
+        }
+        match (if_match, state.resources.get(&key)) {
+            (Some(expected), Some(current)) if current.etag == expected => {}
+            (None, None) => {}
+            _ => {
+                return Err(mock_error(
+                    CaldavErrorKind::Conflict,
+                    412,
+                    "precondition failed",
+                ))
+            }
+        }
+        state.puts += 1;
+        state.resources.insert(
+            key,
             MockResource {
-                body,
+                body: to_vcalendar_with(task, now, extras),
                 etag: etag.clone(),
             },
         );
@@ -222,14 +272,25 @@ impl CaldavPort for MockCaldav {
         &self,
         slug: &ListSlug,
         name: &str,
-        _etag: Option<&str>,
+        etag: Option<&str>,
     ) -> Result<(), RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
-        self.lock()
-            .resources
-            .remove(&(slug.as_str().to_string(), name.to_string()));
+        let mut state = self.lock();
+        let key = (slug.as_str().to_string(), name.to_string());
+        if let (Some(expected), Some(current)) = (etag, state.resources.get(&key)) {
+            if current.etag != expected {
+                return Err(mock_error(
+                    CaldavErrorKind::Conflict,
+                    412,
+                    "precondition failed",
+                ));
+            }
+        }
+        if state.resources.remove(&key).is_some() {
+            state.deletes += 1;
+        }
         Ok(())
     }
 }

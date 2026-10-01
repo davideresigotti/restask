@@ -6,13 +6,28 @@ pub use crate::caldav::protocol::CollectionInfo;
 
 use std::future::Future;
 
+use chrono::{DateTime, Utc};
+
 use crate::domain::{ListSlug, Task};
 use crate::vtodo::RemoteTask;
 use crate::RestaskError;
 
+/// One `VTODO` resource as the server currently holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteResource {
+    /// Resource name (sans `.ics`), exactly as the server spells it in its `href`.
+    pub name: String,
+    /// Current etag — the `If-Match` precondition for replacing or deleting the resource.
+    pub etag: String,
+    /// The parsed body.
+    pub task: RemoteTask,
+}
+
 /// Transport port to a CalDAV server (§10.2). One impl = one server account; collections
-/// are addressed by [`ListSlug`], resources by their `.ics`-sans-suffix name (the form
-/// [`crate::caldav::protocol::parse_etags`] returns).
+/// are addressed by [`ListSlug`], resources by their `.ics`-sans-suffix name.
+///
+/// The port is stateless: every precondition (`If-Match`) and every timestamp is passed
+/// in by the caller, so a one-shot CLI run and the long-lived daemon behave identically.
 ///
 /// Methods are written as RPITIT with an explicit `+ Send` bound (the desugaring of
 /// `async fn` plus a Send future): the daemon and CLI spawn the reconciler, so futures
@@ -31,27 +46,33 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
         display: &str,
     ) -> impl Future<Output = Result<(), RestaskError>> + Send;
 
-    /// `REPORT` calendar-query (§10.1): `(resource name, etag)` pairs of the collection's
-    /// VTODOs, in document order.
-    fn list_etags(
+    /// The whole remote snapshot of one list in a single `REPORT` (§10.1): every `VTODO`
+    /// with its etag and parsed body, in document order. `Ok(None)` means the collection
+    /// does not exist. Resources that hold no parseable `VTODO` are skipped with a
+    /// warning — one odd resource never fails the listing.
+    fn list_tasks(
         &self,
         slug: &ListSlug,
-    ) -> impl Future<Output = Result<Vec<(String, String)>, RestaskError>> + Send;
+    ) -> impl Future<Output = Result<Option<Vec<RemoteResource>>, RestaskError>> + Send;
 
-    /// `GET <url>/<user>/<slug>/<name>.ics`: `Ok(None)` when the resource is gone,
-    /// otherwise the parsed task and its current etag.
-    fn fetch(
+    /// `PUT <url>/<user>/<list>/<name>.ics`: serializes `task` (§8.1) with `extras` (the
+    /// replaced resource's unmanaged content) and `now` as `DTSTAMP`/`LAST-MODIFIED`.
+    /// `name` is the resource to write — the UID for a new resource, the listed name
+    /// when replacing one (another client may have stored the task under its own name).
+    /// `if_match: Some(etag)` replaces exactly that version; `None` creates
+    /// (`If-None-Match: *`). Returns the new etag (empty when the server sends none). A
+    /// failed precondition surfaces as `CaldavErrorKind::Conflict` (§10.4).
+    fn put(
         &self,
-        slug: &ListSlug,
+        task: &Task,
         name: &str,
-    ) -> impl Future<Output = Result<Option<(RemoteTask, String)>, RestaskError>> + Send;
-
-    /// `PUT <url>/<user>/<list>/<uid>.ics`: serializes `task` (§8.1) and stores it.
-    /// `If-None-Match: *` on create, `If-Match: <etag>` when the etag is known; returns
-    /// the new etag. A stale precondition surfaces as `CaldavErrorKind::Conflict` (§10.4).
-    fn put(&self, task: &Task) -> impl Future<Output = Result<String, RestaskError>> + Send;
+        extras: &[String],
+        if_match: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> impl Future<Output = Result<String, RestaskError>> + Send;
 
     /// `DELETE <url>/<user>/<slug>/<name>.ics` with `If-Match` when an etag is given.
+    /// Deleting a resource that is already gone succeeds.
     fn delete(
         &self,
         slug: &ListSlug,

@@ -43,14 +43,28 @@ pub fn mkcol_body(display_name: &str) -> String {
     )
 }
 
-/// Builds the `REPORT` body asking for the `getetag` of every `VTODO` under the target
-/// collection (§10.1). The depth-1 scope comes from the request's `Depth: 1` header; the
+/// One `VTODO` resource from a [`report_vtodos`] answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportItem {
+    /// Resource name: last path segment of the `href` with the `.ics` suffix stripped
+    /// (kept percent-encoded exactly as the server sent it, so it can be reused in URLs).
+    pub name: String,
+    /// `getetag`, quoting preserved verbatim for `If-Match` use.
+    pub etag: String,
+    /// `calendar-data`: the iCalendar body; empty when the server did not inline it.
+    pub data: String,
+}
+
+/// Builds the `REPORT` body asking for the `getetag` **and** the `calendar-data` of every
+/// `VTODO` under the target collection (§10.1) — the whole remote snapshot of a list in
+/// one request. The depth-1 scope comes from the request's `Depth: 1` header; the
 /// `VCALENDAR`/`VTODO` comp-filter excludes VEVENTs and every other component (§10.5).
-pub fn report_vtodo_etags() -> String {
+pub fn report_vtodos() -> String {
     r#"<?xml version="1.0" encoding="utf-8"?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop>
     <D:getetag/>
+    <C:calendar-data/>
   </D:prop>
   <C:filter>
     <C:comp-filter name="VCALENDAR">
@@ -77,12 +91,10 @@ pub fn propfind_collections_body() -> String {
     .to_string()
 }
 
-/// Parses a `REPORT` multistatus into `(resource name, etag)` pairs in document order
-/// (§10.1). The resource name is the last path segment of the `href` with a `.ics` suffix
-/// stripped. Responses without an `href` or a `getetag` (e.g. a 404 propstat) are skipped;
-/// etag quoting is preserved verbatim for `If-Match` use.
-pub fn parse_etags(xml: &str) -> Vec<(String, String)> {
-    let mut etags = Vec::new();
+/// Parses a `REPORT` multistatus into [`ReportItem`]s in document order (§10.1).
+/// Responses without an `href` or a `getetag` (e.g. a 404 propstat) are skipped.
+pub fn parse_report(xml: &str) -> Vec<ReportItem> {
+    let mut items = Vec::new();
     for response in scan_elements(xml).iter().filter(|e| e.local == "response") {
         let props = scan_elements(&response.inner);
         let Some(href) = props.iter().find(|e| e.local == "href") else {
@@ -98,9 +110,18 @@ pub fn parse_etags(xml: &str) -> Vec<(String, String)> {
         }
         let name = last_path_segment(&href);
         let name = name.strip_suffix(".ics").unwrap_or(name);
-        etags.push((name.to_string(), etag));
+        let data = props
+            .iter()
+            .find(|e| e.local == "calendar-data")
+            .map(|e| character_data(&e.inner))
+            .unwrap_or_default();
+        items.push(ReportItem {
+            name: name.to_string(),
+            etag,
+            data,
+        });
     }
-    etags
+    items
 }
 
 /// Parses a `PROPFIND` multistatus into [`CollectionInfo`] entries in document order
@@ -156,16 +177,19 @@ pub fn parse_collections(xml: &str) -> Vec<CollectionInfo> {
     collections
 }
 
-/// Decodes the five predefined XML entities (`&amp; &lt; &gt; &quot; &apos;`) in a single
-/// pass, so `&amp;lt;` decodes to `&lt;` and never twice. A bare `&` that does not open a
-/// known entity is preserved literally.
+/// Decodes the five predefined XML entities (`&amp; &lt; &gt; &quot; &apos;`) and numeric
+/// character references (`&#13;`, `&#xD;`) in a single pass, so `&amp;lt;` decodes to
+/// `&lt;` and never twice. A bare `&` that does not open a known entity is preserved
+/// literally.
 pub fn xml_unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(index) = rest.find('&') {
         out.push_str(&rest[..index]);
         let tail = &rest[index..];
-        let (decoded, remainder) = if let Some(t) = tail.strip_prefix("&amp;") {
+        let (decoded, remainder) = if let Some((ch, t)) = numeric_reference(tail) {
+            (ch, t)
+        } else if let Some(t) = tail.strip_prefix("&amp;") {
             ('&', t)
         } else if let Some(t) = tail.strip_prefix("&lt;") {
             ('<', t)
@@ -185,6 +209,44 @@ pub fn xml_unescape(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Decodes a numeric character reference at the start of `tail` (`&#NN;` or `&#xHH;`),
+/// returning the character and the text after the reference.
+fn numeric_reference(tail: &str) -> Option<(char, &str)> {
+    let body = tail.strip_prefix("&#")?;
+    let end = body.find(';')?;
+    let digits = &body[..end];
+    let code = match digits.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+        None => digits.parse::<u32>().ok()?,
+    };
+    Some((char::from_u32(code)?, &body[end + 1..]))
+}
+
+/// Character data of an element whose content is text (`calendar-data`): `CDATA` sections
+/// are taken raw, everything else is entity-decoded; surrounding whitespace is trimmed.
+fn character_data(inner: &str) -> String {
+    const OPEN: &str = "<![CDATA[";
+    const CLOSE: &str = "]]>";
+    let mut out = String::with_capacity(inner.len());
+    let mut rest = inner;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&xml_unescape(&rest[..start]));
+        let body = &rest[start + OPEN.len()..];
+        match body.find(CLOSE) {
+            Some(end) => {
+                out.push_str(&body[..end]);
+                rest = &body[end + CLOSE.len()..];
+            }
+            None => {
+                out.push_str(body);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(&xml_unescape(rest));
+    out.trim().to_string()
 }
 
 /// Escapes text for XML element and attribute content (the inverse of [`xml_unescape`]).
@@ -236,6 +298,13 @@ fn scan_elements(xml: &str) -> Vec<XmlElement> {
         let rest = &xml[tag_start..];
         if rest.starts_with("<!--") {
             match rest.find("-->") {
+                Some(end) => pos = tag_start + end + 3,
+                None => break,
+            }
+            continue;
+        }
+        if rest.starts_with("<![CDATA[") {
+            match rest.find("]]>") {
                 Some(end) => pos = tag_start + end + 3,
                 None => break,
             }

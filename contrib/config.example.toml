@@ -15,11 +15,5 @@ password_file = "~/.config/restask/radicale.passwd"  # chmod 600; OR password_en
 poll_secs = 300
 allow_create_lists = true           # MKCOL missing collections on first push
 
-# Wizard-recorded bindings (list display name → Radicale collection)
-[[lists]]
-name = "Inbox"
-collection = "inbox"
-
-[[lists]]
-name = "University"
-collection = "university"
+# Lists are not configured here: a note routes itself with `restask-list` /
+# `restask-list-root` frontmatter, and list `Home Lab` syncs with collection `home-lab`.

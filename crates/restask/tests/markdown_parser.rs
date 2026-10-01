@@ -407,3 +407,29 @@ fn legacy_uid_prefix_is_still_a_uid_token() {
     assert_eq!(task.draft.uid, Some(TaskUid::parse(legacy).unwrap()));
     assert_eq!(task.draft.text, "old task");
 }
+
+#[test]
+fn nesting_never_crosses_a_heading_and_done_records_are_flat() {
+    let contents = concat!(
+        "# Tasks\n",
+        "- [ ] parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        "    - [ ] child 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        "# Other\n",
+        "    - [ ] indented under a new heading 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
+        "## Done\n",
+        "- [x] done parent ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
+        "    - [x] done child ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpf\n",
+    );
+    let parsed = parse_file(contents, &VaultConfig::default());
+    let parents = link_parents(&parsed.tasks);
+    assert_eq!(
+        parents,
+        vec![
+            None,
+            Some(TaskUid::parse("restask-01jzq4tsvg2c9xkw7n5m8rhdpb").unwrap()),
+            None,
+            None,
+            None,
+        ]
+    );
+}

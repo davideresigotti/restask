@@ -70,14 +70,19 @@ fn probe_task(slug: &ListSlug, text: &str) -> Task {
     }
 }
 
-/// Full resource lifecycle on the live server: MKCOL (idempotent), PUT (If-None-Match),
-/// REPORT (etag visible), GET (round-trip equality + etag echo), DELETE (If-Match),
-/// and final absence.
+/// Full resource lifecycle on the live server: MKCOL (idempotent), PUT (create,
+/// `If-None-Match`), one REPORT carrying etag + body, PUT (replace, `If-Match`) keeping a
+/// foreign property, a stale replace refused, DELETE (`If-Match`), and final absence.
 #[tokio::test]
 #[ignore = "live server probe; set RESTASK_E2E_URL/USERNAME/PASSWORD and run with -- --ignored"]
 async fn e2e_server_restask_dev_lifecycle() {
     let Some((client, slug)) = client_from_env() else {
         return;
+    };
+    let find = |resources: Vec<restask::caldav::RemoteResource>, uid: &str| {
+        resources
+            .into_iter()
+            .find(|resource| resource.task.raw_uid == uid)
     };
 
     // MKCOL is idempotent (PROPFIND first), so reruns are safe on the dev collection.
@@ -86,48 +91,69 @@ async fn e2e_server_restask_dev_lifecycle() {
         .await
         .expect("ensure_collection failed");
 
-    let task = probe_task(&slug, "Restask e2e probe");
-    let etag = client.put(&task).await.expect("put failed");
-    assert!(!etag.is_empty(), "PUT must return a fresh etag");
-
-    let pairs = client.list_etags(&slug).await.expect("list_etags failed");
-    let name = pairs
-        .iter()
-        .find(|(name, _)| name == task.uid.as_str())
-        .map(|(name, _)| name.clone())
-        .unwrap_or_else(|| panic!("PUT resource `{}` not in REPORT", task.uid.as_str()));
-    let listed_etag = pairs
-        .iter()
-        .find(|(name, _)| name == task.uid.as_str())
-        .map(|(_, etag)| etag.clone())
-        .unwrap();
-    assert_eq!(etag, listed_etag, "REPORT etag must echo the PUT etag");
-
-    let fetched = client
-        .fetch(&slug, &name)
+    let mut task = probe_task(&slug, "restask e2e probe");
+    let extras = vec!["DESCRIPTION:kept across pushes".to_string()];
+    let created = client
+        .put(&task, task.uid.as_str(), &extras, None, now_unix())
         .await
-        .expect("fetch failed")
-        .expect("resource must exist after PUT");
-    let (remote, fetch_etag) = fetched;
-    assert!(remote.managed, "round-tripped task must be managed");
-    assert_eq!(remote.task.uid, task.uid, "UID is eternal");
-    assert_eq!(remote.task.text, task.text);
-    assert_eq!(remote.task.priority, task.priority);
-    assert_eq!(remote.task.status, task.status);
-    assert_eq!(fetch_etag, etag, "GET etag must be stable between writes");
+        .expect("create failed");
+
+    let listed = client
+        .list_tasks(&slug)
+        .await
+        .expect("list_tasks failed")
+        .expect("the collection exists");
+    let remote = find(listed, task.uid.as_str())
+        .unwrap_or_else(|| panic!("PUT resource `{}` not in REPORT", task.uid.as_str()));
+    assert_eq!(remote.name, task.uid.as_str());
+    assert!(!remote.etag.is_empty(), "REPORT must carry the etag");
+    if !created.is_empty() {
+        assert_eq!(created, remote.etag, "REPORT etag must echo the PUT etag");
+    }
+    assert!(remote.task.managed, "round-tripped task must be managed");
+    assert_eq!(remote.task.task.uid, task.uid, "UID is eternal");
+    assert_eq!(remote.task.task.text, task.text);
+    assert_eq!(remote.task.task.priority, task.priority);
+    assert_eq!(remote.task.task.status, task.status);
+    assert_eq!(
+        remote.task.extras, extras,
+        "REPORT must inline the full body"
+    );
+
+    // Replace exactly that version, handing the foreign property back.
+    task.text = "restask e2e probe (edited)".to_string();
+    client
+        .put(
+            &task,
+            &remote.name,
+            &remote.task.extras,
+            Some(&remote.etag),
+            now_unix(),
+        )
+        .await
+        .expect("replace failed");
+    // The old etag is now stale: a second replace with it must be refused.
+    let stale = client
+        .put(&task, &remote.name, &[], Some(&remote.etag), now_unix())
+        .await;
+    assert!(stale.is_err(), "a stale If-Match must be refused");
+
+    let listed = client.list_tasks(&slug).await.unwrap().unwrap();
+    let replaced = find(listed, task.uid.as_str()).expect("still listed");
+    assert_eq!(replaced.task.task.text, "restask e2e probe (edited)");
+    assert_eq!(
+        replaced.task.extras, extras,
+        "foreign content survived the push"
+    );
+    assert_ne!(replaced.etag, remote.etag);
 
     client
-        .delete(&slug, &name, Some(&fetch_etag))
+        .delete(&slug, &replaced.name, Some(&replaced.etag))
         .await
         .expect("delete failed");
-    let gone = client.fetch(&slug, &name).await.expect("post-delete fetch");
-    assert!(gone.is_none(), "resource must be gone after DELETE");
-    let pairs = client
-        .list_etags(&slug)
-        .await
-        .expect("post-delete list_etags");
+    let listed = client.list_tasks(&slug).await.unwrap().unwrap();
     assert!(
-        pairs.iter().all(|(name, _)| name != task.uid.as_str()),
+        find(listed, task.uid.as_str()).is_none(),
         "deleted resource must not appear in REPORT"
     );
 }

@@ -1,21 +1,23 @@
-//! Planner conformance (§11.2): one test per rule row plus defer counting, the tie
-//! window, list moves, and foreign adoption. Fixed instants only — no wall clock.
+//! Planner conformance (§11): every rule of the reconciliation table, exercised on pure
+//! snapshots. Server resources are built through the real codec, so what the planner
+//! sees is what a server would hand back.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, TimeZone, Utc};
 
+use restask::caldav::RemoteResource;
 use restask::domain::{ListSlug, LocalDate, Priority, SourceRef, Status, Task, TaskUid, When};
 use restask::markdown::mutator::{Mutation, WhenField};
 use restask::store::index::{Index, IndexEntry};
-use restask::sync::{plan, DeferReason, InsertTarget, MarkdownOp, Plan, Snapshots};
-use restask::vtodo::RemoteTask;
+use restask::sync::{plan, DeferReason, DeleteOp, Plan, Snapshots, DEFER_LIMIT};
+use restask::vtodo::{from_vcalendar, to_vcalendar_with};
 
-/// Fixed base instant: 2023-11-14T22:13:20Z.
-const BASE: i64 = 1_700_000_000;
+/// The instant everything was last in agreement.
+const T0: i64 = 1_800_000_000;
 
 fn at(secs: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(BASE + secs, 0).single().unwrap()
+    Utc.timestamp_opt(secs, 0).single().unwrap()
 }
 
 fn slug(name: &str) -> ListSlug {
@@ -23,9 +25,14 @@ fn slug(name: &str) -> ListSlug {
 }
 
 fn uid(n: u64) -> TaskUid {
-    TaskUid::parse(&format!("restask-01jz{:0>22}", n)).unwrap()
+    TaskUid::parse(&format!("restask-01jz{n:022}")).unwrap()
 }
 
+fn date(value: &str) -> LocalDate {
+    LocalDate::parse(value).unwrap()
+}
+
+/// An active task in `notes/<list>.md`, created 2026-09-01, file last written at `T0`.
 fn task(n: u64, list: &str, text: &str) -> Task {
     Task {
         uid: uid(n),
@@ -36,826 +43,1028 @@ fn task(n: u64, list: &str, text: &str) -> Task {
         due: None,
         start: None,
         scheduled: None,
-        created: None,
+        created: Some(date("2026-09-01")),
         parent: None,
         source: SourceRef {
-            path: "notes/a.md".to_string(),
-            line: 1,
+            path: format!("notes/{list}.md"),
+            line: 5,
         },
         source_heading: None,
-        source_mtime: at(0),
-        last_modified: at(0),
+        source_mtime: at(T0),
+        last_modified: at(T0),
     }
 }
 
-/// A managed remote copy of `t`, keyed by its UID as the resource name.
-fn remote_of(t: &Task) -> RemoteTask {
-    RemoteTask {
-        raw_uid: t.uid.as_str().to_string(),
-        managed: true,
-        task: t.clone(),
-        source_path: None,
+/// The server copy of `task` as written at `stamp` (through the codec), with extras.
+fn resource_with(task: &Task, stamp: i64, etag: &str, extras: &[&str]) -> RemoteResource {
+    let extras: Vec<String> = extras.iter().map(|line| line.to_string()).collect();
+    let body = to_vcalendar_with(task, at(stamp), &extras);
+    RemoteResource {
+        name: task.uid.as_str().to_string(),
+        etag: etag.to_string(),
+        task: from_vcalendar(&body, &Utc, &task.list).unwrap(),
     }
 }
 
-fn remote_map(
-    entries: Vec<(&str, &str, RemoteTask)>,
-) -> BTreeMap<ListSlug, BTreeMap<String, RemoteTask>> {
-    let mut map: BTreeMap<ListSlug, BTreeMap<String, RemoteTask>> = BTreeMap::new();
-    for (list, name, remote) in entries {
-        map.entry(slug(list))
-            .or_default()
-            .insert(name.to_string(), remote);
-    }
-    map
+fn resource(task: &Task, stamp: i64, etag: &str) -> RemoteResource {
+    resource_with(task, stamp, etag, &[])
 }
 
-/// A realistic index entry for `t` (thumbprint matches, etag as given).
-fn entry_for(t: &Task, etag: Option<&str>) -> IndexEntry {
-    IndexEntry {
-        uid: t.uid.clone(),
-        list: t.list.clone(),
-        source_path: t.source.path.clone(),
-        thumbprint: t.thumbprint(),
-        caldav_etag: etag.map(str::to_string),
-        seen_at: at(0),
-        defer_count: 0,
+/// A resource another client created: raw iCalendar with a non-restask UID.
+fn foreign(list: &str, name: &str, body_lines: &[&str]) -> RemoteResource {
+    let mut body = String::from("BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\n");
+    for line in body_lines {
+        body.push_str(line);
+        body.push_str("\r\n");
+    }
+    body.push_str("END:VTODO\r\nEND:VCALENDAR\r\n");
+    RemoteResource {
+        name: name.to_string(),
+        etag: format!("\"{name}\""),
+        task: from_vcalendar(&body, &Utc, &slug(list)).unwrap(),
     }
 }
 
-fn snapshots(
-    local: Vec<Task>,
-    cache: Vec<Task>,
-    remote: BTreeMap<ListSlug, BTreeMap<String, RemoteTask>>,
-    tombstones: Vec<TaskUid>,
-    entries: Vec<IndexEntry>,
-) -> Snapshots {
-    Snapshots {
-        local: local.into_iter().map(|t| (t.uid.clone(), t)).collect(),
-        cache: cache.into_iter().map(|t| (t.uid.clone(), t)).collect(),
-        remote,
-        tombstones: tombstones.into_iter().collect(),
-        index: Index {
-            entries: entries.into_iter().map(|e| (e.uid.clone(), e)).collect(),
-        },
+/// Snapshot builder: the vault routes `notes/home.md` → `home`, `notes/work.md` → `work`,
+/// and `TODO.md` → `inbox`; all three collections are listed (empty unless filled).
+struct World {
+    s: Snapshots,
+}
+
+impl World {
+    fn new() -> Self {
+        let mut s = Snapshots {
+            inbox_file: "TODO.md".to_string(),
+            inbox_list: Some(slug("inbox")),
+            ..Snapshots::default()
+        };
+        for list in ["home", "work"] {
+            s.notes.insert(format!("notes/{list}.md"), slug(list));
+            s.homes.insert(slug(list), format!("notes/{list}.md"));
+        }
+        for list in ["home", "work", "inbox"] {
+            s.remote.insert(slug(list), Vec::new());
+        }
+        Self { s }
+    }
+
+    fn local(mut self, task: &Task) -> Self {
+        self.s.local.insert(task.uid.clone(), task.clone());
+        self
+    }
+
+    fn remote(mut self, resource: RemoteResource, list: &str) -> Self {
+        self.s.remote.entry(slug(list)).or_default().push(resource);
+        self
+    }
+
+    /// Records `task` as settled: base snapshot (written at `T0`) plus index entry.
+    fn settled(mut self, task: &Task, etag: &str) -> Self {
+        let mut base = task.clone();
+        base.last_modified = at(T0);
+        self.s.index.upsert(IndexEntry {
+            uid: task.uid.clone(),
+            list: task.list.clone(),
+            source_path: task.source.path.clone(),
+            thumbprint: base.thumbprint(),
+            caldav_etag: Some(etag.to_string()),
+            seen_at: at(T0),
+            defer_count: 0,
+        });
+        self.s.base.insert(task.uid.clone(), base);
+        self
+    }
+
+    fn tombstone(mut self, n: u64) -> Self {
+        self.s.tombstones.insert(uid(n));
+        self
+    }
+
+    fn plan(&self) -> Plan {
+        plan(&self.s)
     }
 }
 
-fn plan_now(s: Snapshots) -> Plan {
-    plan(s, at(1_000))
+fn mutations_for<'a>(p: &'a Plan, path: &str) -> &'a [Mutation] {
+    p.mutations.get(path).map(Vec::as_slice).unwrap_or_default()
 }
+
+// ── nothing to do ─────────────────────────────────────────────────────────────────────
 
 #[test]
 fn empty_snapshots_yield_an_empty_plan() {
-    let p = plan_now(snapshots(vec![], vec![], BTreeMap::new(), vec![], vec![]));
-    assert_eq!(p, Plan::default());
+    assert!(plan(&Snapshots::default()).is_noop());
+    assert!(World::new().plan().is_noop());
 }
 
-// ── R0 ────────────────────────────────────────────────────────────────────────────────
+#[test]
+fn a_settled_task_that_nobody_touched_is_a_no_op() {
+    let t = task(1, "home", "steady");
+    let p = World::new()
+        .local(&t)
+        .settled(&t, "\"e1\"")
+        .remote(resource(&t, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.is_noop(), "{p:?}");
+}
 
 #[test]
-fn r0_tombstone_removes_the_task_everywhere() {
-    let t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![t.clone()],
-        vec![t.clone()],
-        remote_map(vec![("home", t.uid.as_str(), remote_of(&t))]),
-        vec![t.uid.clone()],
-        vec![entry_for(&t, Some("\"e1\""))],
+fn the_plan_is_deterministic() {
+    let t = task(1, "home", "x");
+    let world = World::new().local(&t).remote(
+        foreign("inbox", "f1", &["UID:f1@tasks.org", "SUMMARY:adopt me"]),
+        "inbox",
     );
-    let p = plan_now(s);
+    assert_eq!(world.plan(), world.plan());
+}
+
+// ── R2: new in the vault ──────────────────────────────────────────────────────────────
+
+#[test]
+fn r2_a_new_vault_task_is_created_on_the_server() {
+    let t = task(1, "home", "new");
+    let p = World::new().local(&t).plan();
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].task, t);
+    assert_eq!(p.puts[0].if_match, None, "create, never overwrite");
+    assert!(p.puts[0].extras.is_empty());
+    assert!(p.mutations.is_empty() && p.settled.is_empty());
+}
+
+#[test]
+fn nothing_is_decided_for_a_list_that_was_not_listed() {
+    // The collection is missing and may not be created: its tasks simply wait.
+    let t = task(1, "home", "waiting");
+    let mut world = World::new().local(&t).settled(&t, "\"e1\"");
+    world.s.remote.remove(&slug("home"));
+    assert!(world.plan().is_noop());
+}
+
+// ── R7/R8: the three-way merge ────────────────────────────────────────────────────────
+
+#[test]
+fn first_contact_with_equal_content_just_settles() {
+    let t = task(1, "home", "same on both sides");
+    let p = World::new()
+        .local(&t)
+        .remote(resource(&t, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.puts.is_empty() && p.mutations.is_empty());
+    assert_eq!(p.settled.len(), 1);
+    assert_eq!(p.settled[0].etag, "\"e1\"");
+    assert_eq!(p.settled[0].task, t);
+}
+
+#[test]
+fn a_server_side_change_reaches_the_vault_however_new_the_file_is() {
+    // The regression this design exists for: the file's mtime covers all its tasks and
+    // is bumped by any unrelated edit. Only the base can tell that this task did not
+    // change locally.
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.last_modified = at(T0 + 86_400);
+    let mut theirs = base.clone();
+    theirs.text = "alpha (reworded on the phone)".to_string();
+    theirs.priority = Some(Priority::High);
+    theirs.due = Some(When::Date(date("2026-10-01")));
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 60, "\"e2\""), "home")
+        .plan();
+    assert!(p.puts.is_empty(), "the server already has the result");
     assert_eq!(
-        p.markdown_ops,
-        vec![MarkdownOp::Delete {
-            path: "notes/a.md".to_string(),
-            uid: t.uid.clone(),
+        mutations_for(&p, "notes/home.md"),
+        [
+            Mutation::EditText {
+                uid: uid(1),
+                text: "alpha (reworded on the phone)".to_string(),
+            },
+            Mutation::SetPriority {
+                uid: uid(1),
+                priority: Some(Priority::High),
+            },
+            Mutation::SetWhen {
+                uid: uid(1),
+                field: WhenField::Due,
+                value: Some(When::Date(date("2026-10-01"))),
+            },
+        ]
+    );
+    assert_eq!(p.settled.len(), 1);
+    assert_eq!(p.settled[0].task.text, "alpha (reworded on the phone)");
+    assert_eq!(p.settled[0].etag, "\"e2\"");
+}
+
+#[test]
+fn a_vault_side_change_is_pushed_however_new_the_server_copy_is() {
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.text = "alpha, edited in the note".to_string();
+    // Another client touched the resource later without changing our fields.
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(
+            resource_with(
+                &base,
+                T0 + 86_400,
+                "\"e2\"",
+                &["DESCRIPTION:notes from Tasks.org"],
+            ),
+            "home",
+        )
+        .plan();
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].task.text, "alpha, edited in the note");
+    assert_eq!(p.puts[0].if_match.as_deref(), Some("\"e2\""));
+    assert_eq!(p.puts[0].name, uid(1).as_str());
+    assert_eq!(
+        p.puts[0].extras,
+        vec!["DESCRIPTION:notes from Tasks.org"],
+        "other clients' content rides along"
+    );
+}
+
+#[test]
+fn changes_to_different_fields_on_both_sides_are_both_kept() {
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.text = "alpha, reworded in the note".to_string();
+    let mut theirs = base.clone();
+    theirs.status = Status::Completed {
+        on: date("2026-09-20"),
+    };
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 30, "\"e2\""), "home")
+        .plan();
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [
+            Mutation::SetStatus {
+                uid: uid(1),
+                checked: true,
+                completed_on: Some(date("2026-09-20")),
+            },
+            Mutation::MoveToDone { uid: uid(1) },
+        ]
+    );
+    assert_eq!(p.puts.len(), 1);
+    let pushed = &p.puts[0].task;
+    assert_eq!(pushed.text, "alpha, reworded in the note");
+    assert_eq!(
+        pushed.status,
+        Status::Completed {
+            on: date("2026-09-20")
+        }
+    );
+}
+
+#[test]
+fn a_true_conflict_goes_to_the_vault_inside_the_tie_window() {
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.text = "vault wording".to_string();
+    let mut theirs = base.clone();
+    theirs.text = "server wording".to_string();
+    // The server copy is newer, but by no more than the 120 s tie window.
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 120, "\"e2\""), "home")
+        .plan();
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.puts[0].task.text, "vault wording");
+}
+
+#[test]
+fn a_true_conflict_goes_to_the_server_when_it_is_clearly_newer() {
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.text = "vault wording".to_string();
+    local.priority = Some(Priority::Low);
+    let mut theirs = base.clone();
+    theirs.text = "server wording".to_string();
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 121, "\"e2\""), "home")
+        .plan();
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [Mutation::EditText {
+            uid: uid(1),
+            text: "server wording".to_string(),
         }]
     );
-    assert_eq!(p.cache_deletes, vec![t.uid.clone()]);
-    assert_eq!(p.caldav_deletes.len(), 1);
-    assert_eq!(p.caldav_deletes[0].list, slug("home"));
-    assert_eq!(p.caldav_deletes[0].name, t.uid.as_str());
-    assert_eq!(p.index_removals, vec![t.uid.clone()]);
-    assert!(p.caldav_puts.is_empty() && p.caldav_moves.is_empty());
-    assert!(p.cache_writes.is_empty() && p.index_upserts.is_empty());
-    assert!(p.todo_refresh);
+    // Only the conflicting field was lost; the vault's other change is still pushed.
+    assert_eq!(p.puts[0].task.text, "server wording");
+    assert_eq!(p.puts[0].task.priority, Some(Priority::Low));
 }
 
 #[test]
-fn r0_tombstone_purges_a_remote_only_copy() {
-    let t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![],
-        vec![],
-        remote_map(vec![("home", t.uid.as_str(), remote_of(&t))]),
-        vec![t.uid.clone()],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_deletes.len(), 1);
-    assert_eq!(p.caldav_deletes[0].name, t.uid.as_str());
-    assert!(p.markdown_ops.is_empty() && p.cache_deletes.is_empty());
-    assert!(p.index_removals.is_empty() && p.index_upserts.is_empty());
-}
-
-// ── R1 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r1_defers_when_the_cache_is_newer_beyond_the_window() {
-    let mut t = task(1, "home", "alpha");
-    t.last_modified = at(0);
-    let mut cached = t.clone();
-    cached.text = "edited on the phone".to_string();
-    cached.last_modified = at(1_500);
-    let s = snapshots(vec![t], vec![cached], BTreeMap::new(), vec![], vec![]);
-    let p = plan_now(s);
-    assert_eq!(p.deferred, vec![(uid(1), DeferReason::CacheNewerThanVault)]);
-    assert_eq!(p.index_upserts.len(), 1);
-    assert_eq!(p.index_upserts[0].defer_count, 1);
-    assert!(p.markdown_ops.is_empty());
-    assert!(p.caldav_puts.is_empty() && p.cache_writes.is_empty());
-    assert!(!p.todo_refresh);
+fn without_a_base_every_difference_is_a_conflict() {
+    let mut local = task(1, "home", "vault wording");
+    local.last_modified = at(T0);
+    let mut theirs = local.clone();
+    theirs.text = "server wording".to_string();
+    let older = World::new()
+        .local(&local)
+        .remote(resource(&theirs, T0 - 500, "\"e1\""), "home")
+        .plan();
+    assert_eq!(older.puts[0].task.text, "vault wording");
+    let newer = World::new()
+        .local(&local)
+        .remote(resource(&theirs, T0 + 500, "\"e1\""), "home")
+        .plan();
+    assert!(newer.puts.is_empty());
+    assert_eq!(newer.settled[0].task.text, "server wording");
 }
 
 #[test]
-fn r1_within_the_window_does_not_defer() {
-    let mut t = task(1, "home", "alpha");
-    t.last_modified = at(0);
-    let mut cached = t.clone();
-    cached.text = "edited on the phone".to_string();
-    cached.last_modified = at(120);
-    let mut remote_t = t.clone();
-    remote_t.last_modified = at(0);
-    let s = snapshots(
-        vec![t],
-        vec![cached],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert!(p.deferred.is_empty());
-    // Converged with the remote (R7); the diverged cache is rewritten from the vault.
-    assert_eq!(
-        p.cache_writes,
-        vec![{
-            let mut c = task(1, "home", "alpha");
-            c.last_modified = at(0);
-            c
-        }]
-    );
-    assert!(p.caldav_puts.is_empty());
+fn a_base_the_index_does_not_vouch_for_is_ignored() {
+    // Something else rewrote the snapshot (e.g. an old plugin): it is not the base.
+    let base = task(1, "home", "alpha");
+    let mut theirs = base.clone();
+    theirs.text = "server wording".to_string();
+    let mut world = World::new()
+        .local(&base)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 - 500, "\"e2\""), "home");
+    world.s.base.get_mut(&uid(1)).unwrap().text = "tampered".to_string();
+    let p = world.plan();
+    // With a valid base the server would win (only it changed); without one this is a
+    // conflict, and the older server copy loses to the vault.
+    assert_eq!(p.puts[0].task.text, "alpha");
 }
 
 #[test]
-fn r1_defer_counter_increments_and_resets_on_success() {
-    let mut t = task(1, "home", "alpha");
-    t.last_modified = at(0);
-    let mut cached = t.clone();
-    cached.text = "edited on the phone".to_string();
-    cached.last_modified = at(5_000);
-    let mut e = entry_for(&t, None);
-    e.defer_count = 2;
-
-    // Third consecutive defer cycle: counter reaches the error threshold.
-    let s = snapshots(
-        vec![t.clone()],
-        vec![cached],
-        BTreeMap::new(),
-        vec![],
-        vec![e.clone()],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.deferred.len(), 1);
-    assert_eq!(p.index_upserts[0].defer_count, 3);
-
-    // The vault caught up: a successful reconcile resets the counter to zero.
-    let s = snapshots(
-        vec![t.clone()],
-        vec![t.clone()],
-        BTreeMap::new(),
-        vec![],
-        vec![e],
-    );
-    let p = plan_now(s);
-    assert!(p.deferred.is_empty());
-    assert_eq!(p.index_upserts.len(), 1);
-    assert_eq!(p.index_upserts[0].defer_count, 0);
-}
-
-// ── R2 / R3 ───────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r2_new_local_task_is_pushed() {
-    let t = task(1, "home", "alpha");
-    let s = snapshots(vec![t.clone()], vec![], BTreeMap::new(), vec![], vec![]);
-    let p = plan_now(s);
-    assert_eq!(p.caldav_puts, vec![t.clone()]);
-    assert_eq!(p.cache_writes, vec![t.clone()]);
-    assert_eq!(p.index_upserts.len(), 1);
-    let e = &p.index_upserts[0];
-    assert_eq!(e.uid, t.uid);
-    assert_eq!(e.list, slug("home"));
-    assert_eq!(e.source_path, "notes/a.md");
-    assert_eq!(e.thumbprint, t.thumbprint());
-    assert_eq!(e.caldav_etag, None);
-    assert_eq!(e.defer_count, 0);
-    assert!(p.markdown_ops.is_empty() && p.caldav_deletes.is_empty());
-    assert!(p.todo_refresh);
-}
-
-#[test]
-fn r3_server_side_deletion_removes_the_vault_copy() {
-    let t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![t.clone()],
-        vec![],
-        BTreeMap::new(),
-        vec![],
-        vec![entry_for(&t, Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert_eq!(
-        p.markdown_ops,
-        vec![MarkdownOp::Delete {
-            path: "notes/a.md".to_string(),
-            uid: t.uid.clone(),
-        }]
-    );
-    assert_eq!(p.cache_deletes, vec![t.uid.clone()]);
-    assert_eq!(p.index_removals, vec![t.uid.clone()]);
-    assert!(p.caldav_puts.is_empty() && p.caldav_deletes.is_empty());
-    assert!(p.todo_refresh);
-}
-
-// ── R4 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r4_remote_task_inserts_into_its_routed_note() {
-    let anchor = task(1, "home", "anchor");
-    let mut remote_t = task(2, "home", "from the server");
-    remote_t.source.path = String::new();
-    remote_t.source.line = 0;
-    let mut rt = remote_of(&remote_t);
-    rt.source_path = Some("notes/a.md".to_string());
-    let s = snapshots(
-        vec![anchor],
-        vec![],
-        remote_map(vec![("home", uid(2).as_str(), rt)]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.markdown_ops.len(), 1);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Insert { task, target } => {
-            assert_eq!(task.text, "from the server");
-            assert_eq!(task.list, slug("home"));
-            assert_eq!(task.source.path, "notes/a.md");
-            assert_eq!(
-                target,
-                &InsertTarget::FileEnd {
-                    path: "notes/a.md".to_string(),
-                }
-            );
-        }
-        other => panic!("expected Insert, got {other:?}"),
-    }
-    // The vault anchor task (local-only) rides along as an R2 push.
-    let anchor = task(1, "home", "anchor");
-    assert_eq!(p.caldav_puts, vec![anchor.clone()]);
-    assert!(p.cache_writes.iter().any(|t| t.text == "from the server"));
-    let inserted = p
-        .index_upserts
-        .iter()
-        .find(|e| e.uid == uid(2))
-        .expect("inserted task upserted");
-    assert_eq!(inserted.source_path, "notes/a.md");
-    assert!(p.todo_refresh);
-}
-
-#[test]
-fn r4_subtask_places_under_a_known_parent_in_the_same_file() {
-    let parent = task(1, "home", "parent");
-    let mut remote_t = task(2, "home", "child");
-    remote_t.parent = Some(parent.uid.clone());
-    remote_t.source.path = String::new();
-    let mut rt = remote_of(&remote_t);
-    rt.source_path = Some("notes/a.md".to_string());
-    let s = snapshots(
-        vec![parent],
-        vec![],
-        remote_map(vec![("home", uid(2).as_str(), rt)]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Insert { task, target } => {
-            assert_eq!(task.parent, Some(uid(1)));
-            assert_eq!(
-                target,
-                &InsertTarget::UnderParent {
-                    path: "notes/a.md".to_string(),
-                    after_uid: uid(1),
-                    indent_chars: 0,
-                }
-            );
-        }
-        other => panic!("expected Insert, got {other:?}"),
-    }
-}
-
-#[test]
-fn r4_orphan_subtask_drops_the_link_into_the_inbox() {
-    let mut remote_t = task(2, "home", "orphan child");
-    remote_t.parent = Some(uid(9));
-    remote_t.source.path = String::new();
-    let rt = remote_of(&remote_t);
-    let s = snapshots(
-        vec![],
-        vec![],
-        remote_map(vec![("home", uid(2).as_str(), rt)]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Insert { task, target } => {
-            assert_eq!(task.parent, None);
-            assert_eq!(task.source.path, "");
-            assert_eq!(target, &InsertTarget::TodoInbox);
-        }
-        other => panic!("expected Insert, got {other:?}"),
-    }
-}
-
-#[test]
-fn r4_unrouted_source_falls_back_to_the_inbox() {
-    let mut remote_t = task(2, "home", "lost note");
-    remote_t.source.path = String::new();
-    let mut rt = remote_of(&remote_t);
-    rt.source_path = Some("notes/gone.md".to_string());
-    let s = snapshots(
-        vec![],
-        vec![],
-        remote_map(vec![("home", uid(2).as_str(), rt)]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Insert { task, target } => {
-            assert_eq!(task.source.path, "");
-            assert_eq!(target, &InsertTarget::TodoInbox);
-        }
-        other => panic!("expected Insert, got {other:?}"),
-    }
-}
-
-// ── R5 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r5_foreign_task_is_adopted_with_a_fresh_uid() {
-    let mut foreign = task(0, "home", "made in Tasks.org");
-    foreign.uid = TaskUid::parse("restask-00000000000000000000000000").unwrap();
-    foreign.source.path = String::new();
-    let rt = RemoteTask {
-        raw_uid: "1789@example.com".to_string(),
-        managed: false,
-        task: foreign,
-        source_path: None,
+fn a_server_side_reopen_restores_the_line() {
+    let mut base = task(1, "home", "alpha");
+    base.status = Status::Completed {
+        on: date("2026-09-20"),
     };
-    let s = snapshots(
-        vec![],
-        vec![],
-        remote_map(vec![("home", "1789@example.com", rt)]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.adoptions.len(), 1);
-    assert_eq!(p.adoptions[0].collection, slug("home"));
-    assert_eq!(p.adoptions[0].remote.raw_uid, "1789@example.com");
-    assert_eq!(p.caldav_puts.len(), 1);
-    let adopted = &p.caldav_puts[0];
-    assert_ne!(
-        adopted.uid,
-        TaskUid::parse("restask-00000000000000000000000000").unwrap()
-    );
-    assert!(adopted.uid.as_str().starts_with("restask-"));
-    assert_eq!(adopted.text, "made in Tasks.org");
-    assert_eq!(adopted.list, slug("home"));
-    assert_eq!(p.caldav_deletes.len(), 1);
-    assert_eq!(p.caldav_deletes[0].list, slug("home"));
-    assert_eq!(p.caldav_deletes[0].name, "1789@example.com");
-    match &p.markdown_ops[0] {
-        MarkdownOp::Insert { target, .. } => assert_eq!(target, &InsertTarget::TodoInbox),
-        other => panic!("expected Insert, got {other:?}"),
-    }
-    assert_eq!(p.cache_writes.len(), 1);
-    assert_eq!(p.index_upserts.len(), 1);
-    assert_eq!(p.index_upserts[0].uid, adopted.uid);
-    assert!(p.todo_refresh);
-}
-
-// ── R6 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn vault_side_deletion_purges_cache_and_remote() {
-    // The note line is gone; cache and server still hold the task. Never resurrect.
-    let t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![],
-        vec![t.clone()],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&t))]),
-        vec![],
-        vec![entry_for(&t, Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.cache_deletes, vec![t.uid.clone()]);
-    assert_eq!(p.caldav_deletes.len(), 1);
-    assert_eq!(p.caldav_deletes[0].list, slug("home"));
-    assert_eq!(p.caldav_deletes[0].name, t.uid.as_str());
-    assert_eq!(p.index_removals, vec![t.uid.clone()]);
-    assert!(p.markdown_ops.is_empty() && p.caldav_puts.is_empty());
-}
-
-#[test]
-fn r6_stale_cache_entry_is_deleted() {
-    let t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![],
-        vec![t.clone()],
-        BTreeMap::new(),
-        vec![],
-        vec![entry_for(&t, None)],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.cache_deletes, vec![t.uid.clone()]);
-    assert_eq!(p.index_removals, vec![t.uid.clone()]);
-    assert!(p.caldav_puts.is_empty() && p.caldav_deletes.is_empty());
-    assert!(p.markdown_ops.is_empty());
-}
-
-// ── R7 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r7_converged_task_is_a_no_op() {
-    let t = task(1, "home", "alpha");
-    let remote_t = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![t.clone()],
-        vec![t.clone()],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![entry_for(&t, Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert!(p.markdown_ops.is_empty());
-    assert!(p.caldav_puts.is_empty() && p.caldav_moves.is_empty() && p.caldav_deletes.is_empty());
-    assert!(p.cache_writes.is_empty() && p.cache_deletes.is_empty());
-    assert!(p.index_upserts.is_empty() && p.index_removals.is_empty());
-    assert!(p.deferred.is_empty());
-    assert!(!p.todo_refresh);
-}
-
-#[test]
-fn r7_rewrites_a_diverged_cache() {
-    let t = task(1, "home", "alpha");
-    let remote_t = task(1, "home", "alpha");
-    let mut cached = t.clone();
-    cached.text = "stale".to_string();
-    let s = snapshots(
-        vec![t.clone()],
-        vec![cached],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![entry_for(&t, Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.cache_writes, vec![t.clone()]);
-    assert!(p.caldav_puts.is_empty() && p.markdown_ops.is_empty());
-}
-
-// ── R8 ────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn r8_remote_wins_decomposes_all_fields() {
-    let mut local = task(1, "home", "alpha");
-    local.last_modified = at(0);
-    let mut remote_t = task(1, "home", "beta");
-    remote_t.status = Status::Completed {
-        on: LocalDate::parse("2026-09-23").unwrap(),
-    };
-    remote_t.priority = Some(Priority::High);
-    remote_t.due = Some(When::parse_date_or_datetime("2026-09-25").unwrap());
-    remote_t.start = Some(When::parse_date_or_datetime("2026-09-24").unwrap());
-    remote_t.scheduled = Some(When::parse_date_or_datetime("2026-09-26").unwrap());
-    remote_t.last_modified = at(300);
-    let s = snapshots(
-        vec![local],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert!(p.caldav_puts.is_empty());
-    assert_eq!(p.markdown_ops.len(), 1);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Mutate { path, mutations } => {
-            assert_eq!(path, "notes/a.md");
-            assert_eq!(
-                mutations,
-                &vec![
-                    Mutation::SetStatus {
-                        uid: uid(1),
-                        checked: true,
-                        completed_on: Some(LocalDate::parse("2026-09-23").unwrap()),
-                    },
-                    Mutation::EditText {
-                        uid: uid(1),
-                        text: "beta".to_string(),
-                    },
-                    Mutation::SetPriority {
-                        uid: uid(1),
-                        priority: Some(Priority::High),
-                    },
-                    Mutation::SetWhen {
-                        uid: uid(1),
-                        field: WhenField::Due,
-                        value: Some(When::parse_date_or_datetime("2026-09-25").unwrap()),
-                    },
-                    Mutation::SetWhen {
-                        uid: uid(1),
-                        field: WhenField::Start,
-                        value: Some(When::parse_date_or_datetime("2026-09-24").unwrap()),
-                    },
-                    Mutation::SetWhen {
-                        uid: uid(1),
-                        field: WhenField::Scheduled,
-                        value: Some(When::parse_date_or_datetime("2026-09-26").unwrap()),
-                    },
-                    Mutation::MoveToDone { uid: uid(1) },
-                ]
-            );
-        }
-        other => panic!("expected Mutate, got {other:?}"),
-    }
-    // The cache mirrors the remote-won content with local placement.
-    assert_eq!(p.cache_writes.len(), 1);
-    assert_eq!(p.cache_writes[0].text, "beta");
-    assert_eq!(p.cache_writes[0].source.path, "notes/a.md");
-    assert_eq!(p.index_upserts.len(), 1);
+    let mut theirs = base.clone();
+    theirs.status = Status::Active;
+    let p = World::new()
+        .local(&base)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 30, "\"e2\""), "home")
+        .plan();
     assert_eq!(
-        p.index_upserts[0].thumbprint,
-        p.cache_writes[0].thumbprint()
+        mutations_for(&p, "notes/home.md"),
+        [
+            Mutation::RestoreFromDone { uid: uid(1) },
+            Mutation::SetStatus {
+                uid: uid(1),
+                checked: false,
+                completed_on: None,
+            },
+        ]
     );
-    assert!(p.todo_refresh);
 }
 
 #[test]
-fn r8_remote_uncheck_restores_from_done() {
-    let mut local = task(1, "home", "alpha");
-    local.status = Status::Completed {
-        on: LocalDate::parse("2026-09-20").unwrap(),
-    };
-    local.last_modified = at(0);
-    let mut remote_t = task(1, "home", "alpha");
-    remote_t.last_modified = at(500);
-    let s = snapshots(
-        vec![local],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Mutate { mutations, .. } => assert_eq!(
-            mutations,
-            &vec![
-                Mutation::RestoreFromDone { uid: uid(1) },
-                Mutation::SetStatus {
-                    uid: uid(1),
-                    checked: false,
-                    completed_on: None,
-                },
-            ]
-        ),
-        other => panic!("expected Mutate, got {other:?}"),
-    }
+fn mutations_for_one_file_are_grouped_into_one_pass() {
+    let a = task(1, "home", "a");
+    let b = task(2, "home", "b");
+    let mut a2 = a.clone();
+    a2.text = "a2".to_string();
+    let mut b2 = b.clone();
+    b2.text = "b2".to_string();
+    let p = World::new()
+        .local(&a)
+        .local(&b)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .remote(resource(&a2, T0 + 5, "\"a2\""), "home")
+        .remote(resource(&b2, T0 + 5, "\"b2\""), "home")
+        .plan();
+    assert_eq!(p.mutations.len(), 1);
+    assert_eq!(mutations_for(&p, "notes/home.md").len(), 2);
 }
 
-#[test]
-fn r8_local_wins_within_the_tie_window() {
-    let mut local = task(1, "home", "alpha");
-    local.last_modified = at(0);
-    let mut remote_t = task(1, "home", "beta");
-    remote_t.last_modified = at(120);
-    let s = snapshots(
-        vec![local.clone()],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_puts, vec![local.clone()]);
-    assert!(p.markdown_ops.is_empty());
-}
+// ── what is not merged: creation date, source, parent ─────────────────────────────────
 
 #[test]
-fn r8_local_wins_when_the_remote_is_older() {
-    let mut local = task(1, "home", "alpha");
-    local.last_modified = at(0);
-    let mut remote_t = task(1, "home", "beta");
-    remote_t.last_modified = at(-5_000);
-    let s = snapshots(
-        vec![local.clone()],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_puts, vec![local.clone()]);
-    assert!(p.markdown_ops.is_empty());
-}
-
-#[test]
-fn r8_unrepresentable_diff_pushes_the_vault_copy() {
-    let mut local = task(1, "home", "alpha");
+fn a_line_without_a_created_token_is_not_pushed_just_for_that() {
+    let mut local = task(1, "home", "no plus token");
     local.created = None;
-    local.last_modified = at(0);
-    let mut remote_t = task(1, "home", "alpha");
-    remote_t.created = Some(LocalDate::parse("2026-09-01").unwrap());
-    remote_t.last_modified = at(300);
-    let s = snapshots(
-        vec![local.clone()],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_puts, vec![local.clone()]);
-    assert!(p.markdown_ops.is_empty());
+    let mut theirs = local.clone();
+    theirs.created = Some(date("2026-08-15"));
+    let p = World::new()
+        .local(&local)
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.puts.is_empty() && p.mutations.is_empty());
+    assert_eq!(p.settled[0].task.created, Some(date("2026-08-15")));
 }
 
 #[test]
-fn r8_mutations_group_into_one_pass_per_file() {
-    let mut local1 = task(1, "home", "alpha");
-    local1.last_modified = at(0);
-    let mut local2 = task(2, "home", "gamma");
-    local2.source.line = 5;
-    local2.last_modified = at(0);
-    let mut remote1 = task(1, "home", "alpha2");
-    remote1.last_modified = at(300);
-    let mut remote2 = task(2, "home", "gamma2");
-    remote2.last_modified = at(400);
-    let s = snapshots(
-        vec![local1, local2],
-        vec![],
-        remote_map(vec![
-            ("home", uid(1).as_str(), remote_of(&remote1)),
-            ("home", uid(2).as_str(), remote_of(&remote2)),
-        ]),
-        vec![],
-        vec![],
+fn the_vaults_created_token_and_source_path_are_pushed_when_they_differ() {
+    let local = task(1, "home", "t");
+    let mut theirs = local.clone();
+    theirs.created = Some(date("2026-08-15"));
+    let p = World::new()
+        .local(&local)
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(p.puts[0].task.created, Some(date("2026-09-01")));
+
+    let mut elsewhere = local.clone();
+    elsewhere.source.path = "notes/old-name.md".to_string();
+    let p = World::new()
+        .local(&local)
+        .remote(resource(&elsewhere, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(p.puts.len(), 1, "X-RESTASK-SOURCE must follow the note");
+}
+
+#[test]
+fn indentation_decides_the_parent_of_an_active_note_task() {
+    let local = task(2, "home", "now a root line");
+    let mut theirs = local.clone();
+    theirs.parent = Some(uid(1));
+    let p = World::new()
+        .local(&local)
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].task.parent, None);
+}
+
+#[test]
+fn the_servers_parent_is_kept_where_the_vault_cannot_express_one() {
+    // Done records and TODO.md lines are flat: their parent relation lives on the server.
+    let mut done = task(2, "home", "finished child");
+    done.status = Status::Completed {
+        on: date("2026-09-20"),
+    };
+    let mut theirs = done.clone();
+    theirs.parent = Some(uid(1));
+    let p = World::new()
+        .local(&done)
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.puts.is_empty());
+    assert_eq!(p.settled[0].task.parent, Some(uid(1)));
+
+    let mut inbox = task(3, "inbox", "captured child");
+    inbox.source.path = "TODO.md".to_string();
+    let mut theirs = inbox.clone();
+    theirs.parent = Some(uid(1));
+    theirs.text = "captured child, reworded".to_string();
+    let p = World::new()
+        .local(&inbox)
+        .settled(&inbox, "\"e1\"")
+        .remote(resource(&theirs, T0 + 5, "\"e2\""), "inbox")
+        .plan();
+    assert!(p.puts.is_empty(), "the parent is not stripped");
+}
+
+// ── R3: deleted on the server ─────────────────────────────────────────────────────────
+
+#[test]
+fn r3_a_settled_task_gone_from_its_collection_is_deleted_in_the_vault() {
+    let t = task(1, "home", "deleted in Tasks.org");
+    let p = World::new().local(&t).settled(&t, "\"e1\"").plan();
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [Mutation::Delete { uid: uid(1) }]
     );
-    let p = plan_now(s);
-    assert_eq!(p.markdown_ops.len(), 1);
-    match &p.markdown_ops[0] {
-        MarkdownOp::Mutate { path, mutations } => {
-            assert_eq!(path, "notes/a.md");
-            assert_eq!(mutations.len(), 2);
-            assert_eq!(
-                mutations[0],
-                Mutation::EditText {
-                    uid: uid(1),
-                    text: "alpha2".to_string(),
-                }
-            );
-            assert_eq!(
-                mutations[1],
-                Mutation::EditText {
-                    uid: uid(2),
-                    text: "gamma2".to_string(),
-                }
-            );
+    assert_eq!(p.tombstones, vec![uid(1)]);
+    assert_eq!(p.forgets, vec![uid(1)]);
+    assert!(p.puts.is_empty() && p.deletes.is_empty());
+}
+
+#[test]
+fn r3_never_fires_for_a_collection_that_was_not_listed() {
+    // The task was settled in `home` and now routes to `work`; `home` is unknown this
+    // cycle, so "it is not there" proves nothing.
+    let settled = task(1, "home", "t");
+    let mut local = settled.clone();
+    local.list = slug("work");
+    local.source.path = "notes/work.md".to_string();
+    let mut world = World::new().local(&local).settled(&settled, "\"e1\"");
+    world.s.remote.remove(&slug("home"));
+    let p = world.plan();
+    assert!(p.mutations.is_empty() && p.tombstones.is_empty());
+    assert_eq!(p.puts.len(), 1, "re-created where it routes now");
+}
+
+#[test]
+fn a_collection_that_lost_everything_at_once_is_a_reset_not_a_deletion_spree() {
+    let a = task(1, "home", "a");
+    let b = task(2, "home", "b");
+    let p = World::new()
+        .local(&a)
+        .local(&b)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .plan();
+    assert!(p.mutations.is_empty(), "the vault is not wiped");
+    assert!(p.tombstones.is_empty());
+    assert_eq!(p.puts.len(), 2, "the collection is refilled from the vault");
+    assert!(p.puts.iter().all(|put| put.if_match.is_none()));
+}
+
+#[test]
+fn a_collection_created_this_cycle_cannot_hold_deletions() {
+    let t = task(1, "home", "the only one");
+    let mut world = World::new().local(&t).settled(&t, "\"e1\"");
+    world.s.created.insert(slug("home"));
+    let p = world.plan();
+    assert!(p.mutations.is_empty() && p.tombstones.is_empty());
+    assert_eq!(p.puts.len(), 1);
+}
+
+#[test]
+fn one_of_several_settled_tasks_missing_is_a_real_deletion() {
+    let a = task(1, "home", "kept");
+    let b = task(2, "home", "deleted remotely");
+    let p = World::new()
+        .local(&a)
+        .local(&b)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .remote(resource(&a, T0, "\"a\""), "home")
+        .plan();
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [Mutation::Delete { uid: uid(2) }]
+    );
+}
+
+// ── deleted in the vault, tombstones ──────────────────────────────────────────────────
+
+#[test]
+fn a_line_removed_from_the_vault_is_deleted_on_the_server() {
+    let t = task(1, "home", "removed from the note");
+    let p = World::new()
+        .settled(&t, "\"e1\"")
+        .remote(resource(&t, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(
+        p.deletes,
+        vec![DeleteOp {
+            list: slug("home"),
+            name: uid(1).as_str().to_string(),
+            etag: Some("\"e1\"".to_string()),
+        }]
+    );
+    assert_eq!(p.tombstones, vec![uid(1)]);
+    assert_eq!(p.forgets, vec![uid(1)]);
+    assert!(p.mutations.is_empty());
+}
+
+#[test]
+fn tasks_of_an_unreadable_note_are_unknown_not_deleted() {
+    let t = task(1, "home", "its note could not be read");
+    let mut world = World::new()
+        .settled(&t, "\"e1\"")
+        .remote(resource(&t, T0, "\"e1\""), "home");
+    world.s.unreadable.insert("notes/home.md".to_string());
+    assert!(world.plan().is_noop());
+}
+
+#[test]
+fn r0_a_tombstoned_task_is_purged_from_the_server() {
+    let t = task(1, "home", "deleted earlier, delete failed");
+    let p = World::new()
+        .tombstone(1)
+        .remote(resource(&t, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(p.deletes.len(), 1);
+    assert!(p.mutations.is_empty() && p.inbox_inserts.is_empty());
+}
+
+#[test]
+fn r0_the_vault_outranks_a_tombstone() {
+    // Cut a line, sync, paste it elsewhere: the task is back, so it lives. A tombstone
+    // must never delete what the user has in the vault.
+    let mut pasted = task(1, "work", "cut and pasted");
+    pasted.source.path = "notes/work.md".to_string();
+    let p = World::new().tombstone(1).local(&pasted).plan();
+    assert_eq!(p.revived, vec![uid(1)]);
+    assert!(p.mutations.is_empty(), "the pasted line stays");
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].task.list, slug("work"));
+}
+
+#[test]
+fn r6_state_for_a_task_that_exists_nowhere_is_forgotten() {
+    let t = task(1, "home", "gone everywhere");
+    let p = World::new().settled(&t, "\"e1\"").plan();
+    assert_eq!(p.forgets, vec![uid(1)]);
+    assert!(p.tombstones.is_empty() && p.deletes.is_empty());
+}
+
+// ── R4: created on the server under a managed UID ─────────────────────────────────────
+
+#[test]
+fn r4_a_server_task_goes_back_to_the_note_it_names() {
+    let mut theirs = task(1, "home", "from another device");
+    theirs.source.path = "notes/home.md".to_string();
+    let p = World::new()
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    match mutations_for(&p, "notes/home.md") {
+        [Mutation::Insert { draft, under: None }] => {
+            assert_eq!(draft.text, "from another device");
+            assert_eq!(draft.uid, Some(uid(1)));
+            assert_eq!(draft.created, Some(date("2026-09-01")));
         }
-        other => panic!("expected Mutate, got {other:?}"),
+        other => panic!("expected one insert, got {other:?}"),
+    }
+    assert_eq!(p.settled.len(), 1);
+    assert_eq!(p.settled[0].task.source.path, "notes/home.md");
+    assert!(p.puts.is_empty() && p.inbox_inserts.is_empty());
+}
+
+#[test]
+fn r4_falls_back_to_the_lists_home_note_then_to_the_inbox() {
+    // Its note is gone: the list's home note takes it.
+    let mut theirs = task(1, "home", "t");
+    theirs.source.path = "notes/deleted.md".to_string();
+    let p = World::new()
+        .remote(resource(&theirs, T0, "\"e1\""), "home")
+        .plan();
+    assert_eq!(mutations_for(&p, "notes/home.md").len(), 1);
+
+    // An inbox-list task lands in TODO.md, which the render writes.
+    let mut inbox = task(2, "inbox", "captured on the phone");
+    inbox.source.path = "TODO.md".to_string();
+    let p = World::new()
+        .remote(resource(&inbox, T0, "\"e2\""), "inbox")
+        .plan();
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.inbox_inserts.len(), 1);
+    assert_eq!(p.inbox_inserts[0].source.path, "TODO.md");
+    assert_eq!(p.settled[0].task.source.path, "TODO.md");
+}
+
+#[test]
+fn r4_a_child_is_inserted_under_its_parent_in_the_same_note() {
+    let parent = task(1, "home", "parent");
+    let mut child = task(2, "home", "child");
+    child.parent = Some(uid(1));
+    let p = World::new()
+        .local(&parent)
+        .settled(&parent, "\"p\"")
+        .remote(resource(&parent, T0, "\"p\""), "home")
+        .remote(resource(&child, T0, "\"c\""), "home")
+        .plan();
+    match mutations_for(&p, "notes/home.md") {
+        [Mutation::Insert { under, .. }] => assert_eq!(*under, Some(uid(1))),
+        other => panic!("expected one insert, got {other:?}"),
     }
 }
 
-// ── R9 ────────────────────────────────────────────────────────────────────────────────
+#[test]
+fn r4_a_child_whose_parent_is_elsewhere_becomes_a_root_line() {
+    let parent = task(1, "work", "parent in another note");
+    let mut child = task(2, "home", "child");
+    child.parent = Some(uid(1));
+    let p = World::new()
+        .local(&parent)
+        .settled(&parent, "\"p\"")
+        .remote(resource(&parent, T0, "\"p\""), "work")
+        .remote(resource(&child, T0, "\"c\""), "home")
+        .plan();
+    match mutations_for(&p, "notes/home.md") {
+        [Mutation::Insert { under, .. }] => assert_eq!(*under, None),
+        other => panic!("expected one insert, got {other:?}"),
+    }
+}
+
+// ── R5: adoption of foreign tasks ─────────────────────────────────────────────────────
+
+const TASKS_ORG: [&str; 6] = [
+    "UID:5417861935824551742",
+    "CREATED:20260921T081233Z",
+    "LAST-MODIFIED:20260922T101400Z",
+    "SUMMARY:Made in Tasks.org",
+    "DESCRIPTION:with a note",
+    "PRIORITY:1",
+];
 
 #[test]
-fn r9_moves_a_rerouted_task_between_collections() {
-    let mut local = task(1, "work", "alpha");
+fn r5_a_foreign_task_is_adopted_under_a_uid_derived_from_its_own() {
+    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    let p = world.plan();
+    assert_eq!(p.adoptions.len(), 1);
+    let adoption = &p.adoptions[0];
+    let adopted = &adoption.put.task;
+    assert_eq!(
+        adopted.uid,
+        TaskUid::derived(
+            "5417861935824551742",
+            Some(Utc.with_ymd_and_hms(2026, 9, 21, 8, 12, 33).unwrap())
+        )
+    );
+    assert_eq!(adopted.text, "Made in Tasks.org");
+    assert_eq!(adopted.priority, Some(Priority::Highest));
+    assert_eq!(adopted.list, slug("inbox"));
+    assert_eq!(adopted.source.path, "TODO.md");
+    assert_eq!(adoption.put.if_match, None);
+    assert_eq!(adoption.put.extras, vec!["DESCRIPTION:with a note"]);
+    assert_eq!(
+        adoption.foreign,
+        DeleteOp {
+            list: slug("inbox"),
+            name: "5417".to_string(),
+            etag: Some("\"5417\"".to_string()),
+        }
+    );
+    assert_eq!(p.inbox_inserts, vec![adopted.clone()]);
+    assert!(
+        p.deletes.is_empty(),
+        "the original goes only after the put succeeded"
+    );
+    // Same snapshot, same UID: a retried adoption can never duplicate the task.
+    assert_eq!(world.plan().adoptions[0].put.task.uid, adopted.uid);
+}
+
+#[test]
+fn r5_an_interrupted_adoption_is_resumed_not_repeated() {
+    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    let adopted = world.plan().adoptions[0].put.task.clone();
+
+    // The line made it into the vault, the put did not: push it with the extras.
+    let resumed = World::new()
+        .local(&adopted)
+        .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox")
+        .plan();
+    assert!(resumed.inbox_inserts.is_empty() && resumed.mutations.is_empty());
+    assert!(resumed.puts.is_empty(), "the adoption owns the push");
+    assert_eq!(resumed.adoptions.len(), 1);
+    assert_eq!(
+        resumed.adoptions[0].put.extras,
+        vec!["DESCRIPTION:with a note"]
+    );
+
+    // The put made it, the delete of the original did not: only the delete is left.
+    let leftover = World::new()
+        .local(&adopted)
+        .settled(&adopted, "\"new\"")
+        .remote(resource(&adopted, T0, "\"new\""), "inbox")
+        .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox")
+        .plan();
+    assert!(leftover.adoptions.is_empty());
+    assert_eq!(leftover.deletes.len(), 1);
+    assert_eq!(leftover.deletes[0].name, "5417");
+}
+
+#[test]
+fn r5_an_adopted_task_deleted_in_the_vault_takes_its_original_with_it() {
+    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    let adopted = world.plan().adoptions[0].put.task.uid.clone();
+    let mut world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.s.tombstones.insert(adopted);
+    let p = world.plan();
+    assert!(p.adoptions.is_empty() && p.inbox_inserts.is_empty());
+    assert_eq!(p.deletes.len(), 1);
+}
+
+#[test]
+fn r5_foreign_tasks_are_adopted_only_where_the_vault_has_a_place_for_them() {
+    // `archive` is in scope only because the index still references it.
+    let mut world = World::new();
+    world.s.remote.insert(
+        slug("archive"),
+        vec![foreign(
+            "archive",
+            "x",
+            &["UID:x@other", "SUMMARY:not ours"],
+        )],
+    );
+    assert!(world.plan().is_noop());
+
+    // A routed list adopts into its home note.
+    let p = World::new()
+        .remote(
+            foreign("home", "x", &["UID:x@other", "SUMMARY:for the note"]),
+            "home",
+        )
+        .plan();
+    assert_eq!(p.adoptions.len(), 1);
+    assert_eq!(p.adoptions[0].put.task.source.path, "notes/home.md");
+    assert_eq!(mutations_for(&p, "notes/home.md").len(), 1);
+}
+
+#[test]
+fn r5_a_foreign_family_keeps_its_hierarchy_parents_first() {
+    let parent = TaskUid::derived("p@tasks.org", None);
+    let child = TaskUid::derived("c@tasks.org", None);
+    // Document order is child first: the plan must still insert the parent first.
+    let p = World::new()
+        .remote(
+            foreign(
+                "home",
+                "a-child",
+                &[
+                    "UID:c@tasks.org",
+                    "SUMMARY:child",
+                    "RELATED-TO;RELTYPE=PARENT:p@tasks.org",
+                ],
+            ),
+            "home",
+        )
+        .remote(
+            foreign("home", "b-parent", &["UID:p@tasks.org", "SUMMARY:parent"]),
+            "home",
+        )
+        .plan();
+    match mutations_for(&p, "notes/home.md") {
+        [Mutation::Insert {
+            draft: first,
+            under: None,
+        }, Mutation::Insert {
+            draft: second,
+            under,
+        }] => {
+            assert_eq!(first.uid, Some(parent.clone()));
+            assert_eq!(second.uid, Some(child.clone()));
+            assert_eq!(*under, Some(parent.clone()));
+        }
+        other => panic!("expected parent then child, got {other:?}"),
+    }
+    let pushed_child = p
+        .adoptions
+        .iter()
+        .find(|adoption| adoption.put.task.uid == child)
+        .unwrap();
+    assert_eq!(pushed_child.put.task.parent, Some(parent));
+}
+
+#[test]
+fn r5_a_second_resource_with_the_same_foreign_uid_is_just_removed() {
+    let p = World::new()
+        .remote(
+            foreign("inbox", "one", &["UID:dup@x", "SUMMARY:t"]),
+            "inbox",
+        )
+        .remote(
+            foreign("inbox", "two", &["UID:dup@x", "SUMMARY:t"]),
+            "inbox",
+        )
+        .plan();
+    assert_eq!(p.adoptions.len(), 1);
+    assert_eq!(p.deletes.len(), 1);
+    assert_eq!(p.deletes[0].name, "two");
+}
+
+// ── R9: list moves ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn r9_a_rerouted_task_moves_between_collections_with_its_extras() {
+    let settled = task(1, "home", "moving");
+    let mut local = settled.clone();
+    local.list = slug("work");
     local.source.path = "notes/work.md".to_string();
-    let home_copy = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![local.clone()],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&home_copy))]),
-        vec![],
-        vec![entry_for(&task(1, "home", "alpha"), Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_moves.len(), 1);
-    assert_eq!(p.caldav_moves[0].task, local);
-    assert_eq!(p.caldav_moves[0].from, slug("home"));
-    assert_eq!(p.caldav_moves[0].to, slug("work"));
-    assert!(p.caldav_puts.is_empty() && p.caldav_deletes.is_empty());
-    assert_eq!(p.index_upserts.len(), 1);
-    assert_eq!(p.index_upserts[0].list, slug("work"));
-    assert!(p.todo_refresh);
+    let p = World::new()
+        .local(&local)
+        .settled(&settled, "\"e1\"")
+        .remote(
+            resource_with(&settled, T0, "\"e1\"", &["DESCRIPTION:keep me"]),
+            "home",
+        )
+        .plan();
+    assert_eq!(p.moves.len(), 1);
+    let mv = &p.moves[0];
+    assert_eq!(mv.put.task.list, slug("work"));
+    assert_eq!(mv.put.task.uid, uid(1), "the UID survives the move");
+    assert_eq!(mv.put.if_match, None);
+    assert_eq!(mv.put.extras, vec!["DESCRIPTION:keep me"]);
+    assert_eq!(mv.from.list, slug("home"));
+    assert_eq!(mv.from.etag.as_deref(), Some("\"e1\""));
+    assert!(p.puts.is_empty() && p.deletes.is_empty());
 }
 
 #[test]
-fn r9_deletes_stray_duplicate_copies() {
-    let t = task(1, "home", "alpha");
-    let home_copy = task(1, "home", "alpha");
-    let work_copy = task(1, "work", "alpha");
-    let s = snapshots(
-        vec![t.clone()],
-        vec![],
-        remote_map(vec![
-            ("home", uid(1).as_str(), remote_of(&home_copy)),
-            ("work", uid(1).as_str(), remote_of(&work_copy)),
-        ]),
-        vec![],
-        vec![entry_for(&t, Some("\"e1\""))],
-    );
-    let p = plan_now(s);
-    assert!(p.caldav_moves.is_empty() && p.caldav_puts.is_empty());
-    assert_eq!(p.caldav_deletes.len(), 1);
-    assert_eq!(p.caldav_deletes[0].list, slug("work"));
-    assert_eq!(p.caldav_deletes[0].name, t.uid.as_str());
-    // Content converged: only the stray cleanup and the cache mirror happened.
-    assert_eq!(p.cache_writes, vec![t]);
+fn r9_stray_copies_in_other_collections_are_deleted() {
+    let t = task(1, "home", "in two places");
+    let mut stray = t.clone();
+    stray.list = slug("work");
+    let p = World::new()
+        .local(&t)
+        .settled(&t, "\"e1\"")
+        .remote(resource(&t, T0, "\"e1\""), "home")
+        .remote(resource(&stray, T0, "\"s\""), "work")
+        .plan();
+    assert_eq!(p.deletes.len(), 1);
+    assert_eq!(p.deletes[0].list, slug("work"));
+    assert!(p.moves.is_empty() && p.puts.is_empty());
 }
 
 #[test]
-fn r9_recovers_a_copy_stranded_in_the_wrong_collection() {
-    let mut local = task(1, "work", "alpha");
-    local.source.path = "notes/work.md".to_string();
-    let home_copy = task(1, "home", "alpha");
-    let s = snapshots(
-        vec![local.clone()],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&home_copy))]),
-        vec![],
-        vec![entry_for(&task(1, "work", "alpha"), Some("\"e1\""))],
+fn a_task_another_client_stored_under_its_own_name_is_replaced_in_place() {
+    // Same UID, different resource name: the write must target that resource (a PUT to
+    // `<uid>.ics` would create a second copy), and a duplicate in the same collection
+    // is a stray like any other.
+    let base = task(1, "home", "alpha");
+    let mut local = base.clone();
+    local.text = "alpha, edited".to_string();
+    let mut renamed = resource(&base, T0, "\"r\"");
+    renamed.name = "ABCD-1234".to_string();
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"r\"")
+        .remote(renamed.clone(), "home")
+        .plan();
+    assert_eq!(p.puts[0].name, "ABCD-1234");
+    assert_eq!(p.puts[0].if_match.as_deref(), Some("\"r\""));
+
+    let p = World::new()
+        .local(&base)
+        .settled(&base, "\"e1\"")
+        .remote(renamed, "home")
+        .remote(resource(&base, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.puts.is_empty());
+    assert_eq!(p.deletes.len(), 1);
+    assert_eq!(
+        p.deletes[0].name, "ABCD-1234",
+        "the UID-named resource is canonical"
     );
-    let p = plan_now(s);
-    assert_eq!(p.caldav_moves.len(), 1);
-    assert_eq!(p.caldav_moves[0].from, slug("home"));
-    assert_eq!(p.caldav_moves[0].to, slug("work"));
-    assert!(p.caldav_deletes.is_empty());
 }
 
-// ── R10 ───────────────────────────────────────────────────────────────────────────────
+// ── R1: a vault file that file sync has not caught up yet ─────────────────────────────
+
+fn stale_world(defer_count: u8) -> World {
+    // The base says "beta" and was written at T0; the vault file still says "alpha"
+    // and predates the base by an hour: this replica has not received the note yet.
+    let base = task(1, "home", "beta");
+    let mut local = task(1, "home", "alpha");
+    local.last_modified = at(T0 - 3_600);
+    let mut world = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&base, T0, "\"e1\""), "home");
+    world.s.index.entries.get_mut(&uid(1)).unwrap().defer_count = defer_count;
+    world
+}
 
 #[test]
-fn r10_todo_refresh_flags() {
-    // A push grows the routed task set: mirror lines must appear in TODO.md.
-    let t = task(1, "home", "alpha");
-    let push = plan_now(snapshots(
-        vec![t.clone()],
-        vec![],
-        BTreeMap::new(),
-        vec![],
-        vec![],
-    ));
-    assert!(push.todo_refresh);
-    // A markdown mutation does.
-    let mut local = t.clone();
-    local.last_modified = at(0);
-    let mut remote_t = t.clone();
-    remote_t.text = "beta".to_string();
-    remote_t.last_modified = at(300);
-    let mutate = plan_now(snapshots(
-        vec![local],
-        vec![],
-        remote_map(vec![("home", uid(1).as_str(), remote_of(&remote_t))]),
-        vec![],
-        vec![],
-    ));
-    assert!(mutate.todo_refresh);
-    // A list move does.
-    let mut moved = task(2, "work", "alpha");
-    moved.source.path = "notes/work.md".to_string();
-    let home_copy = task(2, "home", "alpha");
-    let move_plan = plan_now(snapshots(
-        vec![moved],
-        vec![],
-        remote_map(vec![("home", uid(2).as_str(), remote_of(&home_copy))]),
-        vec![],
-        vec![entry_for(&task(2, "home", "alpha"), Some("\"e1\""))],
-    ));
-    assert!(move_plan.todo_refresh);
+fn r1_a_vault_file_older_than_the_base_it_disagrees_with_is_deferred() {
+    let p = stale_world(0).plan();
+    assert_eq!(p.deferred, vec![(uid(1), DeferReason::VaultFileStale)]);
+    assert!(p.puts.is_empty() && p.mutations.is_empty() && p.settled.is_empty());
+}
+
+#[test]
+fn r1_gives_up_waiting_and_trusts_the_vault() {
+    let p = stale_world(DEFER_LIMIT).plan();
+    assert!(p.deferred.is_empty());
+    assert_eq!(p.puts[0].task.text, "alpha", "vault authority");
+}
+
+#[test]
+fn r1_does_not_fire_inside_the_tie_window_or_when_content_agrees() {
+    let base = task(1, "home", "beta");
+    let mut local = task(1, "home", "alpha");
+    local.last_modified = at(T0 - 120);
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&base, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.deferred.is_empty());
+
+    let mut old_but_equal = base.clone();
+    old_but_equal.last_modified = at(T0 - 3_600);
+    let p = World::new()
+        .local(&old_but_equal)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&base, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.is_noop(), "{p:?}");
+}
+
+#[test]
+fn a_deferred_counter_is_cleared_by_the_next_settle() {
+    let t = task(1, "home", "steady");
+    let mut world = World::new()
+        .local(&t)
+        .settled(&t, "\"e1\"")
+        .remote(resource(&t, T0, "\"e1\""), "home");
+    world.s.index.entries.get_mut(&uid(1)).unwrap().defer_count = 2;
+    let p = world.plan();
+    assert_eq!(
+        p.settled.len(),
+        1,
+        "settling rewrites the entry with a zero counter"
+    );
+}
+
+#[test]
+fn snapshots_default_has_no_scope() {
+    let s = Snapshots::default();
+    assert!(s.remote.is_empty() && s.inbox_list.is_none());
+    assert_eq!(s.tombstones, BTreeSet::new());
+    assert_eq!(s.index, Index::default());
+    assert_eq!(s.notes, BTreeMap::new());
 }

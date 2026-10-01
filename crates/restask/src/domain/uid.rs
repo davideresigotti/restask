@@ -3,7 +3,11 @@
 //! (UIDs are eternal).
 
 use std::fmt;
+use std::hash::Hasher;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+
+use chrono::{DateTime, Utc};
+use fnv::FnvHasher;
 
 /// Prefix of every UID this build generates.
 pub const UID_PREFIX: &str = "restask-";
@@ -36,6 +40,28 @@ impl TaskUid {
     pub fn generate() -> Self {
         let mut generator = global_generator();
         let ulid = generator.generate().unwrap_or_else(|_| ulid::Ulid::new());
+        Self(format!("{}{}", UID_PREFIX, ulid.to_string().to_lowercase()))
+    }
+
+    /// Derives the UID a foreign task is adopted under (§11 R5): a pure function of the
+    /// foreign `UID` and its creation instant, so adopting the same resource twice — a
+    /// retry after a crash, or two devices racing — yields the same task instead of a
+    /// duplicate. The ULID timestamp is `created_at` (keeps creation order in the inbox;
+    /// the epoch when unknown), its 80 random bits are a hash of `foreign_uid`.
+    pub fn derived(foreign_uid: &str, created_at: Option<DateTime<Utc>>) -> Self {
+        let millis = created_at
+            .map(|at| at.timestamp_millis())
+            .and_then(|ms| u64::try_from(ms).ok())
+            .unwrap_or(0);
+        let hash = |salt: &[u8]| {
+            let mut hasher = FnvHasher::default();
+            hasher.write(salt);
+            hasher.write(foreign_uid.as_bytes());
+            u128::from(hasher.finish())
+        };
+        let random =
+            ((hash(b"restask-adopt-a") << 64) | hash(b"restask-adopt-b")) & ((1u128 << 80) - 1);
+        let ulid = ulid::Ulid::from_parts(millis, random);
         Self(format!("{}{}", UID_PREFIX, ulid.to_string().to_lowercase()))
     }
 

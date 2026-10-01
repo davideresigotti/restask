@@ -32,7 +32,7 @@ fn sample_task() -> Task {
     Task {
         uid: uid(UID),
         list: ListSlug::from_name("home-lab").unwrap(),
-        text: "Buy oat milk; then \"escape\" me\n".to_string(),
+        text: "Buy oat milk; then \"escape\" me".to_string(),
         status: Status::Completed {
             on: LocalDate::parse("2026-09-20").unwrap(),
         },
@@ -69,7 +69,7 @@ fn cache_write_then_read_roundtrips() {
     restask::store::cache_write(dir.path(), &task, now()).unwrap();
 
     let tz = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
-    let loaded = restask::store::cache_read(dir.path(), &uid(UID), tz).unwrap();
+    let loaded = restask::store::cache_read(dir.path(), &uid(UID), &tz).unwrap();
 
     // Fields not representable in a VTODO are normalized by the parser:
     // line = 0, heading dropped, mtimes = LAST-MODIFIED (= now), list = placeholder.
@@ -120,10 +120,10 @@ fn cache_write_bytes_match_push() {
 fn cache_read_missing_is_none() {
     let dir = tempdir().unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert!(restask::store::cache_read(dir.path(), &uid(UID), tz).is_none());
+    assert!(restask::store::cache_read(dir.path(), &uid(UID), &tz).is_none());
     // A missing tasks/ directory is equally absent.
     let nested = dir.path().join("nope");
-    assert!(restask::store::cache_read(&nested, &uid(UID), tz).is_none());
+    assert!(restask::store::cache_read(&nested, &uid(UID), &tz).is_none());
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn cache_read_unparseable_is_none() {
     )
     .unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert!(restask::store::cache_read(dir.path(), &uid(UID), tz).is_none());
+    assert!(restask::store::cache_read(dir.path(), &uid(UID), &tz).is_none());
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn cache_read_foreign_is_none() {
     let foreign = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:not-a-restask-uid\r\nSUMMARY:X\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
     fs::write(dir.path().join("tasks").join(format!("{UID}.ics")), foreign).unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert!(restask::store::cache_read(dir.path(), &uid(UID), tz).is_none());
+    assert!(restask::store::cache_read(dir.path(), &uid(UID), &tz).is_none());
 }
 
 #[test]
@@ -160,6 +160,6 @@ fn cache_remove_is_idempotent() {
     assert!(!dir.path().join("tasks").join(format!("{UID}.ics")).exists());
 
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
-    assert!(restask::store::cache_read(dir.path(), &uid(UID), tz).is_none());
+    assert!(restask::store::cache_read(dir.path(), &uid(UID), &tz).is_none());
     restask::store::cache_remove(dir.path(), &uid(UID)).unwrap();
 }

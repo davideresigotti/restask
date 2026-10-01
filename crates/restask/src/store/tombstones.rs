@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::uid::TaskUid;
-use crate::markdown::mutator::write_atomic;
+use crate::fsio::write_if_changed;
 use crate::RestaskError;
 
 /// Name of the tombstones file inside `.restask/`.
@@ -49,7 +49,8 @@ impl Tombstones {
                 reason: e.to_string(),
             })?;
         json.push('\n');
-        write_atomic(&dir.join(FILE_NAME), &json)
+        write_if_changed(&dir.join(FILE_NAME), &json)?;
+        Ok(())
     }
 
     /// Records `uid` as deleted at `at`.
@@ -62,10 +63,21 @@ impl Tombstones {
         self.0.contains_key(uid)
     }
 
-    /// Drops entries deleted more than `older_than` ago, relative to the current wall
-    /// clock. Entries deleted exactly `older_than` ago are kept.
-    pub fn prune(&mut self, older_than: Duration) {
-        let cutoff = Utc::now() - older_than;
+    /// Clears the marker for `uid` (the task reappeared in the vault, which is the
+    /// source of truth). Returns whether a marker existed.
+    pub fn remove(&mut self, uid: &TaskUid) -> bool {
+        self.0.remove(uid).is_some()
+    }
+
+    /// The tombstoned UIDs, in order.
+    pub fn uids(&self) -> impl Iterator<Item = &TaskUid> {
+        self.0.keys()
+    }
+
+    /// Drops entries deleted more than `older_than` before `now`. Entries deleted exactly
+    /// `older_than` ago are kept.
+    pub fn prune(&mut self, older_than: Duration, now: DateTime<Utc>) {
+        let cutoff = now - older_than;
         self.0.retain(|_, at| *at >= cutoff);
     }
 }

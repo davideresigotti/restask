@@ -2,9 +2,17 @@
 //! collections), namespace-prefix agnostic scanning, and entity unescaping.
 
 use restask::caldav::protocol::{
-    mkcol_body, parse_collections, parse_etags, propfind_collections_body, report_vtodo_etags,
+    mkcol_body, parse_collections, parse_report, propfind_collections_body, report_vtodos,
     xml_unescape,
 };
+
+/// `(name, etag)` pairs of a REPORT answer.
+fn parse_etags(xml: &str) -> Vec<(String, String)> {
+    parse_report(xml)
+        .into_iter()
+        .map(|item| (item.name, item.etag))
+        .collect()
+}
 
 #[test]
 fn mkcol_body_requests_vtodo_only_collection() {
@@ -36,13 +44,14 @@ fn mkcol_body_escapes_display_name() {
 
 #[test]
 fn report_body_targets_vtodo_components() {
-    let body = report_vtodo_etags();
+    let body = report_vtodos();
     assert_eq!(
         body,
         r#"<?xml version="1.0" encoding="utf-8"?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop>
     <D:getetag/>
+    <C:calendar-data/>
   </D:prop>
   <C:filter>
     <C:comp-filter name="VCALENDAR">
@@ -271,4 +280,62 @@ fn xml_unescape_is_single_pass_and_preserves_bare_ampersands() {
     // Unknown entity-like input stays literal.
     assert_eq!(xml_unescape("a & b &unknown; c"), "a & b &unknown; c");
     assert_eq!(xml_unescape(""), "");
+}
+
+#[test]
+fn report_carries_the_calendar_data_of_each_resource() {
+    // Radicale inlines the body entity-escaped; line breaks may arrive as CRLF, LF, or
+    // numeric references.
+    let xml = r#"<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+ <D:response>
+  <D:href>/me/inbox/a.ics</D:href>
+  <D:propstat><D:prop>
+   <D:getetag>"1"</D:getetag>
+   <C:calendar-data>BEGIN:VCALENDAR&#13;
+BEGIN:VTODO&#13;
+UID:a&#13;
+SUMMARY:Tom &amp; Jerry &lt;3&#13;
+END:VTODO&#13;
+END:VCALENDAR&#13;
+</C:calendar-data>
+  </D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+ </D:response>
+ <D:response>
+  <D:href>/me/inbox/b%40host.ics</D:href>
+  <D:propstat><D:prop>
+   <D:getetag>"2"</D:getetag>
+   <C:calendar-data><![CDATA[BEGIN:VCALENDAR
+BEGIN:VTODO
+SUMMARY:a < b > c & d
+END:VTODO
+END:VCALENDAR
+]]></C:calendar-data>
+  </D:prop></D:propstat>
+ </D:response>
+ <D:response>
+  <D:href>/me/inbox/c.ics</D:href>
+  <D:propstat><D:prop><D:getetag>"3"</D:getetag></D:prop></D:propstat>
+ </D:response>
+</D:multistatus>"#;
+    let items = parse_report(xml);
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].name, "a");
+    assert!(items[0]
+        .data
+        .starts_with("BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\n"));
+    assert!(items[0].data.contains("SUMMARY:Tom & Jerry <3\r\n"));
+    // The name stays percent-encoded so it can be reused in a URL verbatim.
+    assert_eq!(items[1].name, "b%40host");
+    assert!(items[1].data.contains("SUMMARY:a < b > c & d\n"));
+    // A server that does not inline bodies yields empty data (the client then GETs).
+    assert_eq!(
+        (items[2].etag.as_str(), items[2].data.as_str()),
+        ("\"3\"", "")
+    );
+}
+
+#[test]
+fn xml_unescape_decodes_numeric_character_references() {
+    assert_eq!(xml_unescape("a&#13;&#10;b&#x41;&#X42;"), "a\r\nbAB");
+    assert_eq!(xml_unescape("&#;&#xZZ;&#99999999;"), "&#;&#xZZ;&#99999999;");
 }

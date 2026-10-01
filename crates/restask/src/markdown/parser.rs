@@ -93,6 +93,27 @@ pub struct TaskDraft {
     pub completed_on: Option<LocalDate>,
 }
 
+impl From<&crate::domain::Task> for TaskDraft {
+    /// The Markdown line content of a task.
+    fn from(task: &crate::domain::Task) -> Self {
+        let completed_on = match task.status {
+            crate::domain::Status::Completed { on } => Some(on),
+            crate::domain::Status::Active => None,
+        };
+        Self {
+            uid: Some(task.uid.clone()),
+            text: task.text.clone(),
+            checked: completed_on.is_some(),
+            priority: task.priority,
+            due: task.due,
+            start: task.start,
+            scheduled: task.scheduled,
+            created: task.created,
+            completed_on,
+        }
+    }
+}
+
 /// One line matched by the §6.1 grammar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLine {
@@ -344,12 +365,23 @@ pub fn parse(contents: &str, cfg: &VaultConfig) -> ParsedFile {
 
 /// Resolves each task's parent UID (§6.2 subtasks): a task whose `indent_chars` exceeds a
 /// previous task's is its child; the parent is the nearest ancestor checkbox. Ancestors
-/// without a registered UID yield `None` (child treated as root). The returned vector
-/// aligns with `tasks` by position; children serialize as `RELATED-TO;TOREL=PARENT`.
+/// without a registered UID yield `None` (child treated as root). Nesting never crosses a
+/// heading, and tasks in the done region have no parent (completed records are a flat
+/// log). The returned vector aligns with `tasks` by position; children serialize as
+/// `RELATED-TO;RELTYPE=PARENT`.
 pub fn link_parents(tasks: &[ParsedTask]) -> Vec<Option<TaskUid>> {
     let mut parents = Vec::with_capacity(tasks.len());
     let mut stack: Vec<(usize, Option<TaskUid>)> = Vec::new();
+    let mut section: Option<&Option<String>> = None;
     for task in tasks {
+        if section != Some(&task.heading) {
+            stack.clear();
+            section = Some(&task.heading);
+        }
+        if task.in_done_region {
+            parents.push(None);
+            continue;
+        }
         while stack
             .last()
             .is_some_and(|(indent, _)| *indent >= task.indent_chars)

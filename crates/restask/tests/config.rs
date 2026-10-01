@@ -70,7 +70,6 @@ fn machine_config_defaults() {
     assert!(cfg.caldav.url.is_none());
     assert!(cfg.caldav.username.is_none());
     assert!(cfg.vault.path.is_none());
-    assert!(cfg.lists.is_empty());
 
     let both =
         MachineConfig::from_str("[caldav]\npassword_file = \"p\"\npassword_env = \"E\"\n").unwrap();
@@ -94,11 +93,9 @@ fn machine_config_round_trip() {
     );
     assert_eq!(cfg.caldav.poll_secs, 300);
     assert!(cfg.caldav.allow_create_lists);
-    assert_eq!(cfg.lists.len(), 2);
-    assert_eq!(cfg.lists[0].name, "Inbox");
-    assert_eq!(cfg.lists[0].collection, "inbox");
-    assert_eq!(cfg.lists[1].name, "University");
-    assert_eq!(cfg.lists[1].collection, "university");
+    // The `[[lists]]` tables above are what older versions recorded: routing lives in the
+    // notes' frontmatter, so they are accepted and ignored — an existing config keeps
+    // loading.
 
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.toml");

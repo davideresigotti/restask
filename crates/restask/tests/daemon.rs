@@ -1,6 +1,6 @@
 //! Daemon conformance (§13.1): `run_once` end-to-end against the mock port, the pure
-//! debounce coalescing (explicit instants — no real watcher or wall-clock timing), and
-//! clean shutdown/once modes.
+//! debounce coalescing (explicit instants), event filtering, the live loop reacting to a
+//! vault edit, and clean shutdown/once modes.
 
 mod common;
 
@@ -11,7 +11,7 @@ use chrono::TimeZone as _;
 
 use common::{temp_vault, write_vault_file, FixedClock, MockCaldav};
 use restask::config::{CaldavConfig, MachineConfig};
-use restask::daemon::{run_once_with, run_with, DaemonConfig, DebounceQueue};
+use restask::daemon::{run_once_with, run_with, DaemonConfig, Debounce};
 use restask::domain::TaskUid;
 use restask::sync::ReconcileReport;
 use tokio::time::Instant;
@@ -119,68 +119,99 @@ async fn daemon_stops_cleanly_on_shutdown() {
     worker.await.unwrap().unwrap();
 }
 
-#[test]
-fn debounce_queue_coalesces_bursts_by_path() {
-    let base = Instant::from_std(std::time::Instant::now());
-    let mut queue = DebounceQueue::default();
-    assert!(queue.is_empty());
+#[tokio::test]
+async fn the_daemon_reconciles_on_start_and_on_vault_events() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    // The first poll tick is immediate: the startup pass registers and pushes.
+    wait_until(|| mock.resource_names("home").len() == 1).await;
 
-    // Three writes to the same file inside the window coalesce into one firing.
-    queue.push(
-        std::path::PathBuf::from("notes/a.md"),
-        base + Duration::from_millis(300),
+    // A new line in a note wakes the reconciler through the watcher.
+    let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
+    write_vault_file(
+        &dir,
+        "notes/home.md",
+        &format!("{note}- [ ] walk the dog\n"),
     );
-    queue.push(
-        std::path::PathBuf::from("notes/a.md"),
-        base + Duration::from_millis(500),
-    );
-    queue.push(
-        std::path::PathBuf::from("notes/a.md"),
-        base + Duration::from_millis(700),
-    );
+    wait_until(|| mock.resource_names("home").len() == 2).await;
 
-    assert_eq!(
-        queue.due(base + Duration::from_millis(299)),
-        Vec::<std::path::PathBuf>::new()
-    );
-    assert!(!queue.is_empty());
-    assert_eq!(
-        queue.due(base + Duration::from_millis(700)),
-        vec![std::path::PathBuf::from("notes/a.md")]
-    );
-    assert!(queue.is_empty());
-    assert_eq!(
-        queue.due(base + Duration::from_millis(800)),
-        Vec::<std::path::PathBuf>::new()
-    );
+    // The engine's own writes settle: no endless self-triggered passes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (puts, _, reports) = mock.counters();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(mock.counters(), (puts, 0, reports), "the daemon went quiet");
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
+/// Polls `condition` for up to five seconds.
+async fn wait_until(condition: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if condition() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("condition not reached within 5 s");
 }
 
 #[test]
-fn debounce_queue_tracks_paths_independently() {
-    let base = Instant::from_std(std::time::Instant::now());
-    let mut queue = DebounceQueue::default();
-    queue.push(
-        std::path::PathBuf::from("notes/a.md"),
-        base + Duration::from_millis(300),
-    );
-    queue.push(
-        std::path::PathBuf::from("notes/b.md"),
-        base + Duration::from_millis(500),
-    );
+fn debounce_coalesces_a_burst_into_one_fire() {
+    let base = Instant::now();
+    let ms = Duration::from_millis;
+    let mut pending = Debounce::default();
+    assert!(!pending.fire(base), "clean: nothing to fire");
+    assert_eq!(pending.deadline(), None);
 
-    assert_eq!(
-        queue.due(base + Duration::from_millis(300)),
-        vec![std::path::PathBuf::from("notes/a.md")]
-    );
-    assert_eq!(
-        queue.next_deadline(),
-        Some(base + Duration::from_millis(500))
-    );
-    assert_eq!(
-        queue.due(base + Duration::from_millis(500)),
-        vec![std::path::PathBuf::from("notes/b.md")]
-    );
-    assert_eq!(queue.next_deadline(), None);
+    // Three events in quick succession: each postpones the fire-at instant.
+    pending.touch(base + ms(300));
+    pending.touch(base + ms(350));
+    pending.touch(base + ms(400));
+    assert_eq!(pending.deadline(), Some(base + ms(400)));
+    assert!(!pending.fire(base + ms(399)));
+    assert!(pending.fire(base + ms(400)));
+    // Fired once: clean again until the next event.
+    assert!(!pending.fire(base + ms(10_000)));
+    assert_eq!(pending.deadline(), None);
+}
+
+#[test]
+fn only_events_that_can_change_a_scan_wake_the_daemon() {
+    use restask::config::VaultConfig;
+    use restask::vault::is_relevant_event;
+    let matchers = VaultConfig::default().matchers().unwrap();
+    for relevant in ["TODO.md", "notes/home.md", "notes", "2. Areas/Home Lab"] {
+        assert!(is_relevant_event(relevant, &matchers), "{relevant}");
+    }
+    for ignored in [
+        "",
+        ".restask",
+        ".restask/index.json",
+        ".restask/todo.rendered.md",
+        ".restask/tasks/restask-01jz0000000000000000000001.ics",
+        ".obsidian/workspace.json",
+        ".git/HEAD",
+        "notes/.home.md.restask-tmp",
+        "TODO.pre-restask-20260922-101500.md",
+        "notes/home.sync-conflict-20260922-101500-ABCDEFG.md",
+        "notes/picture.png",
+    ] {
+        assert!(!is_relevant_event(ignored, &matchers), "{ignored}");
+    }
 }
 
 #[test]
@@ -190,6 +221,7 @@ fn reconcile_report_defaults_to_zeroes() {
         ReconcileReport {
             scanned_files: 0,
             registered: 0,
+            normalized: 0,
             pushes: 0,
             moves: 0,
             deletes: 0,
@@ -197,7 +229,7 @@ fn reconcile_report_defaults_to_zeroes() {
             inserts: 0,
             adoptions: 0,
             deferred: 0,
-            parked: 0,
+            failed: 0,
         }
     );
 }

@@ -548,25 +548,199 @@ fn crlf_move_to_done_uses_dominant_ending() {
 }
 
 #[test]
-fn write_atomic_renames_hidden_tmp() {
-    use std::fs;
-    use std::path::PathBuf;
+fn reassign_gives_a_duplicated_line_its_own_uid() {
+    let out = run(
+        concat!(
+            "- [ ] A ⏫ ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [ ] A copy ⏫ ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        ),
+        &[Mutation::Reassign {
+            line_no: 2,
+            uid: uid(UID2),
+        }],
+    );
+    assert_eq!(out.applied.len(), 1);
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] A ⏫ ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [ ] A copy ⏫ ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        )
+    );
+}
 
-    use restask::markdown::mutator::write_atomic;
+fn draft(text: &str, uid_value: &str) -> restask::markdown::TaskDraft {
+    restask::markdown::TaskDraft {
+        uid: Some(uid(uid_value)),
+        text: text.to_string(),
+        ..Default::default()
+    }
+}
 
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("note.md");
+#[test]
+fn insert_joins_the_bottom_of_the_active_region() {
+    let out = run(
+        concat!(
+            "# Notes\n",
+            "\n",
+            "- [ ] A 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "\n",
+            "Some prose.\n",
+            "\n",
+            "## Done\n",
+        ),
+        &[Mutation::Insert {
+            draft: draft("From the server", UID2),
+            under: None,
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "# Notes\n",
+            "\n",
+            "- [ ] A 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [ ] From the server 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "\n",
+            "Some prose.\n",
+            "\n",
+            "## Done\n",
+        )
+    );
+}
 
-    write_atomic(&path, "hello\n").unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), "hello\n");
-    let mut entries: Vec<PathBuf> = fs::read_dir(dir.path())
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    entries.sort();
-    assert_eq!(entries, vec![path.clone()]);
+#[test]
+fn insert_into_a_note_without_tasks_goes_above_the_done_heading_or_to_eof() {
+    let with_heading = run(
+        "# Notes\n\n## Done\n",
+        &[Mutation::Insert {
+            draft: draft("First", UID1),
+            under: None,
+        }],
+    );
+    assert_eq!(
+        with_heading.contents,
+        "# Notes\n- [ ] First 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n\n## Done\n"
+    );
+    let bare = run(
+        "# Notes",
+        &[Mutation::Insert {
+            draft: draft("First", UID1),
+            under: None,
+        }],
+    );
+    assert_eq!(
+        bare.contents,
+        "# Notes\n- [ ] First 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+}
 
-    write_atomic(&path, "second\n").unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), "second\n");
-    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+#[test]
+fn insert_of_a_completed_task_goes_under_the_done_heading() {
+    let mut done = draft("Finished elsewhere", UID2);
+    done.checked = true;
+    done.completed_on = Some(date("2026-09-21"));
+    let out = run(
+        "- [ ] A 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::Insert {
+            draft: done,
+            under: None,
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] A 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "\n",
+            "### Done\n",
+            "- [x] Finished elsewhere ✅ 2026-09-21 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        )
+    );
+}
+
+#[test]
+fn insert_under_a_parent_nests_one_level_in_the_files_own_indent_style() {
+    let spaces = run(
+        "- [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n- [ ] Next\n",
+        &[Mutation::Insert {
+            draft: draft("Child", UID2),
+            under: Some(uid(UID1)),
+        }],
+    );
+    assert_eq!(
+        spaces.contents,
+        concat!(
+            "- [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "    - [ ] Child 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "- [ ] Next\n",
+        )
+    );
+    let tabs = run(
+        "* [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n\t* [ ] Sibling\n",
+        &[Mutation::Insert {
+            draft: draft("Child", UID2),
+            under: Some(uid(UID1)),
+        }],
+    );
+    assert_eq!(
+        tabs.contents,
+        concat!(
+            "* [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "\t* [ ] Child 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "\t* [ ] Sibling\n",
+        )
+    );
+}
+
+#[test]
+fn a_moved_subtask_leaves_its_indentation_behind() {
+    // An indented line moved under the done heading must not nest under whatever task
+    // happens to precede it there.
+    let out = run(
+        concat!(
+            "- [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "    - [x] Child ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "## Done\n",
+        ),
+        &[Mutation::MoveToDone { uid: uid(UID2) }],
+    );
+    assert_eq!(
+        out.contents,
+        concat!(
+            "- [ ] Parent 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "## Done\n",
+            "- [x] Child ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+        )
+    );
+}
+
+#[test]
+fn done_heading_creation_uses_the_configured_heading() {
+    let cfg = VaultConfig {
+        done_heading: "Fatto".to_string(),
+        ..VaultConfig::default()
+    };
+    let out = apply(
+        "- [x] A ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::MoveToDone { uid: uid(UID1) }],
+        &cfg,
+        &FixedClock,
+    )
+    .unwrap();
+    assert_eq!(
+        out.contents,
+        "\n### Fatto\n- [x] A ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+}
+
+#[test]
+fn done_heading_creation_does_not_stack_blank_lines() {
+    let out = run(
+        "# Notes\n\n- [x] A ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::MoveToDone { uid: uid(UID1) }],
+    );
+    assert_eq!(
+        out.contents,
+        "# Notes\n\n### Done\n- [x] A ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
 }

@@ -1,654 +1,600 @@
-//! Reconciliation planner (§11): a pure three-way decision function over the vault, cache,
-//! and remote snapshots. Zero I/O; time enters only as the `now` parameter.
+//! Reconciliation planner (§11): a pure decision function over the vault, the base
+//! snapshots, and the server. Zero I/O; time enters only as the `now` parameter and the
+//! same snapshots always yield the same plan.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
-
+use crate::caldav::RemoteResource;
 use crate::domain::{ListSlug, Status, Task, TaskUid};
-use crate::markdown::mutator::{Mutation, WhenField};
+use crate::markdown::mutator::Mutation;
+use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
-use crate::vtodo::RemoteTask;
+use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
 
-/// Conflict tie window in seconds (§11.2 R1/R8): a cache strictly newer than the vault by
-/// more than this defers the UID; content duels within it resolve LOCAL (vault authority).
-const TIE_WINDOW_SECS: i64 = 120;
-
-/// Consecutive defer cycles (R1) after which the planner logs a hard `vault_divergence`.
-const DEFER_ERROR_THRESHOLD: u8 = 3;
+/// Consecutive cycles a stale-looking vault file is waited on (R1) before the vault is
+/// taken at its word again (vault authority).
+pub const DEFER_LIMIT: u8 = 3;
 
 /// Everything one reconciliation pass needs (§11.1).
 #[derive(Debug, Default, PartialEq)]
 pub struct Snapshots {
     /// Tasks parsed from the vault scan.
     pub local: BTreeMap<TaskUid, Task>,
-    /// Tasks parsed from `.restask/tasks` (the engine overwrites `list` from the index).
-    pub cache: BTreeMap<TaskUid, Task>,
-    /// Remote VTODOs per bound/managed collection, keyed by resource name (sans `.ics`).
-    pub remote: BTreeMap<ListSlug, BTreeMap<String, RemoteTask>>,
-    /// UIDs deleted on some device; never resurrected (R0).
+    /// Base snapshots read from `.restask/tasks` (`list` taken from the index). A base
+    /// only counts when the index vouches for it (see [`IndexEntry::thumbprint`]).
+    pub base: BTreeMap<TaskUid, Task>,
+    /// Server resources per collection — **only** collections that were listed this
+    /// cycle. A list missing here is unknown, never "empty".
+    pub remote: BTreeMap<ListSlug, Vec<RemoteResource>>,
+    /// Collections created during this cycle (they cannot hold deletions).
+    pub created: BTreeSet<ListSlug>,
+    /// UIDs deleted on some device.
     pub tombstones: BTreeSet<TaskUid>,
     /// Routing/etag bookkeeping (§9.1).
     pub index: Index,
+    /// Every routed note, with or without tasks: vault-relative path → list.
+    pub notes: BTreeMap<String, ListSlug>,
+    /// Per list, the note that receives tasks created on the server.
+    pub homes: BTreeMap<ListSlug, String>,
+    /// Routed files that could not be read this cycle; their tasks are unknown, not gone.
+    pub unreadable: BTreeSet<String>,
+    /// Vault-relative path of the engine-managed inbox file.
+    pub inbox_file: String,
+    /// The list the inbox file routes to; `None` only in an empty default snapshot.
+    pub inbox_list: Option<ListSlug>,
 }
 
 /// The mutation plan for one reconciliation pass (§11.1).
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
-    /// Vault edits; all mutations for one file are grouped into a single [`MarkdownOp::Mutate`].
-    pub markdown_ops: Vec<MarkdownOp>,
-    /// `true` when TODO.md must be re-rendered (R10).
-    pub todo_refresh: bool,
-    /// Tasks to serialize and `PUT` (new or locally-won content).
-    pub caldav_puts: Vec<Task>,
-    /// List moves: `PUT` to `to` + `DELETE` from `from`, UID preserved (R9).
-    pub caldav_moves: Vec<MoveOp>,
-    /// Remote resources to delete (tombstones, strays, replaced foreign tasks).
-    pub caldav_deletes: Vec<DeleteOp>,
-    /// Foreign resources adopted into the system (R5).
+    /// Vault edits per file, in application order (one pass per file).
+    pub mutations: BTreeMap<String, Vec<Mutation>>,
+    /// Server-created tasks that land in the inbox; the TODO.md render writes them.
+    pub inbox_inserts: Vec<Task>,
+    /// Resources to create or replace.
+    pub puts: Vec<PutOp>,
+    /// List moves: `PUT` into the new collection, then `DELETE` from the old one.
+    pub moves: Vec<MoveOp>,
+    /// Foreign resources replaced by a managed one (R5).
     pub adoptions: Vec<AdoptOp>,
-    /// Cache files to (re)write.
-    pub cache_writes: Vec<Task>,
-    /// Cache files to remove.
-    pub cache_deletes: Vec<TaskUid>,
-    /// Index entries to upsert.
-    pub index_upserts: Vec<IndexEntry>,
-    /// Index entries to remove.
-    pub index_removals: Vec<TaskUid>,
+    /// Resources to delete.
+    pub deletes: Vec<DeleteOp>,
+    /// Tasks whose base is refreshed without a push (already equal on the server).
+    pub settled: Vec<Settled>,
+    /// UIDs whose base snapshot and index entry are dropped.
+    pub forgets: Vec<TaskUid>,
+    /// UIDs to tombstone.
+    pub tombstones: Vec<TaskUid>,
+    /// Tombstoned UIDs that reappeared in the vault: the tombstone is cleared.
+    pub revived: Vec<TaskUid>,
     /// UIDs whose reconciliation was postponed, with the reason.
     pub deferred: Vec<(TaskUid, DeferReason)>,
 }
 
-/// A vault-side operation (§11.1).
-// The normative §11.1 shape carries `task: Task` by value; the size skew between variants
-// is irrelevant at plan scale (dozens of ops per cycle).
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum MarkdownOp {
-    /// Inserts a new task line (remote-created or adopted task).
-    Insert {
-        /// The task to insert (UID already assigned).
-        task: Task,
-        /// Where the line goes.
-        target: InsertTarget,
-    },
-    /// Applies every queued mutation for one file in a single pass (§6.3).
-    Mutate {
-        /// Vault-relative path of the file.
-        path: String,
-        /// All mutations for the file, in deterministic order.
-        mutations: Vec<Mutation>,
-    },
-    /// Removes the task line entirely.
-    Delete {
-        /// Vault-relative path of the file.
-        path: String,
-        /// The task to remove.
-        uid: TaskUid,
-    },
+impl Plan {
+    /// `true` when the plan changes nothing anywhere.
+    pub fn is_noop(&self) -> bool {
+        *self == Plan::default()
+    }
 }
 
-/// Where a [`MarkdownOp::Insert`] places its line (§11.2 R4/R5).
+/// A resource write. When it succeeds, `task` becomes the base for its UID.
 #[derive(Debug, Clone, PartialEq)]
-pub enum InsertTarget {
-    /// The TODO.md inbox section.
-    TodoInbox,
-    /// Appends a mirror line at the end of the routed note.
-    FileEnd {
-        /// Vault-relative path of the note.
-        path: String,
-    },
-    /// Inserts the line directly after its parent task.
-    UnderParent {
-        /// Vault-relative path of the note.
-        path: String,
-        /// The parent task UID; the engine re-locates the line and its indent.
-        after_uid: TaskUid,
-        /// Indentation of the inserted line; `0` = the engine resolves it from the file.
-        indent_chars: usize,
-    },
+pub struct PutOp {
+    /// The task to serialize (its `list` names the target collection).
+    pub task: Task,
+    /// Resource name to write (sans `.ics`): the UID, or the name the server lists the
+    /// task under when another client stored it differently.
+    pub name: String,
+    /// Unmanaged content of the resource being replaced, written back verbatim.
+    pub extras: Vec<String>,
+    /// Etag of the version being replaced; `None` creates the resource.
+    pub if_match: Option<String>,
 }
 
 /// A list move (§11.2 R9).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveOp {
-    /// The task (with `list` already set to `to`).
-    pub task: Task,
-    /// The collection the resource currently lives in.
-    pub from: ListSlug,
-    /// The collection the task resolves to.
-    pub to: ListSlug,
+    /// The write into the collection the task now routes to.
+    pub put: PutOp,
+    /// The copy to remove afterwards — only once the write succeeded.
+    pub from: DeleteOp,
+}
+
+/// An adoption (§11.2 R5): a foreign resource becomes a managed one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdoptOp {
+    /// The managed resource to create (carrying the foreign resource's extras).
+    pub put: PutOp,
+    /// The foreign resource to remove afterwards — only once the write succeeded.
+    pub foreign: DeleteOp,
 }
 
 /// A remote resource deletion (§11.2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteOp {
     /// The collection holding the resource.
     pub list: ListSlug,
     /// Resource name (sans `.ics`).
     pub name: String,
-    /// ETag for `If-Match`; `None` = the engine fills it from its scan.
+    /// Etag for `If-Match`.
     pub etag: Option<String>,
 }
 
-/// A foreign resource awaiting adoption (§11.2 R5); the work itself is carried by the
-/// `markdown_ops`/`caldav_puts`/`caldav_deletes` entries emitted alongside it.
+/// A base refresh without a push.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AdoptOp {
-    /// The original parsed foreign task (placeholder UID).
-    pub remote: RemoteTask,
-    /// The collection the foreign resource was found in.
-    pub collection: ListSlug,
+pub struct Settled {
+    /// The agreed content.
+    pub task: Task,
+    /// Etag of the server copy that holds it.
+    pub etag: String,
 }
 
 /// Why a UID's reconciliation was postponed (§11.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeferReason {
-    /// The cache is newer than the vault by more than the tie window (in-flight write).
-    CacheNewerThanVault,
+    /// The vault file is older than the base it disagrees with: most likely a replica
+    /// that file sync has not caught up yet (R1).
+    VaultFileStale,
 }
 
-/// Computes the reconciliation plan (§11.1). PURE: same inputs → same plan, except that
-/// adoptions (R5) mint a fresh UID by design.
-pub fn plan(s: Snapshots, now: DateTime<Utc>) -> Plan {
-    let mut p = Plan::default();
-    let mut mutations: BTreeMap<String, Vec<Mutation>> = BTreeMap::new();
-    let mut adopted: BTreeSet<String> = BTreeSet::new();
+/// One copy of a managed UID on the server.
+type Copy<'a> = (&'a ListSlug, &'a RemoteResource);
 
-    let mut uids: BTreeSet<TaskUid> = BTreeSet::new();
-    uids.extend(s.local.keys().cloned());
-    uids.extend(s.cache.keys().cloned());
-    for collection in s.remote.values() {
-        for remote in collection.values() {
-            if remote.managed {
-                uids.insert(remote.task.uid.clone());
-            }
-        }
-    }
+/// A task line waiting to be inserted into the vault.
+struct PendingInsert {
+    /// Target note; `None` = the inbox (rendered by TODO.md).
+    path: Option<String>,
+    task: Task,
+    parent: Option<TaskUid>,
+}
+
+/// Computes the reconciliation plan (§11). PURE.
+pub fn plan(s: &Snapshots) -> Plan {
+    let mut p = Plan::default();
+    let ctx = Context::new(s);
+    let mut inserts: Vec<PendingInsert> = Vec::new();
+
+    let mut uids: BTreeSet<&TaskUid> = BTreeSet::new();
+    uids.extend(s.local.keys());
+    uids.extend(s.base.keys());
+    uids.extend(s.index.entries.keys());
+    uids.extend(ctx.managed.keys());
 
     for uid in uids {
-        let local = s.local.get(&uid);
-        let cache = s.cache.get(&uid);
-        let entry = s.index.get(&uid);
+        let entry = s.index.get(uid);
+        let copies: &[Copy<'_>] = ctx.managed.get(uid).map(Vec::as_slice).unwrap_or_default();
+        let known = entry.is_some() || s.base.contains_key(uid);
 
-        // R0 — tombstoned UIDs are purged everywhere and never resurrected.
-        if s.tombstones.contains(&uid) {
-            purge_tombstoned(&mut p, &s, &uid, local, cache, entry);
-            continue;
-        }
-
-        let Some(local) = local else {
-            let copies = remote_copies(&s, &uid);
-            if copies.is_empty() {
-                // R6 — stale cache entry (and dead bookkeeping for it).
-                if cache.is_some() {
-                    p.cache_deletes.push(uid.clone());
-                    if entry.is_some() {
-                        p.index_removals.push(uid.clone());
-                    }
+        let Some(local) = s.local.get(uid) else {
+            if entry.is_some_and(|e| s.unreadable.contains(&e.source_path)) {
+                // The note exists but could not be read: unknown, not deleted.
+                continue;
+            }
+            if s.tombstones.contains(uid) {
+                // R0 — deleted somewhere: purge every surviving copy, never resurrect.
+                p.deletes.extend(copies.iter().map(delete_of));
+                if known {
+                    p.forgets.push(uid.clone());
                 }
-            } else if cache.is_some() {
-                // Vault-side deletion: the note line is gone while the cache and the
-                // server still hold the task. Purge every surviving copy — never
-                // resurrect (vault authority; the in-flight plugin window is R1/R6).
-                p.cache_deletes.push(uid.clone());
-                for (slug, name, _) in copies {
-                    p.caldav_deletes.push(DeleteOp {
-                        list: slug.clone(),
-                        name: name.to_string(),
-                        etag: None,
-                    });
+            } else if copies.is_empty() {
+                // R6 — state for a task that exists nowhere any more.
+                if known && entry.is_none_or(|e| s.remote.contains_key(&e.list)) {
+                    p.forgets.push(uid.clone());
                 }
-                if entry.is_some() {
-                    p.index_removals.push(uid.clone());
-                }
+            } else if known {
+                // Vault-side deletion: the line is gone while the server still holds it.
+                p.deletes.extend(copies.iter().map(delete_of));
+                p.tombstones.push(uid.clone());
+                p.forgets.push(uid.clone());
+                tracing::info!(uid = %uid, "task_deleted");
             } else {
-                reconcile_remote_only(&mut p, &s, &uid, copies, entry, now);
+                // R4 — created on the server (or state was lost): bring it into the vault.
+                let (origin, rest) = (copies[0], &copies[1..]);
+                p.deletes.extend(rest.iter().map(delete_of));
+                let (path, mut task) = ctx.place(origin.0, origin.1);
+                task.uid = uid.clone();
+                p.settled.push(Settled {
+                    task: task.clone(),
+                    etag: origin.1.etag.clone(),
+                });
+                inserts.push(PendingInsert {
+                    path,
+                    parent: ctx.parent_of(origin.1),
+                    task,
+                });
+                tracing::info!(uid = %uid, list = %origin.0.as_str(), "caldav_pull");
             }
             continue;
         };
 
-        // R1 — in-flight Syncthing write from a mobile plugin: the cache is newer than the
-        // vault by more than the tie window. Defer until the vault catches up.
-        if let Some(cache) = cache {
-            let drift = (cache.last_modified - local.last_modified).num_seconds();
-            if cache.thumbprint() != local.thumbprint() && drift > TIE_WINDOW_SECS {
-                let mut next = entry
-                    .cloned()
-                    .unwrap_or_else(|| upsert_entry(&uid, local, None, now));
-                next.defer_count = next.defer_count.saturating_add(1);
-                next.seen_at = now;
-                if next.defer_count >= DEFER_ERROR_THRESHOLD {
-                    tracing::error!(uid = %uid, defer_count = next.defer_count, "vault_divergence");
-                }
-                p.index_upserts.push(next);
-                p.deferred
-                    .push((uid.clone(), DeferReason::CacheNewerThanVault));
+        if s.tombstones.contains(uid) {
+            // The vault is the source of truth: a line that is (back) in the vault lives.
+            p.revived.push(uid.clone());
+        }
+        if !s.remote.contains_key(&local.list) {
+            // Its collection was not listed this cycle: nothing can be decided.
+            continue;
+        }
+        let base = ctx.base(uid);
+
+        // R1 — the vault file predates the base it disagrees with: a replica that file
+        // sync has not caught up. Wait a few cycles, then trust the vault.
+        if let (Some(base), Some(entry)) = (base, entry) {
+            let lag = base
+                .last_modified
+                .signed_duration_since(local.last_modified)
+                .num_seconds();
+            if fields_differ(base, local)
+                && lag > TIE_WINDOW_SECS
+                && entry.defer_count < DEFER_LIMIT
+            {
+                p.deferred.push((uid.clone(), DeferReason::VaultFileStale));
                 continue;
             }
         }
 
-        let copies = remote_copies(&s, &uid);
-        let at_list = copies
-            .iter()
-            .find(|(slug, _, _)| *slug == &local.list)
-            .map(|(_, _, remote)| *remote);
-        let strays: Vec<(&ListSlug, &str)> = copies
-            .iter()
-            .filter(|(slug, _, _)| *slug != &local.list)
-            .map(|(slug, name, _)| (*slug, *name))
-            .collect();
-
-        if let Some(remote_task) = at_list {
-            if !strays.is_empty() {
-                for (slug, name) in &strays {
-                    p.caldav_deletes.push(DeleteOp {
-                        list: (*slug).clone(),
-                        name: (*name).to_string(),
-                        etag: None,
-                    });
-                }
-                tracing::info!(uid = %uid, count = strays.len(), "task_moved");
+        let authoritative = ctx.parent_authoritative(local);
+        let at_list = copies.iter().find(|(slug, _)| **slug == local.list);
+        if let Some((_, resource)) = at_list {
+            // R7/R8 — both sides hold it: three-way merge. Every other copy (another
+            // collection, or a second resource in this one) is a stray.
+            p.deletes.extend(
+                copies
+                    .iter()
+                    .filter(|(_, other)| !std::ptr::eq(*other, *resource))
+                    .map(delete_of),
+            );
+            let merged = merge(base, local, ctx.view(resource), authoritative);
+            if merged.conflict {
+                tracing::warn!(uid = %uid, "conflict_resolved");
             }
-            if remote_task.task.thumbprint() == local.thumbprint() {
-                // R7 — converged; refresh bookkeeping and mirror the cache if needed.
-                if cache_missing_or_differs(cache, local) {
-                    p.cache_writes.push(local.clone());
-                }
-                if bookkeeping_stale(entry, local) {
-                    p.index_upserts.push(upsert_entry(&uid, local, entry, now));
-                }
-            } else {
-                // R8 — LAST-MODIFIED duel.
-                let drift = local
-                    .last_modified
-                    .signed_duration_since(remote_task.task.last_modified)
-                    .num_seconds();
-                let true_divergence = cache.is_some_and(|c| {
-                    c.thumbprint() != local.thumbprint()
-                        && c.thumbprint() != remote_task.task.thumbprint()
+            if !merged.mutations.is_empty() {
+                p.mutations
+                    .entry(local.source.path.clone())
+                    .or_default()
+                    .extend(merged.mutations);
+            }
+            if merged.push {
+                p.puts.push(PutOp {
+                    task: merged.task,
+                    name: resource.name.clone(),
+                    extras: resource.task.extras.clone(),
+                    if_match: Some(resource.etag.clone()),
                 });
-                if true_divergence {
-                    tracing::warn!(uid = %uid, "conflict_resolved");
-                }
-                let remote_wins = drift < -TIE_WINDOW_SECS;
-                let mut ms = if remote_wins {
-                    decompose(&uid, local, &remote_task.task)
-                } else {
-                    Vec::new()
-                };
-                if remote_wins && !ms.is_empty() {
-                    let merged = merge_remote(&remote_task.task, local);
-                    mutations
-                        .entry(local.source.path.clone())
-                        .or_default()
-                        .append(&mut ms);
-                    p.cache_writes.push(merged.clone());
-                    p.index_upserts
-                        .push(upsert_entry(&uid, &merged, entry, now));
-                } else {
-                    // Local wins (vault authority), or the remote-won diff only touches
-                    // fields the grammar cannot represent: push the vault copy instead.
-                    p.caldav_puts.push(local.clone());
-                    if cache_missing_or_differs(cache, local) {
-                        p.cache_writes.push(local.clone());
-                    }
-                    p.index_upserts.push(upsert_entry(&uid, local, entry, now));
-                }
-            }
-        } else if copies.is_empty() {
-            let was_pushed = entry.is_some_and(|e| e.caldav_etag.is_some());
-            if was_pushed {
-                // R3 — server-side deletion: remove the vault copy; the engine records the
-                // tombstone when it executes this plan.
-                p.markdown_ops.push(MarkdownOp::Delete {
-                    path: local.source.path.clone(),
-                    uid: uid.clone(),
+            } else if needs_settle(entry, s.base.get(uid), &merged.task, &resource.etag) {
+                p.settled.push(Settled {
+                    task: merged.task,
+                    etag: resource.etag.clone(),
                 });
-                p.cache_deletes.push(uid.clone());
-                p.index_removals.push(uid.clone());
-            } else {
-                // R2 — new local task: push, cache, and remember it.
-                p.caldav_puts.push(local.clone());
-                if cache_missing_or_differs(cache, local) {
-                    p.cache_writes.push(local.clone());
-                }
-                p.index_upserts.push(upsert_entry(&uid, local, entry, now));
             }
+        } else if let Some((origin, rest)) = copies.split_first() {
+            // R9 — the server holds it in another collection: move it, UID preserved.
+            let merged = merge(base, local, ctx.view(origin.1), authoritative);
+            if !merged.mutations.is_empty() {
+                p.mutations
+                    .entry(local.source.path.clone())
+                    .or_default()
+                    .extend(merged.mutations);
+            }
+            tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
+            p.moves.push(MoveOp {
+                put: PutOp {
+                    name: uid.as_str().to_string(),
+                    task: merged.task,
+                    extras: origin.1.task.extras.clone(),
+                    if_match: None,
+                },
+                from: delete_of(origin),
+            });
+            p.deletes.extend(rest.iter().map(delete_of));
+        } else if ctx.adoptable.contains_key(uid) {
+            // An adoption in flight (line inserted, foreign resource still there):
+            // resumed below with the foreign resource's extras.
+        } else if ctx.deleted_on_server(local, entry) {
+            // R3 — it was settled and the server no longer has it: deleted remotely.
+            p.mutations
+                .entry(local.source.path.clone())
+                .or_default()
+                .push(Mutation::Delete { uid: uid.clone() });
+            p.tombstones.push(uid.clone());
+            p.forgets.push(uid.clone());
+            tracing::info!(uid = %uid, path = %local.source.path, "task_deleted");
         } else {
-            // R9 — the UID lives on the server but not in the resolved list: move it there
-            // and delete every misplaced copy.
-            let (from, _, _) = copies[0];
-            p.caldav_moves.push(MoveOp {
+            // R2 — the server has never seen it (or lost it wholesale): push.
+            p.puts.push(PutOp {
                 task: local.clone(),
-                from: from.clone(),
-                to: local.list.clone(),
+                name: uid.as_str().to_string(),
+                extras: Vec::new(),
+                if_match: None,
             });
-            for (slug, name, _) in &copies[1..] {
-                p.caldav_deletes.push(DeleteOp {
-                    list: (*slug).clone(),
-                    name: (*name).to_string(),
-                    etag: None,
-                });
+        }
+    }
+
+    // R5 — foreign VTODOs become managed tasks under a UID derived from their own.
+    for (uid, (slug, resource)) in &ctx.adoptable {
+        let foreign = delete_of(&(*slug, *resource));
+        if ctx.managed.contains_key(uid) {
+            // Already re-homed on the server; only the foreign original is left over.
+            p.deletes.push(foreign);
+            continue;
+        }
+        let task = match s.local.get(uid) {
+            Some(local) => {
+                let mut task = local.clone();
+                if !ctx.parent_authoritative(local) {
+                    task.parent = ctx.parent_of(resource);
+                }
+                task
             }
-            p.index_upserts.push(upsert_entry(&uid, local, entry, now));
-            tracing::info!(uid = %uid, from = %from.as_str(), to = %local.list.as_str(), "task_moved");
-        }
+            None if s.tombstones.contains(uid) => {
+                // Adopted earlier, then deleted in the vault.
+                p.deletes.push(foreign);
+                continue;
+            }
+            None => {
+                let (path, mut task) = ctx.place(slug, resource);
+                task.uid = uid.clone();
+                inserts.push(PendingInsert {
+                    path,
+                    parent: ctx.parent_of(resource),
+                    task: task.clone(),
+                });
+                tracing::info!(uid = %uid, list = %slug.as_str(), "task_adopted");
+                task
+            }
+        };
+        p.adoptions.push(AdoptOp {
+            put: PutOp {
+                name: uid.as_str().to_string(),
+                task,
+                extras: resource.task.extras.clone(),
+                if_match: None,
+            },
+            foreign,
+        });
     }
+    p.deletes.extend(ctx.duplicates.iter().map(delete_of));
 
-    adopt_foreign(&mut p, &s, now, &mut adopted);
-
-    for (path, ms) in mutations {
-        if !ms.is_empty() {
-            p.markdown_ops.push(MarkdownOp::Mutate {
-                path,
-                mutations: ms,
-            });
-        }
-    }
-    // R10 — any markdown op, push (routed task set changed), or list move re-renders TODO.md.
-    p.todo_refresh =
-        !p.markdown_ops.is_empty() || !p.caldav_puts.is_empty() || !p.caldav_moves.is_empty();
+    schedule_inserts(&mut p, s, inserts);
     p
 }
 
-/// R0 — deletes a tombstoned UID from the vault, the cache, and every remote collection.
-fn purge_tombstoned(
-    p: &mut Plan,
-    s: &Snapshots,
-    uid: &TaskUid,
-    local: Option<&Task>,
-    cache: Option<&Task>,
-    entry: Option<&IndexEntry>,
-) {
-    if let Some(task) = local {
-        p.markdown_ops.push(MarkdownOp::Delete {
-            path: task.source.path.clone(),
-            uid: uid.clone(),
-        });
-    }
-    if cache.is_some() {
-        p.cache_deletes.push(uid.clone());
-    }
-    for (slug, name, _) in remote_copies(s, uid) {
-        p.caldav_deletes.push(DeleteOp {
-            list: slug.clone(),
-            name: name.to_string(),
-            etag: None,
-        });
-    }
-    if entry.is_some() {
-        p.index_removals.push(uid.clone());
-    }
+/// Lookup tables derived once from the snapshots.
+struct Context<'a> {
+    s: &'a Snapshots,
+    /// Managed UID → every server copy, in collection order.
+    managed: BTreeMap<&'a TaskUid, Vec<Copy<'a>>>,
+    /// Adopted UID → the foreign resource it stands for.
+    adoptable: BTreeMap<TaskUid, Copy<'a>>,
+    /// Further resources carrying an already-adopted foreign UID.
+    duplicates: Vec<Copy<'a>>,
+    /// Foreign `UID` → adopted UID (resolves parent relations between foreign tasks).
+    adopted_uids: BTreeMap<&'a str, TaskUid>,
+    /// Lists whose settled tasks vanished wholesale: a reset collection, not deletions.
+    reset: BTreeSet<&'a ListSlug>,
 }
 
-/// R4 — inserts a remote-only managed task into the vault from its canonical copy and
-/// deletes duplicate resources in other collections.
-fn reconcile_remote_only(
-    p: &mut Plan,
-    s: &Snapshots,
-    uid: &TaskUid,
-    copies: Vec<(&ListSlug, &str, &RemoteTask)>,
-    entry: Option<&IndexEntry>,
-    now: DateTime<Utc>,
-) {
-    let origin = copies
-        .iter()
-        .position(|(slug, _, _)| entry.is_some_and(|e| *slug == &e.list))
-        .unwrap_or(0);
-    let (_, _, origin_remote) = copies[origin];
-    let mut task = origin_remote.task.clone();
-
-    let candidate = origin_remote.source_path.clone().or_else(|| {
-        entry
-            .map(|e| e.source_path.clone())
-            .filter(|p| !p.is_empty())
-    });
-    let routed = candidate.filter(|path| note_is_routed(s, path, &task.list));
-    let target = match (routed, task.parent.clone()) {
-        (Some(path), Some(parent)) if parent_in_file(s, &parent, &path) => {
-            task.source.path = path.clone();
-            InsertTarget::UnderParent {
-                path,
-                after_uid: parent,
-                indent_chars: 0,
-            }
-        }
-        (Some(path), _) => {
-            task.source.path = path;
-            InsertTarget::FileEnd {
-                path: task.source.path.clone(),
-            }
-        }
-        (None, Some(parent)) => {
-            task.parent = None;
-            task.source.path = String::new();
-            tracing::warn!(uid = %uid, parent = %parent, "orphan_subtask");
-            InsertTarget::TodoInbox
-        }
-        (None, None) => {
-            task.source.path = String::new();
-            InsertTarget::TodoInbox
-        }
-    };
-    task.source.line = 0;
-    task.source_heading = None;
-
-    p.markdown_ops.push(MarkdownOp::Insert {
-        task: task.clone(),
-        target,
-    });
-    if cache_missing_or_differs(s.cache.get(uid), &task) {
-        p.cache_writes.push(task.clone());
-    }
-    p.index_upserts.push(upsert_entry(uid, &task, entry, now));
-    for (index, (slug, name, _)) in copies.iter().enumerate() {
-        if index == origin {
-            continue;
-        }
-        p.caldav_deletes.push(DeleteOp {
-            list: (*slug).clone(),
-            name: (*name).to_string(),
-            etag: None,
-        });
-    }
-}
-
-/// R5 — adopts foreign VTODOs in managed collections: fresh UID, routed insert, `PUT` of
-/// the new UID resource, deletion of the foreign resource.
-fn adopt_foreign(p: &mut Plan, s: &Snapshots, now: DateTime<Utc>, adopted: &mut BTreeSet<String>) {
-    for (slug, collection) in &s.remote {
-        for (name, remote) in collection {
-            if remote.managed {
-                continue;
-            }
-            if !adopted.insert(remote.raw_uid.clone()) {
-                // Duplicate resource for an already-adopted foreign task.
-                p.caldav_deletes.push(DeleteOp {
-                    list: slug.clone(),
-                    name: name.clone(),
-                    etag: None,
-                });
-                continue;
-            }
-            let mut task = remote.task.clone();
-            task.uid = TaskUid::generate();
-            task.list = slug.clone();
-            let routed = remote
-                .source_path
-                .clone()
-                .filter(|path| note_is_routed(s, path, slug));
-            let target = match routed {
-                Some(path) => {
-                    task.source.path = path;
-                    InsertTarget::FileEnd {
-                        path: task.source.path.clone(),
+impl<'a> Context<'a> {
+    fn new(s: &'a Snapshots) -> Self {
+        let mut managed: BTreeMap<&TaskUid, Vec<Copy<'_>>> = BTreeMap::new();
+        let mut adoptable: BTreeMap<TaskUid, Copy<'_>> = BTreeMap::new();
+        let mut duplicates = Vec::new();
+        let mut adopted_uids = BTreeMap::new();
+        for (slug, resources) in &s.remote {
+            for resource in resources {
+                if resource.task.managed {
+                    managed
+                        .entry(&resource.task.task.uid)
+                        .or_default()
+                        .push((slug, resource));
+                    continue;
+                }
+                // Foreign tasks are adopted only where the vault has a place for them.
+                let has_home = s.inbox_list.as_ref() == Some(slug) || s.homes.contains_key(slug);
+                if !has_home {
+                    continue;
+                }
+                let seed: &str = if resource.task.raw_uid.is_empty() {
+                    &resource.name
+                } else {
+                    &resource.task.raw_uid
+                };
+                let uid = TaskUid::derived(seed, resource.task.created_at);
+                match adoptable.entry(uid) {
+                    Entry::Occupied(_) => duplicates.push((slug, resource)),
+                    Entry::Vacant(slot) => {
+                        adopted_uids.insert(seed, slot.key().clone());
+                        slot.insert((slug, resource));
                     }
                 }
-                None => {
-                    task.source.path = String::new();
-                    InsertTarget::TodoInbox
-                }
-            };
-            task.source.line = 0;
-            task.source_heading = None;
-            p.markdown_ops.push(MarkdownOp::Insert {
-                task: task.clone(),
-                target,
-            });
-            p.caldav_puts.push(task.clone());
-            p.caldav_deletes.push(DeleteOp {
-                list: slug.clone(),
-                name: name.clone(),
-                etag: None,
-            });
-            p.adoptions.push(AdoptOp {
-                remote: remote.clone(),
-                collection: slug.clone(),
-            });
-            p.cache_writes.push(task.clone());
-            p.index_upserts
-                .push(upsert_entry(&task.uid, &task, None, now));
-            tracing::info!(uid = %task.uid, collection = %slug.as_str(), "task_adopted");
-        }
-    }
-}
-
-/// R8 remote-wins field decomposition (§11.3). Returns the mutations for the vault line;
-/// empty when the two copies differ only in fields the grammar cannot represent.
-fn decompose(uid: &TaskUid, local: &Task, remote: &Task) -> Vec<Mutation> {
-    let mut prefix = Vec::new();
-    let mut suffix = Vec::new();
-    match (remote.status, local.status) {
-        (Status::Completed { on }, Status::Active) => {
-            prefix.push(Mutation::SetStatus {
-                uid: uid.clone(),
-                checked: true,
-                completed_on: Some(on),
-            });
-            suffix.push(Mutation::MoveToDone { uid: uid.clone() });
-        }
-        (Status::Active, Status::Completed { .. }) => {
-            prefix.push(Mutation::RestoreFromDone { uid: uid.clone() });
-            prefix.push(Mutation::SetStatus {
-                uid: uid.clone(),
-                checked: false,
-                completed_on: None,
-            });
-        }
-        _ => {}
-    }
-    let mut ms = prefix;
-    if remote.text != local.text {
-        ms.push(Mutation::EditText {
-            uid: uid.clone(),
-            text: remote.text.clone(),
-        });
-    }
-    if remote.priority != local.priority {
-        ms.push(Mutation::SetPriority {
-            uid: uid.clone(),
-            priority: remote.priority,
-        });
-    }
-    if remote.due != local.due {
-        ms.push(Mutation::SetWhen {
-            uid: uid.clone(),
-            field: WhenField::Due,
-            value: remote.due,
-        });
-    }
-    if remote.start != local.start {
-        ms.push(Mutation::SetWhen {
-            uid: uid.clone(),
-            field: WhenField::Start,
-            value: remote.start,
-        });
-    }
-    if remote.scheduled != local.scheduled {
-        ms.push(Mutation::SetWhen {
-            uid: uid.clone(),
-            field: WhenField::Scheduled,
-            value: remote.scheduled,
-        });
-    }
-    ms.extend(suffix);
-    ms
-}
-
-/// Merges a remote-won task with the local source references (§11.3): remote content,
-/// local placement.
-fn merge_remote(remote: &Task, local: &Task) -> Task {
-    let mut merged = remote.clone();
-    merged.list = local.list.clone();
-    merged.source = local.source.clone();
-    merged.source_heading = local.source_heading.clone();
-    merged.source_mtime = local.source_mtime;
-    merged.last_modified = remote.last_modified;
-    merged
-}
-
-/// Collections holding a managed UID, as `(slug, resource name, parsed task)`, in
-/// collection order (lexicographic by slug).
-fn remote_copies<'a>(
-    s: &'a Snapshots,
-    uid: &TaskUid,
-) -> Vec<(&'a ListSlug, &'a str, &'a RemoteTask)> {
-    let mut found = Vec::new();
-    for (slug, collection) in &s.remote {
-        for (name, remote) in collection {
-            if remote.managed && remote.task.uid == *uid {
-                found.push((slug, name.as_str(), remote));
             }
         }
+        // Canonical copy first: the one in the collection the index knows, and within a
+        // collection the resource named after the UID.
+        for copies in managed.values_mut() {
+            copies.sort_by_key(|(slug, resource)| {
+                let uid = &resource.task.task.uid;
+                let known_list = s.index.get(uid).is_some_and(|entry| entry.list == **slug);
+                let canonical_name = resource.name == uid.as_str();
+                (!known_list, (*slug).clone(), !canonical_name)
+            });
+        }
+
+        let mut settled_per_list: BTreeMap<&ListSlug, (usize, usize)> = BTreeMap::new();
+        for (uid, local) in &s.local {
+            let Some(entry) = s.index.get(uid) else {
+                continue;
+            };
+            if entry.caldav_etag.is_none() || entry.list != local.list {
+                continue;
+            }
+            let counts = settled_per_list.entry(&local.list).or_default();
+            counts.0 += 1;
+            if managed.contains_key(uid) {
+                counts.1 += 1;
+            }
+        }
+        let mut reset: BTreeSet<&ListSlug> = s.created.iter().collect();
+        for (slug, (settled, present)) in settled_per_list {
+            if settled >= 2 && present == 0 {
+                tracing::warn!(list = %slug.as_str(), count = settled, "collection_reset");
+                reset.insert(slug);
+            }
+        }
+
+        Self {
+            s,
+            managed,
+            adoptable,
+            duplicates,
+            adopted_uids,
+            reset,
+        }
     }
-    found
+
+    /// The base for `uid`, when the index vouches for the snapshot.
+    fn base(&self, uid: &TaskUid) -> Option<&'a Task> {
+        let entry = self.s.index.get(uid)?;
+        let base = self.s.base.get(uid)?;
+        (entry.caldav_etag.is_some() && entry.thumbprint == base.thumbprint()).then_some(base)
+    }
+
+    /// The parent of a server resource as a managed UID: its own when managed, else the
+    /// UID its foreign parent is adopted under.
+    fn parent_of(&self, resource: &RemoteResource) -> Option<TaskUid> {
+        resource.task.task.parent.clone().or_else(|| {
+            let raw = resource.task.parent_raw.as_deref()?;
+            self.adopted_uids.get(raw).cloned()
+        })
+    }
+
+    /// The server-side view the merge compares against.
+    fn view<'b>(&'b self, resource: &'b RemoteResource) -> RemoteView<'b> {
+        let parent = resource.task.task.parent.as_ref().or_else(|| {
+            let raw = resource.task.parent_raw.as_deref()?;
+            self.adopted_uids.get(raw)
+        });
+        RemoteView {
+            task: &resource.task.task,
+            parent,
+            source_path: resource.task.source_path.as_deref(),
+        }
+    }
+
+    /// Whether the vault decides `local`'s parent: only for active tasks in notes, where
+    /// indentation expresses nesting. The done region and TODO.md are flat.
+    fn parent_authoritative(&self, local: &Task) -> bool {
+        local.status == Status::Active && local.source.path != self.s.inbox_file
+    }
+
+    /// R3 precondition: the task was settled, the collection it was settled in was
+    /// listed this cycle and is not a reset one, and the task is gone from it.
+    fn deleted_on_server(&self, local: &Task, entry: Option<&IndexEntry>) -> bool {
+        entry.is_some_and(|entry| {
+            entry.caldav_etag.is_some()
+                && self.s.remote.contains_key(&entry.list)
+                && !self.reset.contains(&entry.list)
+                && !self.reset.contains(&local.list)
+        })
+    }
+
+    /// Where a server-created task goes, and the task as it will exist there: its
+    /// `X-RESTASK-SOURCE` note when that note still routes to the list, else the list's
+    /// home note, else the inbox (`None`).
+    fn place(&self, slug: &ListSlug, resource: &RemoteResource) -> (Option<String>, Task) {
+        let s = self.s;
+        let mut task = resource.task.task.clone();
+        task.list = slug.clone();
+        task.source_heading = None;
+        task.source.line = 0;
+        let routed = resource
+            .task
+            .source_path
+            .as_deref()
+            .filter(|path| *path != s.inbox_file && s.notes.get(*path) == Some(slug))
+            .map(str::to_string);
+        let path = routed.or_else(|| {
+            if s.inbox_list.as_ref() == Some(slug) {
+                None
+            } else {
+                s.homes.get(slug).cloned()
+            }
+        });
+        task.source.path = path.clone().unwrap_or_else(|| s.inbox_file.clone());
+        // Only a parent in the same note can be expressed (by indentation).
+        task.parent = self.parent_of(resource);
+        (path, task)
+    }
 }
 
-/// `true` when the note at `path` currently holds routed tasks for `list` — the planner's
-/// evidence that the note exists and routes there.
-fn note_is_routed(s: &Snapshots, path: &str, list: &ListSlug) -> bool {
-    s.local
-        .values()
-        .any(|t| t.source.path == path && t.list == *list)
+/// The delete operation for one server copy.
+fn delete_of(copy: &Copy<'_>) -> DeleteOp {
+    DeleteOp {
+        list: copy.0.clone(),
+        name: copy.1.name.clone(),
+        etag: Some(copy.1.etag.clone()),
+    }
 }
 
-/// `true` when `parent` is a local task in the same note file.
-fn parent_in_file(s: &Snapshots, parent: &TaskUid, path: &str) -> bool {
-    s.local.get(parent).is_some_and(|t| t.source.path == path)
+/// `true` when the base snapshot or the index entry must be (re)written for `task`.
+fn needs_settle(entry: Option<&IndexEntry>, base: Option<&Task>, task: &Task, etag: &str) -> bool {
+    let (Some(entry), Some(base)) = (entry, base) else {
+        return true;
+    };
+    let thumbprint = task.thumbprint();
+    entry.thumbprint != thumbprint
+        || base.thumbprint() != thumbprint
+        || entry.caldav_etag.as_deref() != Some(etag)
+        || entry.list != task.list
+        || entry.source_path != task.source.path
+        || entry.defer_count != 0
 }
 
-/// `true` when the cache entry is missing or its content differs from `task`.
-fn cache_missing_or_differs(cache: Option<&Task>, task: &Task) -> bool {
-    cache.is_none_or(|c| c.thumbprint() != task.thumbprint())
-}
-
-/// `true` when the index entry is missing or lags behind the local task (including a
-/// non-zero defer counter, which any successful reconcile resets).
-fn bookkeeping_stale(entry: Option<&IndexEntry>, task: &Task) -> bool {
-    entry.is_none_or(|e| {
-        e.list != task.list
-            || e.source_path != task.source.path
-            || e.thumbprint != task.thumbprint()
-            || e.defer_count != 0
-    })
-}
-
-/// Builds a fresh index entry for `task`, keeping any known etag and resetting the defer
-/// counter (a successful reconcile).
-fn upsert_entry(
-    uid: &TaskUid,
-    task: &Task,
-    entry: Option<&IndexEntry>,
-    now: DateTime<Utc>,
-) -> IndexEntry {
-    IndexEntry {
-        uid: uid.clone(),
-        list: task.list.clone(),
-        source_path: task.source.path.clone(),
-        thumbprint: task.thumbprint(),
-        caldav_etag: entry.and_then(|e| e.caldav_etag.clone()),
-        seen_at: now,
-        defer_count: 0,
+/// Turns the pending inserts into plan operations. A child goes under its parent when
+/// the parent is an active task of the same note (already there, or inserted in this
+/// plan — parents are emitted first); otherwise it becomes a root line (`orphan_subtask`).
+fn schedule_inserts(p: &mut Plan, s: &Snapshots, mut pending: Vec<PendingInsert>) {
+    let mut placed: BTreeMap<TaskUid, Option<String>> = BTreeMap::new();
+    while !pending.is_empty() {
+        // Emit every insert whose parent (if it is itself pending) is already emitted.
+        let waiting: BTreeSet<TaskUid> = pending.iter().map(|i| i.task.uid.clone()).collect();
+        let (ready, blocked): (Vec<_>, Vec<_>) = pending.into_iter().partition(|insert| {
+            insert
+                .parent
+                .as_ref()
+                .is_none_or(|parent| !waiting.contains(parent))
+        });
+        // A parent cycle between foreign tasks: break it by emitting everything.
+        let (ready, blocked) = if ready.is_empty() {
+            (blocked, Vec::new())
+        } else {
+            (ready, blocked)
+        };
+        for insert in ready {
+            let PendingInsert { path, task, parent } = insert;
+            placed.insert(task.uid.clone(), path.clone());
+            let Some(path) = path else {
+                p.inbox_inserts.push(task);
+                continue;
+            };
+            let under = parent.filter(|parent| {
+                let in_vault = s
+                    .local
+                    .get(parent)
+                    .is_some_and(|t| t.source.path == path && t.status == Status::Active);
+                let in_plan = placed.get(parent) == Some(&Some(path.clone()));
+                in_vault || in_plan
+            });
+            if task.parent.is_some() && under.is_none() {
+                tracing::warn!(uid = %task.uid, "orphan_subtask");
+            }
+            p.mutations.entry(path).or_default().push(Mutation::Insert {
+                draft: TaskDraft::from(&task),
+                under,
+            });
+        }
+        pending = blocked;
     }
 }

@@ -10,9 +10,10 @@ use std::process::Command;
 use std::sync::Arc;
 
 use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
-use crate::config::{CaldavConfig, ListBinding, MachineConfig, VaultConfig, VaultSection};
+use crate::config::{CaldavConfig, MachineConfig, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
-use crate::markdown::{mutator, render};
+use crate::fsio;
+use crate::markdown::render;
 use crate::sync::{Engine, ReconcileReport};
 use crate::RestaskError;
 
@@ -51,7 +52,9 @@ pub struct SetupArgs {
     /// Interactive setup always sets it; non-interactive setup derives it from a
     /// `--collection inbox=<calendar>` flag.
     pub inbox_collection: Option<String>,
-    /// `list=collection` bindings from `--collection` flags (repeatable).
+    /// Further `name=collection` pairs from `--collection` flags (repeatable): each
+    /// collection is created up front with `name` as its display name. Routing itself
+    /// is declared in the notes (§5), never here.
     pub collections: Vec<(String, String)>,
 }
 
@@ -107,9 +110,9 @@ pub struct SetupSummary {
 }
 
 /// Executes the non-interactive setup plan (§13.2): scaffold the vault, recreate TODO.md
-/// (renaming any existing file to the backup), record the machine config and list
-/// bindings, ensure the bound collections exist, run the first full reconcile, and
-/// install the daemon unit via `installer` (pass `None` to skip — hermetic tests).
+/// (renaming any existing file to the backup), record the machine config, ensure the
+/// inbox collection exists, run the first full reconcile, and install the daemon unit
+/// via `installer` (pass `None` to skip — hermetic tests).
 pub async fn run_setup<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
@@ -219,8 +222,8 @@ pub fn match_collection<'a>(
         .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
 }
 
-/// Shared setup body: vault scaffold, TODO.md adoption, machine-config records, bound
-/// collection creation, first reconcile, daemon-unit install.
+/// Shared setup body: vault scaffold, fresh TODO.md, machine config, collection
+/// creation, first reconcile, daemon-unit install.
 async fn prepare_and_sync<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
@@ -271,11 +274,11 @@ async fn prepare_and_sync<C: CaldavPort>(
         backup = Some(name);
     }
     let fresh = render(&BTreeMap::new(), &cfg);
-    mutator::write_atomic(&inbox, &fresh)?;
+    fsio::write_atomic(&inbox, &fresh)?;
 
-    // Steps 3–5 — machine config (endpoint + secret reference, never the secret) and the
-    // requested bindings; bound collections are created (MKCOL) before the first sync.
-    let mut machine = MachineConfig {
+    // Steps 3–4 — machine config (endpoint + secret reference, never the secret); the
+    // inbox collection and any requested ones exist before the first sync.
+    let machine = MachineConfig {
         vault: VaultSection {
             path: Some(vault.clone()),
         },
@@ -286,7 +289,6 @@ async fn prepare_and_sync<C: CaldavPort>(
             password_file: args.password_file.clone(),
             ..CaldavConfig::default()
         },
-        lists: Vec::new(),
     };
     let mut collections = Vec::new();
     if let Some(inbox_collection) = &args.inbox_collection {
@@ -295,25 +297,17 @@ async fn prepare_and_sync<C: CaldavPort>(
             .ensure_collection(&slug, &slug.display_name())
             .await?;
         collections.push(slug.as_str().to_string());
-        machine.lists.push(ListBinding {
-            name: cfg.inbox_list.clone(),
-            collection: slug.as_str().to_string(),
-        });
     }
     for (name, collection) in &args.collections {
         let slug = ListSlug::from_name(collection)?;
         caldav.ensure_collection(&slug, name).await?;
         collections.push(slug.as_str().to_string());
-        machine.lists.push(ListBinding {
-            name: name.clone(),
-            collection: slug.as_str().to_string(),
-        });
     }
     machine
         .save(&args.config_path)
         .map_err(|error| config_error(&args.config_path, &error))?;
 
-    // Step 6 — first sync: registers fresh lines, pulls tasks from the bound calendar.
+    // Step 5 — first sync: registers fresh lines, pulls tasks from the bound calendar.
     let engine = Engine::new(&vault, cfg, machine, caldav, clock);
     let report = engine.reconcile().await?;
 

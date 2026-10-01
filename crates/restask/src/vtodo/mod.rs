@@ -4,4 +4,4 @@ pub mod parse;
 pub mod serialize;
 
 pub use parse::{from_vcalendar, RemoteTask};
-pub use serialize::to_vcalendar;
+pub use serialize::{to_vcalendar, to_vcalendar_with};

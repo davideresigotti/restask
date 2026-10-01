@@ -134,8 +134,8 @@ async fn non_interactive_setup_end_to_end() {
     assert_eq!(todo, fresh_todo("inbox"));
     assert!(!todo.contains("water the plants"));
 
-    // Steps 3–5: machine config records the endpoint and the env-var reference (never
-    // the secret), the vault path, and the Home→home binding.
+    // Steps 3–4: machine config records the endpoint, the env-var reference (never the
+    // secret) and the vault path. Routing is not machine state: it lives in the notes.
     let machine = MachineConfig::load(&vault.path().join("machine.toml")).unwrap();
     assert_eq!(
         machine.caldav.url.as_deref(),
@@ -148,16 +148,14 @@ async fn non_interactive_setup_end_to_end() {
     );
     assert!(machine.caldav.password_file.is_none());
     assert_eq!(machine.vault.path.as_deref(), Some(vault.path()));
-    assert_eq!(machine.lists.len(), 1);
-    assert_eq!(machine.lists[0].name, "Home");
-    assert_eq!(machine.lists[0].collection, "home");
+    let raw = std::fs::read_to_string(vault.path().join("machine.toml")).unwrap();
+    assert!(!raw.contains("[[lists]]"), "{raw}");
 
-    // MKCOL happened for the flag binding; the inbox collection is only ensured once a
-    // task needs it (the fresh TODO.md is empty and the mock server has no tasks).
-    assert!(mock.collection_names().iter().any(|slug| slug == "home"));
-    assert!(!mock.collection_names().iter().any(|slug| slug == "inbox"));
+    // MKCOL happened for the requested collection, and the first sync created the inbox
+    // collection the fresh TODO.md routes to.
+    assert_eq!(mock.collection_names(), vec!["home", "inbox"]);
 
-    // Step 6: the first sync has nothing to register or push yet.
+    // Step 5: the first sync has nothing to register or push yet.
     let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
     assert!(mock.resource_names("inbox").is_empty());
@@ -268,16 +266,6 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
     );
     assert!(mock.collection_names().iter().any(|slug| slug == "tasks"));
     assert!(mock.collection_names().iter().any(|slug| slug == "home"));
-
-    let machine = MachineConfig::load(&vault.path().join("machine.toml")).unwrap();
-    assert_eq!(machine.lists.len(), 2);
-    let inbox_binding = machine
-        .lists
-        .iter()
-        .find(|binding| binding.collection == "tasks")
-        .unwrap();
-    assert_eq!(inbox_binding.name, "tasks");
-    assert_eq!(inbox_binding.collection, "tasks");
 
     let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());

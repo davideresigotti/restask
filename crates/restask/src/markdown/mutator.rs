@@ -1,8 +1,5 @@
-//! Line mutations (§6.3): pure `String → String` rewriting of registered task lines.
-
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+//! Line mutations (§6.3): pure `String → String` rewriting of task lines. No I/O — callers
+//! persist the result through [`crate::fsio`].
 
 use crate::config::VaultConfig;
 use crate::domain::{Clock, LocalDate, Priority, TaskUid, When};
@@ -32,6 +29,15 @@ pub enum Mutation {
         uid: TaskUid,
         /// Creation date to record.
         created: LocalDate,
+    },
+    /// Replaces the UID of the task line at `line_no` with a fresh one (a duplicated line:
+    /// the copy becomes its own task; every other token is kept).
+    Reassign {
+        /// 1-based line number of the duplicate (referring to the contents passed to
+        /// [`apply`]).
+        line_no: usize,
+        /// The fresh UID.
+        uid: TaskUid,
     },
     /// Sets the checkbox and the `✅` completion stamp.
     SetStatus {
@@ -79,6 +85,15 @@ pub enum Mutation {
     Delete {
         /// Target task.
         uid: TaskUid,
+    },
+    /// Inserts a new, already-registered task line (a task created on the server).
+    Insert {
+        /// The line's content; `uid` must be set.
+        draft: TaskDraft,
+        /// Parent task: the line goes directly below it, one indent level deeper. When
+        /// `None` (or the parent is not in this file) an active task joins the bottom of
+        /// the active region and a completed one goes under the done heading.
+        under: Option<TaskUid>,
     },
 }
 
@@ -178,7 +193,7 @@ pub(crate) fn fmt_when(when: When) -> String {
 
 /// Renders a task line: indent + marker + checkbox + text + canonical metadata tail
 /// (`<priority> 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted.
-fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
+pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     let mut tail: Vec<String> = Vec::new();
     if let Some(p) = draft.priority {
         tail.push(p.emoji().to_string());
@@ -225,11 +240,11 @@ fn locate_uid(lines: &[RawLine], uid: &TaskUid) -> Option<(usize, TaskLine)> {
     })
 }
 
-/// Re-renders the line at `idx` canonically as a standalone [`RawLine`] with the given
-/// ending (used when a mutation moves a line).
-fn render_moved(lines: &[RawLine], idx: usize, task: TaskLine, ending: &'static str) -> RawLine {
-    let indent = lines[idx].text[..task.indent_chars].to_string();
-    let text = canonical_line(&indent, task.marker, &task.draft);
+/// Re-renders a moved line canonically as a root-level [`RawLine`] with the given ending:
+/// a line that moves between the active and the done region leaves its parent's subtree,
+/// so it must not keep an indentation that would nest it under an unrelated task.
+fn render_moved(task: TaskLine, ending: &'static str) -> RawLine {
+    let text = canonical_line("", task.marker, &task.draft);
     RawLine { text, ending }
 }
 
@@ -258,12 +273,13 @@ fn with_uid_line(
 /// metadata tail; task text is never altered except by [`Mutation::EditText`];
 /// indentation, list marker, and every non-targeted line — including its line ending —
 /// are preserved byte-for-byte. A `Register` on a line that already carries the same UID
-/// is an idempotent re-render. Structural ops: [`Mutation::MoveToDone`] re-inserts the
-/// line directly under the done heading (newest-on-top), creating a level-3 `### Done`
-/// heading at the end of the file when absent; [`Mutation::RestoreFromDone`] re-inserts
-/// it at the bottom of the active region (immediately before the done heading, or end of
-/// file when the heading is absent); [`Mutation::Delete`] removes the line. Inserted and
-/// moved lines use the file's dominant line ending.
+/// is an idempotent re-render; [`Mutation::Reassign`] swaps the UID of a duplicated line.
+/// Structural ops: [`Mutation::MoveToDone`] re-inserts the line directly under the done
+/// heading (newest-on-top), creating a level-3 `### <done_heading>` heading at the end of
+/// the file when absent; [`Mutation::RestoreFromDone`] re-inserts it at the bottom of the
+/// active region (after the last active task; else before the done heading; else end of
+/// file); [`Mutation::Delete`] removes the line; [`Mutation::Insert`] adds a new line.
+/// Inserted and moved lines use the file's dominant line ending.
 pub fn apply(
     contents: &str,
     ops: &[Mutation],
@@ -296,6 +312,22 @@ pub fn apply(
                 },
                 None => skipped.push((op.clone(), SkipReason::LineChanged)),
             },
+            Mutation::Reassign { line_no, uid } => {
+                match line_no.checked_sub(1).and_then(|i| lines.get_mut(i)) {
+                    Some(line) => match parse_line(&line.text) {
+                        Some(task) => {
+                            let indent = line.text[..task.indent_chars].to_string();
+                            let marker = task.marker;
+                            let mut draft = task.draft;
+                            draft.uid = Some(uid.clone());
+                            line.text = canonical_line(&indent, marker, &draft);
+                            applied.push(op.clone());
+                        }
+                        None => skipped.push((op.clone(), SkipReason::LineChanged)),
+                    },
+                    None => skipped.push((op.clone(), SkipReason::LineChanged)),
+                }
+            }
             Mutation::SetStatus {
                 uid,
                 checked,
@@ -345,26 +377,9 @@ pub fn apply(
             Mutation::MoveToDone { uid } => match locate_uid(&lines, uid) {
                 Some((idx, task)) => {
                     let ending = dominant_ending(contents);
-                    let moved = render_moved(&lines, idx, task, ending);
+                    let moved = render_moved(task, ending);
                     lines.remove(idx);
-                    let current = join_lines(&lines);
-                    match parse(&current, cfg).done_heading_line {
-                        Some(heading_no) => {
-                            lines.insert(heading_no, moved);
-                        }
-                        None => {
-                            ensure_trailing_terminator(&mut lines, ending);
-                            lines.push(RawLine {
-                                text: String::new(),
-                                ending,
-                            });
-                            lines.push(RawLine {
-                                text: "### Done".to_string(),
-                                ending,
-                            });
-                            lines.push(moved);
-                        }
-                    }
+                    insert_under_done(&mut lines, moved, cfg, ending);
                     applied.push(op.clone());
                 }
                 None => skipped.push((op.clone(), SkipReason::UidNotFound)),
@@ -372,20 +387,43 @@ pub fn apply(
             Mutation::RestoreFromDone { uid } => match locate_uid(&lines, uid) {
                 Some((idx, task)) => {
                     let ending = dominant_ending(contents);
-                    let moved = render_moved(&lines, idx, task, ending);
+                    let moved = render_moved(task, ending);
                     lines.remove(idx);
-                    let current = join_lines(&lines);
-                    match parse(&current, cfg).done_heading_line {
-                        Some(heading_no) => lines.insert(heading_no - 1, moved),
-                        None => {
-                            ensure_trailing_terminator(&mut lines, ending);
-                            lines.push(moved);
-                        }
-                    }
+                    insert_active(&mut lines, moved, cfg, ending);
                     applied.push(op.clone());
                 }
                 None => skipped.push((op.clone(), SkipReason::UidNotFound)),
             },
+            Mutation::Insert { draft, under } => {
+                let ending = dominant_ending(contents);
+                let parent = under.as_ref().and_then(|uid| locate_uid(&lines, uid));
+                match parent {
+                    Some((idx, parent)) => {
+                        let parent_indent = lines[idx].text[..parent.indent_chars].to_string();
+                        let indent = format!("{parent_indent}{}", indent_unit(&lines));
+                        ensure_trailing_terminator(&mut lines, ending);
+                        lines.insert(
+                            idx + 1,
+                            RawLine {
+                                text: canonical_line(&indent, parent.marker, draft),
+                                ending,
+                            },
+                        );
+                    }
+                    None => {
+                        let line = RawLine {
+                            text: canonical_line("", '-', draft),
+                            ending,
+                        };
+                        if draft.checked {
+                            insert_under_done(&mut lines, line, cfg, ending);
+                        } else {
+                            insert_active(&mut lines, line, cfg, ending);
+                        }
+                    }
+                }
+                applied.push(op.clone());
+            }
             Mutation::Delete { uid } => match locate_uid(&lines, uid) {
                 Some((idx, _)) => {
                     lines.remove(idx);
@@ -403,23 +441,69 @@ pub fn apply(
     })
 }
 
-/// Writes `contents` to `path` atomically: a hidden `<dir>/.<name>.restask-tmp` file is
-/// created, written, flushed and fsynced, then renamed over `path` (same directory ⇒
-/// atomic rename on POSIX).
-pub fn write_atomic(path: &Path, contents: &str) -> Result<(), RestaskError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name =
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| RestaskError::Validation {
-                field: "path",
-                reason: format!("{}: not a UTF-8 file name", path.display()),
-            })?;
-    let tmp = dir.join(format!(".{name}.restask-tmp"));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    file.write_all(contents.as_bytes())
-        .and_then(|()| file.flush())
-        .and_then(|()| file.sync_all())?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+/// Places `line` directly under the done heading (newest-on-top), creating the heading —
+/// a blank line plus `### <done_heading>` — at the end of the file when absent.
+fn insert_under_done(
+    lines: &mut Vec<RawLine>,
+    line: RawLine,
+    cfg: &VaultConfig,
+    ending: &'static str,
+) {
+    match parse(&join_lines(lines), cfg).done_heading_line {
+        Some(heading_no) => {
+            ensure_trailing_terminator(lines, ending);
+            lines.insert(heading_no, line);
+        }
+        None => {
+            ensure_trailing_terminator(lines, ending);
+            // One blank line separates the heading from what precedes it.
+            if lines.last().is_none_or(|last| !last.text.trim().is_empty()) {
+                lines.push(RawLine {
+                    text: String::new(),
+                    ending,
+                });
+            }
+            lines.push(RawLine {
+                text: format!("### {}", cfg.done_heading),
+                ending,
+            });
+            lines.push(line);
+        }
+    }
+}
+
+/// Places `line` at the bottom of the active region: after the last active-region task;
+/// else before the done heading (above the blank lines that precede it); else at the end
+/// of the file.
+fn insert_active(lines: &mut Vec<RawLine>, line: RawLine, cfg: &VaultConfig, ending: &'static str) {
+    let parsed = parse(&join_lines(lines), cfg);
+    ensure_trailing_terminator(lines, ending);
+    let last_active = parsed
+        .tasks
+        .iter()
+        .rev()
+        .find(|task| !task.in_done_region)
+        .map(|task| task.line_no);
+    let at = match (last_active, parsed.done_heading_line) {
+        (Some(line_no), _) => line_no,
+        (None, Some(heading_no)) => {
+            let mut at = heading_no - 1;
+            while at > 0 && lines[at - 1].text.trim().is_empty() {
+                at -= 1;
+            }
+            at
+        }
+        (None, None) => lines.len(),
+    };
+    lines.insert(at.min(lines.len()), line);
+}
+
+/// One list-nesting step as this file writes it: a tab when any line is tab-indented,
+/// four spaces otherwise.
+fn indent_unit(lines: &[RawLine]) -> &'static str {
+    if lines.iter().any(|line| line.text.starts_with('\t')) {
+        "\t"
+    } else {
+        "    "
+    }
 }
