@@ -1,65 +1,74 @@
-# Restask Spec — Storage & State — .restask/ (§9)
+# restask spec — Storage & State (§9)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §9 Storage & State (`.restask/`, per-vault)
-
-`.restask/` lives inside the vault and **is synced by Syncthing** (the offline mobile cache rides the vault). It is fully reconstructible via `restask rebuild`. `*.sync-conflict*` files are ignored for indexing; `doctor` reports them.
+## §9 `.restask/` (per vault)
 
 ```
 .restask/
-├── tasks/<uid>.ics        # VTODO cache (same bytes as pushed to Radicale)
-├── index.json             # uid → routing/etag bookkeeping
-├── tombstones.json        # deleted UIDs with timestamps (pruned after 365 days)
-├── outbox.json            # CalDAV ops parked after retry exhaustion
-└── restaskd.log           # JSON-lines log (daemon only; never synced secrets)
+├── index.json           uid → { list, source_path, thumbprint, caldav_etag, seen_at, defer_count }
+├── tasks/<uid>.ics      base snapshots: what vault and server last agreed on
+├── tombstones.json      uid → deletion instant (pruned after 365 days)
+├── todo.rendered.md     the engine's own last render of the inbox file (§7.1)
+└── lock                 advisory lock: one restask process per vault per machine
 ```
 
-### 9.1 `store/index.rs`
+The directory lives inside the vault and **rides the file sync**, so a second daemon on
+another device starts from the same knowledge. It is never scanned for tasks, whatever
+`ignore` says. All of it is disposable: `restask rebuild` removes the index, the snapshots
+and the remembered render (tombstones stay), and the next pass re-derives them.
+
+Every file is written atomically through `fsio` (hidden temp sibling + fsync + rename; a
+leftover temp file from a crash is overwritten, never an obstacle) and **only when its
+content changes**, so a pass over a converged vault touches nothing — no mtime churn, no
+file-sync traffic, no watcher echo.
+
+### 9.1 Index and base snapshots
 
 ```rust
 pub struct IndexEntry {
     pub uid: TaskUid, pub list: ListSlug, pub source_path: String,
     pub thumbprint: u64, pub caldav_etag: Option<String>,
-    pub seen_at: chrono::DateTime<chrono::Utc>, pub defer_count: u8,
+    pub seen_at: DateTime<Utc>, pub defer_count: u8,
 }
-pub struct Index { pub entries: std::collections::BTreeMap<TaskUid, IndexEntry> }
-impl Index {
-    pub fn load(dir: &Path) -> Result<Index, RestaskError>;      // missing file → empty
-    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;  // atomic tmp+rename
-    pub fn get(&self, uid: &TaskUid) -> Option<&IndexEntry>;
-    pub fn upsert(&mut self, e: IndexEntry);
-    pub fn remove(&mut self, uid: &TaskUid);
-}
+pub fn cache_read<Z: TimeZone>(dir, uid, tz: &Z) -> Option<Task>;
+pub fn cache_write(dir, task, now_utc) -> Result<(), RestaskError>;
+pub fn cache_remove(dir, uid) -> Result<(), RestaskError>;
 ```
 
-`caldav_etag: Some(_)` means "was on the server" — the flag that distinguishes *new local task* (push) from *server-side deletion* (tombstone locally).
+An entry with `caldav_etag: Some(_)` means *settled*: at `seen_at` the vault line and the
+server resource held the content stored in `tasks/<uid>.ics`. That snapshot is the **base**
+of the three-way merge (§11.3). Two things follow:
 
-### 9.2 `store/tombstones.rs`, `store/cache.rs`, `store/outbox.rs`
+- The base is valid only if the index vouches for it: `entry.thumbprint` must equal the
+  snapshot's thumbprint. A snapshot something else rewrote is ignored (the merge then
+  treats every difference as a conflict), never trusted.
+- Entry and snapshot are written only after the thing they describe is true: after the
+  server confirmed a write, or after both sides were found equal. A failed write leaves
+  the previous base in place.
+
+The snapshot carries no list or source path; both come from the entry. `LAST-MODIFIED` of
+a snapshot is the instant it was written (§11 R1 uses it).
+
+### 9.2 Tombstones
 
 ```rust
-pub struct Tombstones(std::collections::BTreeMap<TaskUid, chrono::DateTime<chrono::Utc>>);
 impl Tombstones {
-    pub fn load(dir: &Path) -> Result<Self, RestaskError>;
-    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;
-    pub fn insert(&mut self, uid: TaskUid, at: chrono::DateTime<chrono::Utc>);
-    pub fn contains(&self, uid: &TaskUid) -> bool;
-    pub fn prune(&mut self, older_than: chrono::Duration);
-}
-
-pub fn cache_path(dir: &Path, uid: &TaskUid) -> std::path::PathBuf;  // .restask/tasks/<uid>.ics
-pub fn cache_read(dir: &Path, uid: &TaskUid, tz: chrono::FixedOffset) -> Option<Task>;
-pub fn cache_write(dir: &Path, task: &Task, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), RestaskError>;
-pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), RestaskError>;
-
-pub enum OutboundOp { Put { task: Task }, Delete { uid: TaskUid, list: ListSlug, etag: Option<String> } }
-pub struct Outbox { queue: std::collections::VecDeque<OutboundOp> }
-impl Outbox {
-    pub fn load(dir: &Path) -> Result<Self, RestaskError>;
-    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;
-    pub fn push(&mut self, op: OutboundOp);
-    pub fn take_all(&mut self) -> Vec<OutboundOp>;
+    pub fn insert(&mut self, uid, at); pub fn contains(&self, uid) -> bool;
+    pub fn remove(&mut self, uid) -> bool; pub fn uids(&self) -> impl Iterator<Item = &TaskUid>;
+    pub fn prune(&mut self, older_than: Duration, now: DateTime<Utc>);
 }
 ```
 
-Crash safety: state files are saved atomically **once per reconcile cycle**; a crash mid-cycle loses nothing because the next cycle re-derives everything from vault + Radicale.
+A tombstone records that a task was deleted (in the vault or on the server). Its job is
+narrow: a **server copy** of a tombstoned UID that shows up again — a delete that failed,
+a client re-uploading from its offline cache — is deleted, not pulled back into the vault.
+It never acts against the vault: a tombstoned UID that is present in the vault is alive,
+and its tombstone is cleared (§11 R0).
+
+### 9.3 The lock
+
+Each engine entry point (`reconcile`, `add`, `set_done`) takes an exclusive advisory lock
+on `.restask/lock` and holds it for the pass. A second process waits (up to 60 s). It
+serializes the daemon and CLI commands on one machine; devices are coordinated by the
+merge, not by the lock.

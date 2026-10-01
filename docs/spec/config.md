@@ -1,57 +1,59 @@
-# Restask Spec — Configuration & Security (§14, §17)
+# restask spec — Configuration & Security (§14, §17)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §14 Configuration Reference
+## §14 Configuration
 
-### 14.1 Vault config — `restask.toml` (vault root, synced, safe to commit)
+### 14.1 Vault config — `restask.toml` (vault root; synced; no secrets)
 
 ```toml
-done_heading = "Done"      # heading text that starts the completed-records region
-inbox_file   = "TODO.md"   # engine-managed inbox + aggregation view
-inbox_list   = "inbox"     # list the inbox file routes to (§5.2); setup records the
-                           # user-chosen calendar's slug here
-track  = ["**/*.md"]       # globset patterns (applied after ignore)
+done_heading = "Done"      # heading text that starts a note's completed region
+inbox_file   = "TODO.md"   # the engine-managed inbox + view (§7)
+inbox_list   = "inbox"     # the list (= collection slug) the inbox file routes to;
+                           # setup records the calendar you chose
+track  = ["**/*.md"]       # globs of files that may be notes
 ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```
 
-`ignore` wins over `track`. Vault-relative paths only.
+`ignore` wins over `track`. Paths are vault-relative, `/`-separated; `*` does not cross
+`/`, `**` does. `.restask/` is never scanned regardless of these.
 
-### 14.2 Machine config — `$XDG_CONFIG_HOME/restask/config.toml` (chmod 600, NEVER synced)
+### 14.2 Machine config — `$XDG_CONFIG_HOME/restask/config.toml` (0600; never synced)
 
 ```toml
-# vault (optional; usually discovered per §13.3)
 [vault]
-path = "/opt/docker/syncthing/data/obsidian"
+path = "/opt/docker/syncthing/data/obsidian"   # informational; commands resolve the vault per §13.3
 
 [caldav]
-url  = "http://192.168.1.10:5232"   # LAN example; use HTTPS when exposed beyond LAN
+url  = "http://192.168.1.10:5232"              # use HTTPS beyond a trusted LAN
 username = "me"
-password_file = "~/.config/restask/radicale.passwd"  # chmod 600; OR password_env below
-# password_env = "RESTASK_CALDAV_PASSWORD"            # alternative source
-poll_secs = 300
-allow_create_lists = true           # MKCOL missing collections on first push
-
-# Wizard-recorded bindings (list name → Radicale collection; setup records the
-# TODO.md inbox binding, other lists are declared via frontmatter by the user)
-[[lists]]
-name = "inbox"
-collection = "inbox"
-
-[[lists]]
-name = "University"
-collection = "university"
+password_file = "~/.config/restask/radicale.passwd"   # 0600; or:
+# password_env = "RESTASK_CALDAV_PASSWORD"
+poll_secs = 300                                # how often the daemon looks at the server
+allow_create_lists = true                      # MKCOL a routed list's missing collection
 ```
 
-A literal `password = "…"` key is a **validation error** — secrets never live in config files.
+- A literal `password = "…"` key anywhere is a **validation error**.
+- There is no list configuration: routing lives in the notes (§5). A `[[lists]]` table
+  written by earlier versions is accepted and ignored.
 
-### 14.3 Environment variables
+### 14.3 Environment
 
-`RESTASK_VAULT` (vault path) · `RESTASK_CONFIG` (machine config path override) · `RESTASK_CALDAV_URL` · `RESTASK_CALDAV_USERNAME` · `RESTASK_CALDAV_PASSWORD` · `RUST_LOG`. Env caldav values override the file; the password env always wins over `password_file`.
+`RESTASK_VAULT` · `RESTASK_CONFIG` (machine config path) · `RESTASK_CALDAV_URL` ·
+`RESTASK_CALDAV_USERNAME` · `RESTASK_CALDAV_PASSWORD` · `RUST_LOG`. Environment values
+override the file; `RESTASK_CALDAV_PASSWORD` wins over `password_env`, which wins over
+`password_file`.
 
-## §17 Security & Secrets
+## §17 Security
 
-- **Passwords** live only in `~/.config/restask/radicale.passwd` (0600) or an env var. Never in `config.toml`, never in the vault, never in logs (the `Authorization` header is never logged).
-- **FINDING (2026-09-22, maintainer lab):** Radicale at `http://192.168.1.10:5232` accepts any/no credentials (`PROPFIND` returns 207 with a wrong password). Auth is disabled in the container config (`/config/config`). **Fix before exposing further.** `restask doctor` detects and hard-warns on unauthenticated CalDAV.
-- Plain HTTP on a trusted LAN is accepted; beyond the LAN, HTTPS is required (documented in INSTALL.md).
-- The engine only ever touches VTODO resources it owns (or adopts) inside collections bound to lists — see §10.5.
+- **Passwords** live only in `~/.config/restask/radicale.passwd` (0600) or an environment
+  variable — never in `config.toml`, never in the vault, never in logs (the
+  `Authorization` header is not logged; `CaldavClient`'s `Debug` redacts the password).
+- `restask doctor` warns hard (exit 1) when no password is configured, and when the
+  server accepts a deliberately wrong password (authentication disabled server-side).
+- Plain HTTP is acceptable on a trusted LAN only.
+- The engine writes only inside the vault and `~/.config/restask/`; server-supplied
+  paths (`X-RESTASK-SOURCE`) are used only when they name a note the scan already found
+  routed to that list.
+- On the server the engine touches only `VTODO` resources in the lists in scope (§5.4,
+  §10.5).

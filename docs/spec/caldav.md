@@ -1,51 +1,79 @@
-# Restask Spec — CalDAV Protocol (§10)
+# restask spec — CalDAV (§10)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §10 CalDAV Protocol (`src/caldav/`)
+## §10 CalDAV (`crates/restask/src/caldav/`)
 
-Grounded deployment: Radicale 3.x (tomsquest image) at `http://192.168.1.10:5232`, user path segment `me/`, filesystem storage `<data>/collections/collection-root/<user>/<collection>/<resource>.ics`. **Observed: authentication currently disabled — §17.**
+Target: Radicale 3.x. Collection URL: `{url}/{username}/{slug}/`; resource URL:
+`{collection}{name}.ics`.
 
-### 10.1 `protocol.rs` (pure XML builders/parsers)
+### 10.1 `protocol.rs` — pure XML builders and parsers
 
 ```rust
-pub fn mkcol_body(display_name: &str) -> String;     // DAV:mkcol, resourcetype collection+calendar, comp VTODO
-pub fn report_vtodo_etags() -> String;               // CALDAV:calendar-query, prop getetag, comp-filter VTODO (depth 1)
-pub fn propfind_collections_body() -> String;        // prop: resourcetype, displayname, supported-calendar-component-set
-pub fn parse_etags(xml: &str) -> Vec<(String, String)>;         // (resource name sans .ics, etag), document order
-pub fn parse_collections(xml: &str) -> Vec<CollectionInfo>;     // namespace-prefix agnostic (local-name matching)
-pub fn xml_unescape(s: &str) -> String;               // &amp; &lt; &gt; &quot; &apos;
+pub fn mkcol_body(display_name: &str) -> String;       // collection + calendar, VTODO only
+pub fn propfind_collections_body() -> String;          // resourcetype, displayname, comp set
+pub fn report_vtodos() -> String;                      // calendar-query: getetag + calendar-data, comp-filter VTODO
+pub fn parse_collections(xml: &str) -> Vec<CollectionInfo>;
+pub fn parse_report(xml: &str) -> Vec<ReportItem>;     // { name, etag, data }
+pub fn xml_unescape(s: &str) -> String;                // the five entities + numeric references
 ```
 
-`MKCOL` body sets `supported-calendar-component-set` to `VTODO` only and `displayname` to the list's display name.
+Parsers match elements by local name (any prefix), tolerate malformed input without
+panicking, and read `calendar-data` as entity-escaped text or `CDATA`. A resource `name`
+is the last path segment of its `href` without `.ics`, kept exactly as the server spelled
+it (percent-encoding included) so it can be reused in URLs.
 
-### 10.2 `port.rs` (the trait; static dispatch — no `dyn`)
+### 10.2 `port.rs` — the trait (static dispatch)
 
 ```rust
-pub struct CollectionInfo { pub href: String, pub slug: String, pub display_name: Option<String>, pub supports_vtodo: bool }
+pub struct RemoteResource { pub name: String, pub etag: String, pub task: RemoteTask }
 
 pub trait CaldavPort: Clone + Send + Sync + 'static {
-    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError>;          // PROPFIND depth 1 at <url>/<user>/
-    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError>; // PROPFIND; MKCOL if absent
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError>;   // REPORT (10.1)
-    async fn fetch(&self, slug: &ListSlug, name: &str) -> Result<Option<(RemoteTask, String)>, RestaskError>; // GET → (task, etag)
-    async fn put(&self, task: &Task) -> Result<String, RestaskError>;     // PUT <url>/<user>/<list>/<uid>.ics; If-None-Match:* on create,
-                                                                           // If-Match:<etag> when known; returns new etag
+    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError>;
+    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError>;
+    async fn list_tasks(&self, slug: &ListSlug) -> Result<Option<Vec<RemoteResource>>, RestaskError>;
+    async fn put(&self, task: &Task, name: &str, extras: &[String],
+                 if_match: Option<&str>, now: DateTime<Utc>) -> Result<String, RestaskError>;
     async fn delete(&self, slug: &ListSlug, name: &str, etag: Option<&str>) -> Result<(), RestaskError>;
 }
 ```
 
+- **`list_tasks`** is the whole remote snapshot of a list in **one `REPORT`**: every
+  `VTODO` with its etag and body. `Ok(None)` = the collection does not exist. A resource
+  with no parseable `VTODO` is skipped with a warning, never fatal. (A server that does
+  not inline `calendar-data` costs one `GET` per resource; Radicale inlines.)
+- **`put`** writes resource `name` — the UID for a new resource, the listed name when
+  replacing one. `if_match: Some(etag)` replaces exactly that version; `None` creates
+  (`If-None-Match: *`). Returns the new etag (empty if the server sends none).
+- **`delete`** sends `If-Match` when given an etag; deleting what is already gone succeeds.
+- The port is **stateless**: no etag memo, no clock. Preconditions come from the snapshot
+  the plan was made from, timestamps from the engine's `Clock`.
+
+Implementations: `client::CaldavClient` (reqwest, rustls), `offline::Offline` (every call
+fails with a network error — for machines with no endpoint configured), and
+`tests/common::MockCaldav` (in-memory; runs bodies through the real codec and enforces
+preconditions like a server).
+
 ### 10.3 `client.rs`
 
-`reqwest::Client` (rustls-tls only, redirects ≤ 10) + HTTP `Basic` auth header built from `PasswordSource` (§14). Never logs the header or password. Base URLs: collection URL = `{url}/{username}/{slug}/`.
+`reqwest::Client` (rustls only, ≤ 10 redirects), HTTP Basic auth when a password is
+configured. The password and the header are never logged.
 
-### 10.4 Retry budget
+### 10.4 Failures
 
-Network errors, 5xx, 429 → backoff 1 s, 2 s, 4 s (4 attempts total). `401/403` → `CaldavErrorKind::Auth` (fatal for the cycle; daemon logs `auth_warning` and continues vault-side). `412` on PUT → re-fetch that resource and re-run the planner for that UID (does not consume budget). Exhausted ops are parked in the outbox with `retry_scheduled` and retried next cycle.
+- Network errors, `5xx`, `429` → retried with 1 s, 2 s, 4 s backoff (4 attempts), then
+  `CaldavErrorKind::Network`.
+- `401` / `403` → `CaldavErrorKind::Auth`, not retried.
+- `412` → `CaldavErrorKind::Conflict`, not retried: the resource changed since it was
+  listed.
+- The engine treats Network/Tls/Auth as "the server is not usable now": the pass stops
+  issuing requests and returns the error (the vault side of the pass is already done).
+  Any other failure fails that one operation; it is counted in the report and **re-planned
+  from fresh snapshots in the next pass**. There is no retry queue.
 
-### 10.5 Foreign-resource rules (bound collections)
+### 10.5 Shared collections
 
-Bound collections (e.g. existing `university`, `inbox` event calendars) may hold foreign resources:
-- **VEVENTs are never read, written, or deleted.** The `REPORT` comp-filter `VTODO` excludes them from listings entirely.
-- Foreign **VTODOs** (UID not `restask-*`, e.g. created in Tasks.org inside the list) are **adopted** (§11 R5).
-- Only resources whose name/UID matches `restask-*` are managed.
+- `VEVENT`s are never listed, read, written or deleted (the `REPORT` filters on `VTODO`).
+- Foreign `VTODO`s (UID not a restask UID) in a list that has a home in the vault are
+  adopted (§11 R5); elsewhere they are left alone.
+- Unmanaged content of any `VTODO` is preserved across writes (§8).

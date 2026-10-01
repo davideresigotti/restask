@@ -1,4 +1,4 @@
-# Restask machine configuration.
+# restask machine configuration.
 # Location: $XDG_CONFIG_HOME/restask/config.toml — chmod 600, NEVER synced.
 # Secrets: a literal `password` key here is a validation error. Use password_file (0600)
 #   or password_env instead. Reference: docs/spec/config.md §14.2, §17.

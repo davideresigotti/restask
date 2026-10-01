@@ -1,63 +1,75 @@
-# Restask Spec — Note Routing — Lists (§5)
+# restask spec — Note Routing (§5)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §5 Note Routing (Lists)
+## §5 Note routing (lists)
 
-**Local-only by default.** A note participates in syncing only when explicitly routed. The engine never reads (beyond frontmatter), never parses the body of, and never modifies unrouted notes.
+**Local-only by default.** A note takes part in syncing only when explicitly routed. Of an
+unrouted note the engine reads the frontmatter block and nothing else: the body is never
+loaded, parsed or modified.
 
-### 5.1 Frontmatter markers (line-scanned; no YAML parsing of foreign keys)
+### 5.1 Frontmatter markers
 
-The frontmatter block is lines between a `---` at byte 0 and the next `---`. Within it, scan for (case-sensitive, value trimmed):
+The frontmatter block is the lines between a `---` on the first line and the next `---`
+(at most 512 lines; an unterminated block is not frontmatter). Within it, line-scanned
+(no YAML parsing; keys case-sensitive, values trimmed, first occurrence wins):
 
 ```yaml
-restask-list: University        # this file's tasks → list "University"
-restask-list-root: Home Lab     # declares list "Home Lab" for THIS folder (recursive);
-                                # the file itself also belongs to it
+restask-list: University        # this note's tasks → list "University"
+restask-list-root: Home Lab     # list "Home Lab" for THIS folder, recursively;
+                                # the note itself belongs to it too (the list's root note)
 ```
 
-Unknown keys/values are ignored. A file may carry both: `restask-list` wins for the file; `restask-list-root` still declares the folder.
+A note may carry both: `restask-list` wins for the note; `restask-list-root` still
+declares the folder.
 
-### 5.2 Resolution chain (deterministic, doctor-verifiable)
+### 5.2 Resolution
 
-For a note at vault-relative path `p` (excluding the engine-managed inbox file):
+For a note at vault-relative path `p` (other than the inbox file):
 
-1. `restask-list: X` in `p`'s frontmatter → list `slug(X)`.
-2. Nearest enclosing directory (walking up from `p`'s dir to vault root) containing a note with `restask-list-root: X` → list `slug(X)`. Deeper roots shadow shallower ones.
-3. Otherwise → **`LocalOnly`**: no UID assignment, no VTODO, no TODO.md mirror, file untouched.
+1. `restask-list: X` in its own frontmatter → list `slug(X)`.
+2. Else the nearest enclosing directory (walking up to the vault root) that contains a
+   note with `restask-list-root: X` → list `slug(X)`. Deeper roots shadow shallower ones.
+3. Else **local-only**.
 
-The inbox file (`TODO.md` by default) is engine-managed and routes to the list named by `inbox_list` in `restask.toml` (§14.1, default `inbox`) — the calendar the user bound TODO.md to during setup (§13.2).
+The inbox file (`vault.inbox_file`, default `TODO.md`) is engine-managed and always routes
+to `vault.inbox_list` (default `inbox`) — the calendar the user bound it to during setup.
 
 ```rust
 pub enum NoteRouting { LocalOnly, List(ListSlug) }
-
 pub struct NoteMeta { pub path: String, pub file_list: Option<String>, pub folder_list: Option<String> }
-
-pub fn scan_frontmatter(contents: &str) -> (Option<String>, Option<String>); // (file_list, folder_list)
-
-pub struct Router { roots: std::collections::BTreeMap<String, ListSlug> } // dir path → list
-
+pub fn scan_frontmatter(contents: &str) -> (Option<String>, Option<String>);
 impl Router {
-    /// dir keys are vault-relative, '/'-separated, no trailing slash; "" = vault root.
-    /// Two different roots for the same dir → RestaskError::ListConflict (never silent).
-    pub fn build(metas: &[NoteMeta]) -> Result<Router, RestaskError>;
+    pub fn build(metas: &[NoteMeta]) -> Result<Router, RestaskError>; // two roots in one dir → ListConflict
     pub fn resolve(&self, path: &str, file_list: Option<&str>) -> NoteRouting;
 }
 ```
 
-### 5.3 Worked example (user's vault)
+Two different roots declared for the same directory are a hard `ListConflict`
+(`restask doctor` reports it; nothing syncs until it is resolved).
+
+### 5.3 Example
 
 ```
-2. Areas/Home Lab/Home Lab.md      restask-list-root: Home Lab   → list home-lab (root note)
+2. Areas/Home Lab/Home Lab.md      restask-list-root: Home Lab   → home-lab (root note)
 2. Areas/Home Lab/Security.md      (no marker)                   → home-lab (inherited)
-2. Areas/Home Lab/Alarm.md         (no marker)                   → home-lab (inherited)
-University.md                      restask-list: University      → university (binds to existing calendar)
-Inbox.md                           (no marker)                   → LocalOnly
-TODO.md                            (engine-managed)              → inbox_list (default inbox)
+University.md                      restask-list: University      → university
+Journal.md                         (no marker)                   → local-only, untouched
+TODO.md                            (engine-managed)              → vault.inbox_list
 ```
 
-### 5.4 List ⇄ Radicale collection mapping
+### 5.4 Lists and collections
 
-- List `Home Lab` → slug `home-lab` → CalDAV collection `<url>/<user>/home-lab/`, `MKCOL`'d on first push (displayname `Home Lab`, `supported-calendar-component-set: VTODO` only) when `caldav.allow_create_lists = true`.
-- **Setup-confirmed inbox binding**: `restask setup` binds TODO.md to **one existing server calendar** the user types by name (case-insensitive, re-prompted on a miss; aborts when the server has no collections — the binding is required for sync). The typed calendar's slug becomes `vault.inbox_list` (§14.1), TODO.md carries it as `restask-list:` frontmatter, and the binding is recorded in machine config `[[lists]]`. Other lists map to same-named collections via their slug (`MKCOL` on first push when `caldav.allow_create_lists`); users declare them by hand with `restask-list`/`restask-list-root` frontmatter. Bound collections may contain foreign resources — see §10.5 foreign rules.
-- Moving a task between differently-routed notes keeps its UID and **moves** the VTODO between collections (§11 R9).
+- List `Home Lab` → slug `home-lab` → collection `<url>/<user>/home-lab/`. There is no
+  other mapping: routing is declared in the notes and nowhere else.
+- A routed list whose collection does not exist is created on the first pass
+  (`MKCOL`, VTODO-only, display name from the slug) when `caldav.allow_create_lists` is
+  true; otherwise its tasks stay local and a warning is logged each pass.
+- **Home note** of a list: the note that receives tasks created on the server for that
+  list — the list's root note if it has one, else its first routed note in path order.
+  The inbox list's home is the inbox file.
+- A pass looks at: the inbox list, every list a note routes to, and every list the index
+  still references (so a move or deletion sees the old copy). Foreign tasks are adopted
+  only in lists that have a home (§11 R5).
+- Moving a task between differently-routed notes keeps its UID and **moves** the `VTODO`
+  between collections (§11 R9).

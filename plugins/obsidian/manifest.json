@@ -1,8 +1,8 @@
 {
   "id": "restask",
-  "name": "Restask",
+  "name": "restask",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync",
+  "description": "restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync",
   "isDesktopOnly": false
 }

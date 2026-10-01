@@ -1,5 +1,5 @@
-//! Crate-wide error taxonomy (§12.1). Introduced in T04 because the domain spec (§3.4)
-//! requires it; every later fallible API returns `Result<_, RestaskError>`.
+//! Crate-wide error taxonomy (§12.1): every fallible API returns
+//! `Result<_, RestaskError>`.
 
 /// Crate-wide error type (§12.1).
 #[derive(Debug, thiserror::Error)]
@@ -11,26 +11,6 @@ pub enum RestaskError {
         path: String,
         /// What is wrong with it.
         reason: String,
-    },
-    /// Parsing a vault file failed.
-    #[error("parse error in {path} at byte {offset}: {reason}")]
-    Parse {
-        /// File that failed to parse.
-        path: String,
-        /// Byte offset of the failure.
-        offset: usize,
-        /// What failed to parse.
-        reason: String,
-    },
-    /// The same UID is claimed by two routed lines.
-    #[error("uid conflict: {uid} claimed by {a} and {b}")]
-    UidConflict {
-        /// The duplicated UID.
-        uid: crate::domain::TaskUid,
-        /// First claimant (path:line).
-        a: String,
-        /// Second claimant (path:line).
-        b: String,
     },
     /// Two different list roots were declared for one folder.
     #[error("list conflict in {dir}: {a} vs {b}")]

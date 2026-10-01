@@ -1,58 +1,153 @@
-# Restask Spec — Reconciliation Algorithm (§11)
+# restask spec — Reconciliation (§11)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §11 Reconciliation Algorithm (`src/sync/`)
+## §11 Reconciliation (`crates/restask/src/sync/`)
 
-### 11.1 Snapshots & plan
+### 11.1 One pass (`engine::Engine::reconcile`)
+
+A pass has three phases. They are ordered so that dying at any point leaves a state the
+next pass repairs.
+
+1. **Local** — needs no server, always runs.
+   Scan and repair the routed notes (§6.4). Carry edits made on TODO.md mirror lines to
+   their source notes (§7.1) and rescan if that changed anything.
+2. **Remote.**
+   a. Snapshot: one `REPORT` per list in scope (§5.4). A routed list without a collection
+      is created if allowed, else left out of the snapshot.
+   b. Plan: `planner::plan(&Snapshots) -> Plan` — pure.
+   c. Apply vault mutations (one pass per file), then server writes: puts, moves (put,
+      then delete the old copy), adoptions (put, then delete the foreign original),
+      deletes. A dependent delete runs only if its put succeeded.
+3. **Record.**
+   Re-render TODO.md from the vault as it is now (plus tasks the plan placed in the
+   inbox), then persist the state: a base + index entry for every task that was settled
+   or successfully written, defer counters, forgotten UIDs, tombstones.
+
+If the server is unreachable, phase 1 and the render still happen and the error is
+returned afterwards: registration, hand-edit repair and the TODO.md view work offline.
+
+The vault is written before the state that describes it. So the state can lag the vault
+(the next pass then finds both sides equal and settles) but never claim a line the vault
+does not have.
+
+### 11.2 Snapshots and plan
 
 ```rust
 pub struct Snapshots {
-    pub local: std::collections::BTreeMap<TaskUid, Task>,        // from vault scan
-    pub cache: std::collections::BTreeMap<TaskUid, Task>,        // from .restask/tasks
-    pub remote: std::collections::BTreeMap<ListSlug, std::collections::BTreeMap<String, RemoteTask>>, // per bound/managed collection
-    pub tombstones: std::collections::BTreeSet<TaskUid>,
+    pub local: BTreeMap<TaskUid, Task>,                    // vault scan
+    pub base: BTreeMap<TaskUid, Task>,                     // .restask/tasks (validated against the index)
+    pub remote: BTreeMap<ListSlug, Vec<RemoteResource>>,   // ONLY collections listed this pass
+    pub created: BTreeSet<ListSlug>,                       // collections created this pass
+    pub tombstones: BTreeSet<TaskUid>,
     pub index: Index,
+    pub notes: BTreeMap<String, ListSlug>,                 // every routed note → list
+    pub homes: BTreeMap<ListSlug, String>,                 // list → home note (§5.4)
+    pub unreadable: BTreeSet<String>,                      // routed files not readable this pass
+    pub inbox_file: String,
+    pub inbox_list: Option<ListSlug>,
 }
 
 pub struct Plan {
-    pub markdown_ops: Vec<MarkdownOp>, pub todo_refresh: bool,
-    pub caldav_puts: Vec<Task>,
-    pub caldav_moves: Vec<MoveOp>,           // { task, from: ListSlug, to: ListSlug }
-    pub caldav_deletes: Vec<DeleteOp>,       // { list, name, etag }
-    pub adoptions: Vec<AdoptOp>,             // { remote: RemoteTask, collection: ListSlug }
-    pub cache_writes: Vec<Task>, pub cache_deletes: Vec<TaskUid>,
-    pub index_upserts: Vec<IndexEntry>, pub index_removals: Vec<TaskUid>,
+    pub mutations: BTreeMap<String, Vec<Mutation>>,   // vault edits per file
+    pub inbox_inserts: Vec<Task>,                     // server tasks landing in TODO.md
+    pub puts: Vec<PutOp>,                             // { task, name, extras, if_match }
+    pub moves: Vec<MoveOp>,                           // { put, from }
+    pub adoptions: Vec<AdoptOp>,                      // { put, foreign }
+    pub deletes: Vec<DeleteOp>,                       // { list, name, etag }
+    pub settled: Vec<Settled>,                        // { task, etag }: base refresh, no push
+    pub forgets: Vec<TaskUid>,                        // drop base + index entry
+    pub tombstones: Vec<TaskUid>,
+    pub revived: Vec<TaskUid>,                        // tombstones to clear
     pub deferred: Vec<(TaskUid, DeferReason)>,
 }
-pub enum MarkdownOp {
-    Insert { task: Task, target: InsertTarget },
-    Mutate { path: String, mutations: Vec<Mutation> },   // ALL mutations for one file applied in ONE pass
-    Delete { path: String, uid: TaskUid },
-}
-pub enum InsertTarget { TodoInbox, FileEnd { path: String }, UnderParent { path: String, after_uid: TaskUid, indent_chars: usize } }
-pub enum DeferReason { CacheNewerThanVault }
-
-/// PURE. The rule table below is normative; tests cover every row.
-pub fn plan(s: Snapshots, now: chrono::DateTime<chrono::Utc>) -> Plan;
 ```
 
-### 11.2 Rule table (evaluation order; per UID over `local ∪ cache ∪ remote`)
+The planner is deterministic: no clock, no randomness (adoption UIDs are derived, §3.1).
+Two readings that the snapshots keep apart on purpose: a list missing from `remote` is
+**unknown**, not empty; a path in `unreadable` holds **unknown** tasks, not deleted ones.
+
+### 11.3 The merge (`merge::merge`)
+
+For a task present in the vault and in its collection, with `base` its settled content (or
+none):
+
+For each **sync field** (text, status, priority, due, start, scheduled):
+
+| local vs remote | base | result |
+|---|---|---|
+| equal | any | that value |
+| differ | equals local | **remote** — only the server changed it |
+| differ | equals remote | **local** — only the vault changed it |
+| differ | equals neither, or no base | **conflict**: remote wins iff `remote.LAST-MODIFIED − local.mtime > 120 s`; otherwise local |
+
+Timestamps are consulted only in the last row. A file's mtime covers all its tasks and
+moves on any unrelated edit; using it to decide whether *this* task changed loses data.
+
+Not merged:
+
+- `created`: the vault's `➕` when present, else the server's `CREATED` is kept.
+- `parent`: the vault decides for an **active task in a note** (indentation). For done
+  records and TODO.md lines — which cannot express nesting — the server's relation is
+  kept as it is.
+- `X-RESTASK-SOURCE` follows the vault.
+
+Outputs: the merged task; the mutations that turn the vault line into it (a completion is
+`SetStatus` + `MoveToDone`, a reopening `RestoreFromDone` + `SetStatus`, the rest
+`EditText` / `SetPriority` / `SetWhen`); and whether the server copy must be replaced
+(merged ≠ remote in any sync field, parent, creation date or source path). Both can
+happen at once: fields changed on different sides are all kept.
+
+### 11.4 Rule table (per UID over local ∪ base ∪ index ∪ managed remote)
+
+Task **not in the vault**:
 
 | # | Condition | Action |
 |---|---|---|
-| **R0** | UID ∈ tombstones | Delete from markdown, cache, and every remote collection where present; never resurrect. |
-| **R1** | `tp(cache) != tp(local)` AND `cache.last_modified > local.last_modified + 120s` | **Defer** (in-flight Syncthing write from a mobile plugin); `defer_count++`; ≥ 3 consecutive cycles → log `error` `vault_divergence`. Reset counter on any successful reconcile of the UID. |
-| **R2** | local only; `index.caldav_etag == None` | New local task → `caldav_put` + cache write + index upsert. |
-| **R3** | local only; `index.caldav_etag == Some(_)` | Server-side deletion → markdown `Delete` + tombstone + cache delete + index removal. |
-| **R4** | remote only (managed UID) | Remote-created/renamed task → markdown `Insert`. Routing: `X-RESTASK-SOURCE` if that note exists and is routed to the same list; else TODO Inbox. Subtask with known parent in same file → `UnderParent`; unknown parent → TodoInbox, drop link, log `orphan_subtask`. Cache write + index upsert. |
-| **R5** | remote only (foreign UID) in a **managed/bound** collection | **Adopt**: generate `TaskUid`, insert into the bound note (X-RESTASK-SOURCE if routed; else list's root note if any; else TodoInbox), `caldav_put` new UID, `caldav_delete` foreign resource. Log `task_adopted`. |
-| **R6** | cache only | Stale cache → cache delete. |
-| **R7** | local + remote, `tp(local) == tp(remote)` | No-op; refresh `index.caldav_etag`; cache write only if cache differs. |
-| **R8** | local + remote, differ | LAST-MODIFIED duel: `|Δ| > 120s` → newer wins (remote wins ⇒ markdown `Mutate` incl. done-region placement; local wins ⇒ `caldav_put`). `|Δ| ≤ 120s` → **local wins** (vault authority). Log `conflict_resolved` when cache differs from both (true divergence). |
-| **R9** | resolved `local.list != index.list` (or UID found in a second collection) | **List move**: `caldav_put` to new collection + `caldav_delete` from old (UID preserved). Stray duplicate copies in wrong collections are deleted. Log `task_moved`. |
-| **R10** | any markdown op OR routed task set changed | Re-render TODO.md (§7). |
+| — | its index entry's source note is unreadable | nothing (unknown) |
+| **R0** | tombstoned | delete every server copy; forget state |
+| **R6** | no server copy | forget state |
+| **Dv** | known (index/base) and a server copy exists | deleted in the vault → delete server copies, tombstone, forget |
+| **R4** | unknown and a server copy exists | created on the server → insert a line: in the note `X-RESTASK-SOURCE` names if it still routes to that list; else the list's home note; else the inbox. Under its parent if the parent is an active task of the same note. Settle. |
 
-### 11.3 Remote-wins field decomposition (R8)
+Task **in the vault**:
 
-`STATUS:COMPLETED` vs local Active → `SetStatus{checked:true}` + `MoveToDone` with `✅` date from `COMPLETED` (§4 reverse rule). Active vs local Completed → `RestoreFromDone` + `SetStatus{checked:false}`. Text → `EditText`. Priority → `SetPriority`. DUE/DTSTART/X-RESTASK-SCHEDULED → `SetWhen` per field. Known trade-off (v1): conflict resolution is task-level, not field-level; the loser's text edit is overwritten and the event is logged.
+| # | Condition | Action |
+|---|---|---|
+| **R0′** | tombstoned | **revive**: clear the tombstone, continue below. The vault outranks tombstones. |
+| — | its list was not listed this pass | nothing (unknown) |
+| **R1** | valid base, base ≠ vault in a sync field, and the base is newer than the vault file by > 120 s, fewer than 3 consecutive deferrals | **defer**: a vault copy that file sync has not caught up yet. After 3 passes the vault is taken at its word. |
+| **R7/R8** | a copy in its list | merge (§11.3). Vault mutations and/or a put (`If-Match` the listed etag, extras carried); if neither, settle when base/index are missing or stale. Other copies of the UID are strays → delete. |
+| **R9** | copies only in other lists | **move**: merge with the first copy, put into the task's list (create), then delete the old copy; further copies are strays. |
+| — | no copy, an adoption for this UID is in flight | handled by R5 |
+| **R3** | no copy; settled; the collection it was settled in was listed and is not a *reset* | deleted on the server → delete the vault line, tombstone, forget |
+| **R2** | no copy otherwise | new (or lost wholesale) → put (create) |
+
+**Reset collections** (R3 guard): a collection created in this pass, or one where two or
+more settled tasks all vanished at once, did not have its tasks deleted one by one — it
+was emptied, recreated or restored. Its tasks are re-pushed (R2), never deleted from the
+vault.
+
+Foreign resources (after the UID loop), in lists that have a home in the vault:
+
+| # | Condition | Action |
+|---|---|---|
+| **R5** | foreign `VTODO`, adopted UID `U = derived(uid, created)` not in vault, not on server, not tombstoned | **adopt**: insert a line with UID `U` (placement as R4); put `U` carrying the foreign extras; when the put succeeded, delete the foreign resource |
+| | `U` in the vault, not on the server | resume: put the vault's `U` with the foreign extras, then delete the original |
+| | `U` already on the server | delete the foreign original only |
+| | `U` tombstoned and not in the vault | delete the foreign original |
+| | a second resource with the same foreign UID | delete it |
+
+A parent relation between foreign tasks is preserved: the child's parent becomes the
+parent's adopted UID, and inserts are ordered parents-first.
+
+### 11.5 Failure and idempotence
+
+- A failed put leaves no record: the next pass sees the same difference and plans the
+  same write from *current* content. Nothing is replayed from a stored snapshot.
+- A failed delete is re-derived too: by the tombstone (R0), by the stray rule (R7/R9), or
+  by the leftover foreign original (R5).
+- A pass over a converged vault plans nothing, writes no file and sends no write request.
+- Crash windows: after vault mutations, before state — the next pass finds vault and
+  server equal (or merges) and settles. After a put, before state — same. After an
+  adoption's line insert, before its put — resumed (R5).

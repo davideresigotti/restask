@@ -1,129 +1,83 @@
-# Restask Spec — System Overview & Repository Layout (§1–§2)
+# restask spec — System Overview & Repository Layout (§1–§2)
 
-> Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
+> Normative. Index and invariants: `ARCHITECTURE.md`.
 
-## §1 System Overview, Naming & Boundaries
+## §1 System overview
 
-Restask is a local-first, offline-first task system linking Markdown checkboxes to RFC 5545 VTODO objects across devices. The Markdown vault (synced by Syncthing) is the source of truth; Radicale (CalDAV) is both a projection and an ingress point for external clients (Tasks.org, Thunderbird).
+restask links Markdown checkboxes to RFC 5545 `VTODO` objects across devices. The
+Markdown vault (carried by Syncthing) is the source of truth; Radicale (CalDAV) is a peer
+that other clients (Tasks.org, Thunderbird) read and write.
 
-### 1.1 Naming map
+### 1.1 Topology
 
-| Concept | Name | Location |
-|---|---|---|
-| System/product name | **Restask** | docs, TODO.md marker |
-| CLI binary & Rust crate | **`restask`** | `crates/restask/` |
-| Per-vault state directory | **`.restask/`** | vault root |
-| Vault config | **`restask.toml`** | vault root (synced) |
-| Machine config | **`config.toml`** | `$XDG_CONFIG_HOME/restask/` (never synced) |
-| Env prefix | `RESTASK_*` | — |
-| Systemd unit / container | `restask.service` / `restask` | `contrib/` |
-
-### 1.2 Ports & adapters boundaries
-
-```
-┌──────────────────────── PURE DOMAIN (no I/O, fully unit-tested) ────────────────────────┐
-│ domain (uid, priority, dates, task, clock trait)                                        │
-│ router (note → list resolution)                                                          │
-│ markdown (parser, mutator, todo_view)     vtodo (serialize, parse)                      │
-│ sync::planner (pure 3-way decision function)                                             │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
-        ▲ construction & data                ▲ construction & data
-┌───────┴───────────────── ADAPTERS (I/O) ───┴─────────────────────────────────────────────┐
-│ store (index, cache, tombstones, outbox — filesystem under .restask/)                    │
-│ caldav::client (reqwest, rustls)  implements  caldav::port::CaldavPort                    │
-│ daemon (notify watcher → debounced events)   cli / setup / tui (process + TTY + ssh)     │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-Rules:
-- Pure modules import **nothing** that performs I/O. They receive `now`/timezone via the `Clock` port or parameters.
-- All network access goes through the `CaldavPort` trait (static dispatch; mocked in tests).
-- The only place allowed to invoke external processes (`ssh`) is `setup.rs` / `doctor` server checks.
-
-### 1.3 Topology & mobile execution model
-
-- **Sync node** (always-on device, e.g. home server): runs `restask daemon` against the vault folder (a Syncthing share) and bridges vault ⇄ Radicale.
-- **Phone**: no daemon. Obsidian app edits Markdown; Tasks.org talks CalDAV to Radicale. The Obsidian plugin (§15) mirrors completions into `.restask/tasks/*.ics` so offline state travels with the vault.
-- **Multiple daemons are safe**: all state under `.restask/` is reconstructible from vault + Radicale; reconciliation is idempotent.
+- **Sync node** — an always-on device running `restask daemon` on its copy of the vault.
+  It is the only thing that talks to the CalDAV server.
+- **Other devices** — edit Markdown (Obsidian with the plugin, Neovim with the CLI, any
+  editor) and/or talk CalDAV (Tasks.org, Thunderbird). They need no daemon.
+- **Several daemons** (e.g. server + desktop, each on its own vault copy) are safe: state
+  under `.restask/` rides the file sync and is disposable, the merge is idempotent, and a
+  vault file that lags behind the synced state is waited on (§11 R1). Two processes on
+  the *same* vault folder are serialized by an advisory lock (§9).
 
 ```
-Phone (offline): toggle checkbox ─▶ Obsidian plugin rewrites line, moves under Done,
-                                    updates .restask/tasks/<uid>.ics
-Reconnect: Syncthing ─▶ vault (md + cache) ─▶ sync node
-           Tasks.org  ─▶ CalDAV PUT ─▶ Radicale
-           restask daemon ─▶ 3-way plan ─▶ converge (vault == Radicale) ─▶ Syncthing fans out
+Phone, offline:  check a box in Obsidian        ─▶ the note changes; nothing else
+Reconnect:       Syncthing ─▶ note reaches the sync node
+                 Tasks.org ─▶ CalDAV PUT reaches Radicale
+Sync node:       daemon ─▶ scan vault ─▶ list server ─▶ three-way merge over the base
+                        ─▶ notes and server agree ─▶ Syncthing fans the notes out
 ```
 
-## §2 Repository Layout (exact, normative)
+### 1.2 What a device must do to change a task
 
-Files marked ⊙ exist today and must not be edited. Everything else is created by the checklist in `AGENTS.md`.
+Edit the Markdown line. That is the whole contract. Checking a box in any editor is
+enough: the daemon stamps `✅ <date>`, moves the line under the done heading, pushes the
+change, and re-renders TODO.md (§6.4). The plugin and the CLI only make the same edits
+immediately instead of at the next pass.
+
+## §2 Repository layout
 
 ```
 .
-├── .editorconfig                          ⊙ created T01
-├── .github/workflows/ci.yml                 T01 (App. D)
-├── .gitignore                               T01
-├── AGENTS.md                              ⊙ this repo's agent contract
-├── ARCHITECTURE.md                        ⊙ this file
-├── INSTALL.md                             ⊙ user install guide
-├── LICENSE                                  T01 (MIT)
-├── README.md                              ⊙ updated in T29 (routing section)
-├── Cargo.toml                              T01 (workspace, App. B)
-├── rust-toolchain.toml                     T01 (channel 1.98.1)
+├── ARCHITECTURE.md            model, layers, invariants, spec index
+├── AGENTS.md                  how to work on this repository
+├── README.md  INSTALL.md      what it is for; how to run it
+├── Cargo.toml  Cargo.lock  rust-toolchain.toml
+├── .github/workflows/ci.yml   App. D
 ├── contrib/
-│   ├── config.example.toml                 T02 (machine config sample)
-│   ├── restask.example.toml                T02 (vault config sample)
-│   ├── restask.service                     T29 (App. E)
-│   └── docker/
-│       ├── Dockerfile                      T29 (App. E)
-│       └── docker-compose.yml              T29 (App. E)
+│   ├── config.example.toml    machine config sample (§14.2)
+│   ├── restask.example.toml   vault config sample (§14.1)
+│   ├── restask.service        systemd user unit (App. E)
+│   └── docker/{Dockerfile,docker-compose.yml}
 ├── crates/restask/
-│   ├── Cargo.toml                          T01 (App. B — normative versions)
 │   ├── src/
-│   │   ├── lib.rs                          T01
-│   │   ├── main.rs                         T01
-│   │   ├── cli.rs                          T21/T23
-│   │   ├── config.rs                       T02
-│   │   ├── logging.rs                      T01
-│   │   ├── router.rs                       T05
-│   │   ├── setup.rs                        T22
-│   │   ├── tui.rs                          T22
-│   │   ├── daemon.rs                       T20
-│   │   ├── domain/
-│   │   │   ├── mod.rs  uid.rs  priority.rs  dates.rs  task.rs      T03–T04
-│   │   ├── markdown/
-│   │   │   ├── mod.rs  parser.rs  mutator.rs  todo_view.rs         T06–T10
-│   │   ├── vtodo/
-│   │   │   ├── mod.rs  serialize.rs  parse.rs                      T11–T12
-│   │   ├── store/
-│   │   │   ├── mod.rs  index.rs  cache.rs  tombstones.rs  outbox.rs T14–T15
-│   │   ├── caldav/
-│   │   │   ├── mod.rs  port.rs  client.rs  protocol.rs             T16–T17
-│   │   └── sync/
-│   │       ├── mod.rs  planner.rs  engine.rs                       T18–T19
+│   │   ├── lib.rs  main.rs  error.rs  logging.rs
+│   │   ├── domain/      uid  priority  dates  task                 (pure, §3–4)
+│   │   ├── router.rs                                                (pure, §5)
+│   │   ├── markdown/    parser  mutator  todo_view                  (pure, §6–7)
+│   │   ├── vtodo/       serialize  parse                            (pure, §8)
+│   │   ├── sync/        merge  planner (pure) · engine (I/O)        (§11)
+│   │   ├── fsio.rs      atomic writes
+│   │   ├── vault.rs     walk, scan, repair                          (§5, §6.4)
+│   │   ├── store/       index  cache (base snapshots)  tombstones   (§9)
+│   │   ├── caldav/      protocol  port  client  offline             (§10)
+│   │   ├── daemon.rs                                                (§13.1)
+│   │   └── cli.rs  setup.rs  tui.rs  config.rs                      (§13–14)
 │   └── tests/
-│       ├── common/mod.rs                    shared: FixedClock, MockCaldav, vault fixtures
-│       ├── config.rs  domain_uid.rs  domain_priority.rs  domain_dates.rs  domain_task.rs
-│       ├── router.rs  markdown_parser.rs  markdown_mutator.rs  todo_view.rs
-│       ├── vtodo_codec.rs  vtodo_timestamps.rs
-│       ├── store.rs  cache.rs  outbox.rs
-│       ├── caldav_protocol.rs  caldav_client.rs
-│       ├── sync_planner.rs  sync_engine.rs  daemon.rs
-│       ├── cli.rs  setup_wizard.rs
-│       └── e2e_server.rs                    #[ignore]-gated live server test (T30)
+│       ├── common/mod.rs      FixedClock, MockCaldav, temp vault
+│       ├── fixtures/          immutable sample notes
+│       ├── sync_engine.rs     end-to-end scenarios (incl. every data-loss regression)
+│       ├── sync_planner.rs    one test per rule
+│       ├── … one suite per module …
+│       └── e2e_server.rs      #[ignore]: live server probe, run by hand
 ├── docs/
-│   ├── contracts/vtodo-golden.ics           T11 (App. A — byte-exact, CRLF)
-│   └── EXECUTION_STATE.md                  ⊙ agent session state (seeded)
-├── neovim/lua/restask/
-│   ├── init.lua                             T28
-│   └── toggle.lua                           T28
+│   ├── spec/*.md              this specification
+│   ├── contracts/vtodo-golden.ics   byte-exact serializer contract (App. A)
+│   └── EXECUTION_STATE.md     state of the work, decisions, open items
+├── neovim/
+│   ├── lua/restask/{init,toggle}.lua
+│   └── test/toggle_test.lua
 ├── plugins/obsidian/
-│   ├── package.json  tsconfig.json  esbuild.config.mjs               T24 (App. C)
-│   ├── manifest.json  styles.css                                     T24
-│   ├── src/{main.ts, settings.ts, modal.ts, markdown.ts, vtodo.ts}   T24–T27
-│   └── test/{markdown.test.ts, modal-filter.test.ts, vtodo.test.ts}  T24–T26
-└── test-vault/                            ⊙ READ-ONLY fixtures (never modify, never sync)
-    ├── Home Lab Test.md
-    ├── Project Alpha Test.md
-    └── TODO.md
+│   ├── src/{main,settings,markdown,modal,toggle}.ts
+│   └── test/{markdown,modal-filter,toggle}.test.ts  test/fixtures/
+└── test-vault/                manual sandbox (may be live-synced; tests never read it)
 ```
