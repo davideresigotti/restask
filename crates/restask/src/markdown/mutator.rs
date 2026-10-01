@@ -39,6 +39,14 @@ pub enum Mutation {
         /// The fresh UID.
         uid: TaskUid,
     },
+    /// Gives the line carrying `uid` the UID `new_uid` instead (a completed occurrence of
+    /// a recurring task becomes a record of its own; the series keeps `uid`).
+    Rekey {
+        /// The UID the line carries now.
+        uid: TaskUid,
+        /// The UID it carries afterwards.
+        new_uid: TaskUid,
+    },
     /// Sets the checkbox and the `✅` completion stamp.
     SetStatus {
         /// Target task.
@@ -326,6 +334,14 @@ pub fn apply(
                         None => skipped.push((op.clone(), SkipReason::LineChanged)),
                     },
                     None => skipped.push((op.clone(), SkipReason::LineChanged)),
+                }
+            }
+            Mutation::Rekey { uid, new_uid } => {
+                let new_uid = new_uid.clone();
+                if with_uid_line(&mut lines, uid, |draft| draft.uid = Some(new_uid)) {
+                    applied.push(op.clone());
+                } else {
+                    skipped.push((op.clone(), SkipReason::UidNotFound));
                 }
             }
             Mutation::SetStatus {

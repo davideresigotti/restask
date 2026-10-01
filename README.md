@@ -38,6 +38,7 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 
 ## Completion Behaviour
 - Once a task is checked off — in Obsidian, in any editor, or in Tasks.org — it disappears from the active list and is moved under a `### Done` heading in its source file (or in `TODO.md` for on-the-fly tasks), marked with completion date syntax like `✅ 2026-09-19`.
+- A task set to repeat in Tasks.org repeats in the vault too: checking it off leaves the finished occurrence under `### Done` and puts the task back in the active list with its next date.
 - Tasks in the `### Done` section follow a newest-on-top sort order. If a task is accidentally checked, it can easily be recovered since it appears at the very top: uncheck it and it returns to the active list.
 
 # Lists & Routing

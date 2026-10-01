@@ -992,6 +992,95 @@ fn a_task_another_client_stored_under_its_own_name_is_replaced_in_place() {
     );
 }
 
+// ── R8r: recurring tasks ──────────────────────────────────────────────────────────────
+
+#[test]
+fn completing_a_recurring_task_rolls_the_series_and_leaves_a_record() {
+    let mut base = task(1, "home", "water the plants");
+    base.due = Some(When::Date(date("2026-09-21")));
+    base.start = Some(When::Date(date("2026-09-20")));
+    let mut local = base.clone();
+    local.status = Status::Completed {
+        on: date("2026-09-21"),
+    };
+    let world = World::new().local(&local).settled(&base, "\"e1\"").remote(
+        resource_with(
+            &base,
+            T0,
+            "\"e1\"",
+            &["RRULE:FREQ=WEEKLY;COUNT=5", "DESCRIPTION:d"],
+        ),
+        "home",
+    );
+    let p = world.plan();
+
+    assert_eq!(p.puts.len(), 2);
+    let series = &p.puts[0];
+    assert_eq!(series.task.uid, uid(1));
+    assert_eq!(series.task.status, Status::Active);
+    assert_eq!(series.task.due, Some(When::Date(date("2026-09-28"))));
+    assert_eq!(
+        series.task.start,
+        Some(When::Date(date("2026-09-27"))),
+        "the other dates move with the due date"
+    );
+    assert_eq!(series.if_match.as_deref(), Some("\"e1\""));
+    assert_eq!(
+        series.extras,
+        vec!["RRULE:FREQ=WEEKLY;COUNT=4", "DESCRIPTION:d"]
+    );
+
+    let record = &p.puts[1];
+    assert_ne!(record.task.uid, uid(1));
+    assert_eq!(record.task.status, local.status);
+    assert_eq!(record.task.due, base.due);
+    assert!(record.extras.is_empty() && record.if_match.is_none());
+    assert_eq!(record.name, record.task.uid.as_str());
+
+    match mutations_for(&p, "notes/home.md") {
+        [Mutation::Rekey { uid: from, new_uid }, Mutation::Insert { draft, under: None }] => {
+            assert_eq!((from, new_uid), (&uid(1), &record.task.uid));
+            assert_eq!(draft.uid, Some(uid(1)));
+            assert!(!draft.checked);
+            assert_eq!(draft.due, Some(When::Date(date("2026-09-28"))));
+        }
+        other => panic!("expected rekey + insert, got {other:?}"),
+    }
+    // Deterministic: the same occurrence always yields the same record.
+    assert_eq!(world.plan(), p);
+}
+
+#[test]
+fn a_recurring_task_is_not_rolled_when_the_server_side_completed_it() {
+    // Another client marked the whole task completed: that is its decision.
+    let mut base = task(1, "home", "water the plants");
+    base.due = Some(When::Date(date("2026-09-21")));
+    let mut theirs = base.clone();
+    theirs.status = Status::Completed {
+        on: date("2026-09-21"),
+    };
+    let p = World::new()
+        .local(&base)
+        .settled(&base, "\"e1\"")
+        .remote(
+            resource_with(&theirs, T0 + 5, "\"e2\"", &["RRULE:FREQ=WEEKLY"]),
+            "home",
+        )
+        .plan();
+    assert!(p.puts.is_empty());
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [
+            Mutation::SetStatus {
+                uid: uid(1),
+                checked: true,
+                completed_on: Some(date("2026-09-21")),
+            },
+            Mutation::MoveToDone { uid: uid(1) },
+        ]
+    );
+}
+
 // ── R1: a vault file that file sync has not caught up yet ─────────────────────────────
 
 fn stale_world(defer_count: u8) -> World {

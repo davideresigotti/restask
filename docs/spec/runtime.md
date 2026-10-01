@@ -29,7 +29,8 @@ Everything goes to **stderr**; command results go to stdout.
 - `RUST_LOG` overrides the level in both.
 
 Event names used as messages: `scan_complete`, `task_registered`, `task_completed`,
-`task_restored`, `task_deleted`, `task_adopted`, `task_moved`, `todo_rendered`,
+`task_restored`, `task_deleted`, `task_adopted`, `task_moved`, `task_recurred`,
+`todo_rendered`,
 `collection_created`, `collection_reset`, `caldav_push`, `caldav_delete`, `caldav_pull`,
 `conflict_resolved`, `sync_lag_deferred`, `vault_divergence`, `orphan_subtask`,
 `auth_warning`.

@@ -1026,3 +1026,151 @@ async fn a_pass_waits_for_another_process_holding_the_vault() {
     let report = pass.await.unwrap().unwrap();
     assert_eq!(report.pushes, 1);
 }
+
+// ── recurring tasks ───────────────────────────────────────────────────────────────────
+
+/// Makes a server task recurring the way Tasks.org does: an `RRULE` (plus a description,
+/// to prove unmanaged content rides along).
+fn make_recurring(mock: &MockCaldav, list: &str, name: &str, rrule: &str) {
+    let rrule = rrule.to_string();
+    edit_remote(mock, list, name, Duration::minutes(5), move |line| {
+        if line.starts_with("END:VTODO") {
+            vec![
+                format!("RRULE:{rrule}"),
+                "DESCRIPTION:two cups".to_string(),
+                line.to_string(),
+            ]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+}
+
+fn day(offset: i64) -> String {
+    (Utc::now() + Duration::days(offset))
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn ical_day(offset: i64) -> String {
+    (Utc::now() + Duration::days(offset))
+        .format("%Y%m%d")
+        .to_string()
+}
+
+#[tokio::test]
+async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!(
+            "- [ ] water the plants \u{1F4C5} {} {ID} {UID}\n- [ ] other\n",
+            day(0)
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    make_recurring(&mock, "home", UID, "FREQ=DAILY;INTERVAL=2");
+    engine.reconcile().await.unwrap();
+
+    // Check the box by hand.
+    let text = read(&dir, "notes/home.md").replace("- [ ] water", "- [x] water");
+    write_vault_file(&dir, "notes/home.md", &text);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.failed, 0);
+
+    // The series is open again on the server, due at the next occurrence, rule intact.
+    let series = body(&mock, "home", UID);
+    assert!(series.contains("STATUS:NEEDS-ACTION"), "{series}");
+    assert!(!series.contains("COMPLETED:"));
+    assert!(series.contains(&format!("DUE;VALUE=DATE:{}\r\n", ical_day(2))));
+    assert!(series.contains("RRULE:FREQ=DAILY;INTERVAL=2\r\n"));
+    assert!(series.contains("DESCRIPTION:two cups\r\n"));
+
+    // In the note: the series line is active with the new date; the occurrence that was
+    // done is a record under Done with a UID of its own.
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!(
+            "- [ ] water the plants \u{1F4C5} {} {ID} {UID}\n",
+            day(2)
+        )),
+        "{note}"
+    );
+    let record = uid_of(&dir, "notes/home.md", "- [x] water the plants");
+    assert_ne!(record, UID);
+    assert!(note.contains(&format!(
+        "### Done\n- [x] water the plants \u{1F4C5} {} \u{2705} {} {ID} {record}\n",
+        day(0),
+        today()
+    )));
+
+    // The record is an ordinary completed task on the server: no rule, no description.
+    let done = body(&mock, "home", &record);
+    assert!(done.contains("STATUS:COMPLETED"));
+    assert!(!done.contains("RRULE") && !done.contains("DESCRIPTION"));
+
+    // Converged: another pass does nothing, and never rolls the series again.
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (again.pushes, again.inserts, again.markdown_mutations),
+        (0, 0, 0)
+    );
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!(mock.resource_names("home").len(), 3);
+}
+
+#[tokio::test]
+async fn the_last_occurrence_of_a_counted_rule_completes_the_task() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] two more times \u{1F4C5} {} {ID} {UID}\n", day(0)),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    make_recurring(&mock, "home", UID, "FREQ=DAILY;COUNT=2");
+    engine.reconcile().await.unwrap();
+
+    engine.set_done(&uid(UID), true).await.unwrap();
+    let series = body(&mock, "home", UID);
+    assert!(series.contains("STATUS:NEEDS-ACTION"));
+    assert!(series.contains("RRULE:FREQ=DAILY;COUNT=1\r\n"), "{series}");
+    assert!(series.contains(&format!("DUE;VALUE=DATE:{}\r\n", ical_day(1))));
+
+    // The second completion is the last occurrence: now the task itself is done.
+    engine.set_done(&uid(UID), true).await.unwrap();
+    assert!(body(&mock, "home", UID).contains("STATUS:COMPLETED"));
+    let note = read(&dir, "notes/home.md");
+    assert_eq!(note.matches("- [x] two more times").count(), 2);
+    assert!(!note.contains("- [ ] two more times"));
+}
+
+#[tokio::test]
+async fn a_recurring_inbox_task_rolls_forward_inside_todo_md() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let task = engine.add("take vitamins", None, None).await.unwrap();
+    make_recurring(&mock, "inbox", task.uid.as_str(), "FREQ=DAILY");
+    engine.reconcile().await.unwrap();
+
+    engine.set_done(&task.uid, true).await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    // No date before: the next occurrence becomes the due date.
+    assert!(
+        todo.contains(&format!(
+            "## Inbox\n- [ ] take vitamins \u{1F4C5} {} \u{2795} {} {ID} {}\n",
+            day(1),
+            today(),
+            task.uid
+        )),
+        "{todo}"
+    );
+    assert!(todo.contains("## Done\n- [x] take vitamins \u{2705}"));
+    let series = body(&mock, "inbox", task.uid.as_str());
+    assert!(series.contains("STATUS:NEEDS-ACTION") && series.contains("RRULE:FREQ=DAILY"));
+}

@@ -744,3 +744,26 @@ fn done_heading_creation_does_not_stack_blank_lines() {
         "# Notes\n\n### Done\n- [x] A ✅ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
     );
 }
+
+#[test]
+fn rekey_swaps_the_uid_of_the_line_carrying_it() {
+    let out = run(
+        "- [x] A ✅ 2026-09-22 ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::Rekey {
+            uid: uid(UID1),
+            new_uid: uid(UID2),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [x] A ✅ 2026-09-22 ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n"
+    );
+    let missing = run(
+        "- [ ] B\n",
+        &[Mutation::Rekey {
+            uid: uid(UID1),
+            new_uid: uid(UID2),
+        }],
+    );
+    assert_eq!(missing.skipped.len(), 1);
+}

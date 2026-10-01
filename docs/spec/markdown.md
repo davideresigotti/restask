@@ -59,6 +59,7 @@ pub fn link_parents(tasks: &[ParsedTask]) -> Vec<Option<TaskUid>>;
 pub enum Mutation {
     Register { line_no, uid, created },        // append ➕ + 🆔 to an unregistered line
     Reassign { line_no, uid },                 // give a duplicated line its own UID
+    Rekey { uid, new_uid },                    // the line carrying uid gets new_uid (§11.6)
     SetStatus { uid, checked, completed_on },
     SetPriority { uid, priority },
     SetWhen { uid, field: WhenField, value },

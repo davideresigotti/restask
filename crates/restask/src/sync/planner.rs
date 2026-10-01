@@ -6,11 +6,12 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::caldav::RemoteResource;
-use crate::domain::{ListSlug, Status, Task, TaskUid};
+use crate::domain::{ListSlug, LocalDate, LocalDateTime, Status, Task, TaskUid, When};
 use crate::markdown::mutator::Mutation;
 use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
 use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
+use crate::vtodo::Recurrence;
 
 /// Consecutive cycles a stale-looking vault file is waited on (R1) before the vault is
 /// taken at its word again (vault authority).
@@ -256,7 +257,32 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .or_default()
                     .extend(merged.mutations);
             }
-            if merged.push {
+            if let Some(roll) = roll_forward(&merged.task, resource) {
+                // R8r — one occurrence of a recurring task was completed in the vault:
+                // the checked line becomes a record of its own, the series moves on.
+                tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
+                let ops = p.mutations.entry(local.source.path.clone()).or_default();
+                ops.push(Mutation::Rekey {
+                    uid: uid.clone(),
+                    new_uid: roll.record.uid.clone(),
+                });
+                ops.push(Mutation::Insert {
+                    draft: TaskDraft::from(&roll.series),
+                    under: None,
+                });
+                p.puts.push(PutOp {
+                    task: roll.series,
+                    name: resource.name.clone(),
+                    extras: roll.extras,
+                    if_match: Some(resource.etag.clone()),
+                });
+                p.puts.push(PutOp {
+                    name: roll.record.uid.as_str().to_string(),
+                    task: roll.record,
+                    extras: Vec::new(),
+                    if_match: None,
+                });
+            } else if merged.push {
                 p.puts.push(PutOp {
                     task: merged.task,
                     name: resource.name.clone(),
@@ -279,11 +305,32 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .extend(merged.mutations);
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
+            let (task, extras) = match roll_forward(&merged.task, origin.1) {
+                Some(roll) => {
+                    let ops = p.mutations.entry(local.source.path.clone()).or_default();
+                    ops.push(Mutation::Rekey {
+                        uid: uid.clone(),
+                        new_uid: roll.record.uid.clone(),
+                    });
+                    ops.push(Mutation::Insert {
+                        draft: TaskDraft::from(&roll.series),
+                        under: None,
+                    });
+                    p.puts.push(PutOp {
+                        name: roll.record.uid.as_str().to_string(),
+                        task: roll.record,
+                        extras: Vec::new(),
+                        if_match: None,
+                    });
+                    (roll.series, roll.extras)
+                }
+                None => (merged.task, origin.1.task.extras.clone()),
+            };
             p.moves.push(MoveOp {
                 put: PutOp {
                     name: uid.as_str().to_string(),
-                    task: merged.task,
-                    extras: origin.1.task.extras.clone(),
+                    task,
+                    extras,
                     if_match: None,
                 },
                 from: delete_of(origin),
@@ -526,6 +573,91 @@ impl<'a> Context<'a> {
         // Only a parent in the same note can be expressed (by indentation).
         task.parent = self.parent_of(resource);
         (path, task)
+    }
+}
+
+/// A recurring task rolled forward by one occurrence (§11.6).
+struct Roll {
+    /// The series: same UID, active again, dated at the next occurrence.
+    series: Task,
+    /// The completed occurrence, as a task of its own.
+    record: Task,
+    /// The series' extras, with the rule's `COUNT` decremented.
+    extras: Vec<String>,
+}
+
+/// Rolls a recurring task forward when the merge says "completed" while the server copy
+/// is still open — i.e. the completion was made in the vault. `None` when the task does
+/// not recur, when this was the rule's last occurrence, or when the rule has ended: then
+/// the completion is an ordinary one.
+fn roll_forward(merged: &Task, resource: &RemoteResource) -> Option<Roll> {
+    let Status::Completed { on } = merged.status else {
+        return None;
+    };
+    if resource.task.task.status != Status::Active {
+        return None;
+    }
+    let rule = Recurrence::find(&resource.task.extras)?;
+    if rule.is_last() {
+        return None;
+    }
+    // The occurrence just done is identified by its due date; a task without one by its
+    // start, its scheduled date, or the day it was completed.
+    let anchor = merged
+        .due
+        .or(merged.start)
+        .or(merged.scheduled)
+        .unwrap_or(When::Date(on));
+    let next = rule.next_after(anchor, on)?;
+    let shift = when_day(next) - when_day(anchor);
+    let moved = |value: Option<When>| value.map(|value| shift_days(value, shift));
+
+    let mut series = merged.clone();
+    series.status = Status::Active;
+    if merged.due.is_some() || (merged.start.is_none() && merged.scheduled.is_none()) {
+        series.due = Some(next);
+    }
+    if merged.due.is_some() {
+        series.start = moved(merged.start);
+        series.scheduled = moved(merged.scheduled);
+    } else if merged.start.is_some() {
+        series.start = Some(next);
+        series.scheduled = moved(merged.scheduled);
+    } else if merged.scheduled.is_some() {
+        series.scheduled = Some(next);
+    }
+
+    let mut record = merged.clone();
+    record.uid = TaskUid::derived(
+        &format!("{}/{}", merged.uid.as_str(), anchor.to_ical()),
+        on.0.and_hms_opt(0, 0, 0).map(|at| at.and_utc()),
+    );
+    record.parent = None;
+
+    let mut extras = resource.task.extras.clone();
+    if let Some(line) = extras.get_mut(rule.index) {
+        *line = rule.after_one_occurrence();
+    }
+    Some(Roll {
+        series,
+        record,
+        extras,
+    })
+}
+
+/// The calendar day of a date or wall time.
+fn when_day(value: When) -> chrono::NaiveDate {
+    match value {
+        When::Date(day) => day.0,
+        When::DateTime(at) => at.0.date(),
+    }
+}
+
+/// `value` moved by a whole number of days (its time of day, if any, is kept).
+fn shift_days(value: When, shift: chrono::Duration) -> When {
+    match value {
+        When::Date(LocalDate(day)) => When::Date(LocalDate(day + shift)),
+        When::DateTime(LocalDateTime(at)) => When::DateTime(LocalDateTime(at + shift)),
     }
 }
 
