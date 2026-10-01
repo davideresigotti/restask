@@ -14,6 +14,7 @@ use crate::config::{CaldavConfig, MachineConfig, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
 use crate::fsio;
 use crate::markdown::render;
+use crate::store::{cache_remove, Index};
 use crate::sync::{Engine, ReconcileReport};
 use crate::RestaskError;
 
@@ -272,6 +273,10 @@ async fn prepare_and_sync<C: CaldavPort>(
         let name = format!("{stem}.pre-restask-{stamp}.md");
         std::fs::rename(&inbox, vault.join(&name))?;
         backup = Some(name);
+        // The lines just left the vault with the file. Without this, the first sync
+        // would read "known tasks whose lines are gone" as deletions and remove them
+        // from the server; forgetting them makes the server copies flow back in instead.
+        forget_inbox_tasks(&vault, &cfg)?;
     }
     let fresh = render(&BTreeMap::new(), &cfg);
     fsio::write_atomic(&inbox, &fresh)?;
@@ -324,6 +329,29 @@ async fn prepare_and_sync<C: CaldavPort>(
         daemon,
         report,
     })
+}
+
+/// Drops the sync state of every task that lived in the inbox file, plus the remembered
+/// render: the next sync treats the server's inbox tasks as new arrivals.
+fn forget_inbox_tasks(vault: &Path, cfg: &VaultConfig) -> Result<(), RestaskError> {
+    let state_dir = vault.join(crate::vault::STATE_DIR);
+    let mut index = Index::load(&state_dir)?;
+    let inbox_tasks: Vec<_> = index
+        .entries
+        .values()
+        .filter(|entry| entry.source_path == cfg.inbox_file)
+        .map(|entry| entry.uid.clone())
+        .collect();
+    for uid in &inbox_tasks {
+        cache_remove(&state_dir, uid)?;
+        index.remove(uid);
+    }
+    index.save(&state_dir)?;
+    match std::fs::remove_file(state_dir.join(crate::sync::engine::RENDERED_FILE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Installs the machine-local systemd user unit (§13.2 step 6) that keeps

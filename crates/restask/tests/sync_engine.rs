@@ -996,3 +996,33 @@ async fn set_done_on_an_unknown_uid_is_a_validation_error() {
         .unwrap_err();
     assert!(error.to_string().contains("not found"), "{error}");
 }
+
+#[tokio::test]
+async fn a_pass_waits_for_another_process_holding_the_vault() {
+    // The daemon and a CLI command (e.g. from an editor keymap) share one vault: their
+    // writes must never interleave.
+    let dir = temp_vault();
+    home_note(&dir, "- [ ] contended\n");
+    let mock = MockCaldav::new();
+    std::fs::create_dir_all(dir.path().join(".restask")).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.path().join(".restask/lock"))
+        .unwrap();
+    held.lock().unwrap();
+
+    let engine = engine(&dir, &mock);
+    let pass = tokio::spawn(async move { engine.reconcile().await });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!pass.is_finished(), "the pass must wait for the lock");
+    assert!(
+        !read(&dir, "notes/home.md").contains(ID),
+        "nothing written yet"
+    );
+
+    held.unlock().unwrap();
+    let report = pass.await.unwrap().unwrap();
+    assert_eq!(report.pushes, 1);
+}

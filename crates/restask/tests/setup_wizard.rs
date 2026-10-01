@@ -377,3 +377,46 @@ fn daemon_unit_content_is_a_valid_user_unit() {
     assert!(content.contains("WantedBy=default.target"));
     assert!(content.contains("Description=restask sync daemon (vault <-> CalDAV)"));
 }
+
+#[tokio::test]
+async fn rerunning_setup_never_deletes_inbox_tasks_from_the_server() {
+    // Setup replaces TODO.md with a fresh file. The lines that left with the old file
+    // must not be read as "the user deleted these": the server copies flow back in.
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    run_setup(args(&vault), mock.clone(), clock(), None)
+        .await
+        .unwrap();
+
+    // Capture a task in the inbox and sync it.
+    let todo = vault.path().join("TODO.md");
+    let text = std::fs::read_to_string(&todo).unwrap();
+    std::fs::write(&todo, format!("{text}- [ ] keep me\n")).unwrap();
+    let engine = |clock: Arc<FixedClock>| {
+        restask::sync::Engine::new(
+            vault.path(),
+            VaultConfig::load(&vault.path().join("restask.toml")).unwrap(),
+            MachineConfig::load(&vault.path().join("machine.toml")).unwrap(),
+            mock.clone(),
+            clock,
+        )
+    };
+    engine(clock()).reconcile().await.unwrap();
+    assert_eq!(mock.resource_names("inbox").len(), 1);
+
+    let summary = run_setup(args(&vault), mock.clone(), later_clock(), None)
+        .await
+        .unwrap();
+    assert!(summary.backup.is_some());
+    assert_eq!(
+        mock.resource_names("inbox").len(),
+        1,
+        "the task is still on the server"
+    );
+    let todo = std::fs::read_to_string(&todo).unwrap();
+    assert!(
+        todo.contains("- [ ] keep me"),
+        "and back in the fresh TODO.md:\n{todo}"
+    );
+    assert_eq!(summary.report.deletes, 0);
+}

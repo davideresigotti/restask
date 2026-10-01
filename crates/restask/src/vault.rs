@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
@@ -68,6 +69,25 @@ struct Loaded {
     path: String,
     list: ListSlug,
     contents: String,
+    /// The file's mtime when `contents` was read.
+    read_at: Option<SystemTime>,
+}
+
+/// Writes a repaired note back — unless the file changed on disk since it was read (an
+/// editor or file sync saved it meanwhile), in which case nothing is written and the
+/// caller leaves the file alone for this pass. Returns whether the write happened.
+fn write_back(vault: &Path, file: &Loaded, contents: &str) -> Result<bool, RestaskError> {
+    let path = vault.join(&file.path);
+    let unchanged = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        == file.read_at;
+    if !unchanged {
+        tracing::info!(path = %file.path, "note changed during the scan; repaired on the next pass");
+        return Ok(false);
+    }
+    fsio::write_atomic(&path, contents)?;
+    Ok(true)
 }
 
 /// Scans the vault (§5–§6). In [`ScanMode::Repair`] routed notes are rewritten where
@@ -132,7 +152,11 @@ pub fn scan(
                 NoteRouting::LocalOnly => continue,
             }
         };
-        let contents = match std::fs::read_to_string(vault.join(&meta.path)) {
+        let full_path = vault.join(&meta.path);
+        let read_at = std::fs::metadata(&full_path)
+            .and_then(|m| m.modified())
+            .ok();
+        let contents = match std::fs::read_to_string(&full_path) {
             Ok(contents) => contents,
             Err(error) => {
                 tracing::warn!(path = %meta.path, %error, "unreadable vault file skipped");
@@ -144,6 +168,7 @@ pub fn scan(
             path: meta.path.clone(),
             list,
             contents,
+            read_at,
         };
         if is_inbox {
             inbox = Some(file);
@@ -225,8 +250,12 @@ pub fn scan(
                     tasks
                 } else {
                     let out = mutator::apply(&file.contents, &ops, cfg, clock)?;
+                    if !write_back(vault, file, &out.contents)? {
+                        // Its tasks are unknown this pass (not gone): decide nothing.
+                        scan.unreadable.insert(file.path.clone());
+                        continue;
+                    }
                     count_repairs(&mut scan, &out.applied, &file.path);
-                    fsio::write_atomic(&vault.join(&file.path), &out.contents)?;
                     markdown::parse(&out.contents, cfg).tasks
                 }
             }
@@ -273,9 +302,14 @@ pub fn scan(
                     tasks
                 } else {
                     let out = mutator::apply(&file.contents, &ops, cfg, clock)?;
-                    count_repairs(&mut scan, &out.applied, &file.path);
-                    fsio::write_atomic(&vault.join(&file.path), &out.contents)?;
-                    markdown::parse(&out.contents, cfg).tasks
+                    if write_back(vault, &file, &out.contents)? {
+                        count_repairs(&mut scan, &out.applied, &file.path);
+                        markdown::parse(&out.contents, cfg).tasks
+                    } else {
+                        // Registered lines only; the rest is picked up next pass.
+                        scan.unreadable.insert(file.path.clone());
+                        tasks
+                    }
                 }
             }
         };

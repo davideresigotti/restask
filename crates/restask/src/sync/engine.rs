@@ -76,6 +76,17 @@ pub struct Engine<C: CaldavPort> {
     clock: Arc<dyn Clock>,
 }
 
+/// Name of the advisory lock file under `.restask/`.
+const LOCK_FILE: &str = "lock";
+
+/// How long a command waits for another restask process working on the same vault.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Exclusive advisory lock on the vault for this machine: the daemon and a CLI command
+/// (or an editor integration calling one) never interleave their writes. Released when
+/// dropped. Other devices are coordinated by the merge, not by this lock.
+struct VaultLock(#[allow(dead_code)] std::fs::File);
+
 /// What the remote phase got done before it returned (possibly with an error).
 #[derive(Default)]
 struct Progress {
@@ -110,6 +121,38 @@ impl<C: CaldavPort> Engine<C> {
     /// Performs one full reconciliation (§13.1). When the server cannot be reached the
     /// local phase and the TODO.md render still happen, and the error is returned after.
     pub async fn reconcile(&self) -> Result<ReconcileReport, RestaskError> {
+        let _lock = self.lock().await?;
+        self.reconcile_locked().await
+    }
+
+    /// Waits for the vault lock (see [`VaultLock`]).
+    async fn lock(&self) -> Result<VaultLock, RestaskError> {
+        std::fs::create_dir_all(&self.state_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.state_dir.join(LOCK_FILE))?;
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(VaultLock(file)),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(RestaskError::Validation {
+                        field: "vault",
+                        reason: "another restask process is still working on this vault"
+                            .to_string(),
+                    })
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn reconcile_locked(&self) -> Result<ReconcileReport, RestaskError> {
         let now = self.clock.now_utc();
         let mut report = ReconcileReport::default();
         let mut index = Index::load(&self.state_dir)?;
@@ -167,6 +210,7 @@ impl<C: CaldavPort> Engine<C> {
         priority: Option<Priority>,
         due: Option<When>,
     ) -> Result<Task, RestaskError> {
+        let _lock = self.lock().await?;
         let now = self.clock.now_utc();
         let index = Index::load(&self.state_dir)?;
         let scan = vault::scan(
@@ -205,6 +249,7 @@ impl<C: CaldavPort> Engine<C> {
     /// Completes or reopens a task in its source file, then syncs (§13.3 `restask
     /// done/undone`). The change is safe in the vault even when the server is unreachable.
     pub async fn set_done(&self, uid: &TaskUid, done: bool) -> Result<Task, RestaskError> {
+        let _lock = self.lock().await?;
         let index = Index::load(&self.state_dir)?;
         let scan = vault::scan(
             &self.vault,
@@ -561,7 +606,7 @@ impl<C: CaldavPort> Engine<C> {
     /// Runs a reconcile after a local command already changed the vault: a server that
     /// cannot be reached is reported, not fatal — the change is saved and syncs later.
     async fn sync_after_local_change(&self) -> Result<(), RestaskError> {
-        match self.reconcile().await {
+        match self.reconcile_locked().await {
             Ok(_) => Ok(()),
             Err(error @ RestaskError::Caldav { .. }) => {
                 tracing::warn!(%error, "saved in the vault; the server will catch up on the next sync");
