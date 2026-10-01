@@ -1,6 +1,6 @@
 //! Live end-to-end probe (T30) against the real Radicale server. Fully gated:
 //! `#[ignore]` plus the `RESTASK_E2E_URL` / `RESTASK_E2E_USERNAME` /
-//! `RESTASK_E2E_PASSWORD` environment variables. Only the dedicated `Taskres-Dev`
+//! `RESTASK_E2E_PASSWORD` environment variables. Only the dedicated `Restask-Dev`
 //! collection is touched — never a production list.
 //!
 //! Run with: `cargo test -p restask --test e2e_server -- --ignored`
@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use restask::caldav::{CaldavClient, CaldavPort};
 use restask::domain::{ListSlug, Priority, SourceRef, Status, Task, TaskUid};
 
-/// The dedicated development collection (slug `taskres-dev`).
-const COLLECTION: &str = "Taskres-Dev";
+/// The dedicated development collection (slug `restask-dev`).
+const COLLECTION: &str = "Restask-Dev";
 
 /// Reads a non-empty environment variable.
 fn env(name: &str) -> Option<String> {
@@ -75,7 +75,7 @@ fn probe_task(slug: &ListSlug, text: &str) -> Task {
 /// and final absence.
 #[tokio::test]
 #[ignore = "live server probe; set RESTASK_E2E_URL/USERNAME/PASSWORD and run with -- --ignored"]
-async fn e2e_server_taskres_dev_lifecycle() {
+async fn e2e_server_restask_dev_lifecycle() {
     let Some((client, slug)) = client_from_env() else {
         return;
     };
@@ -86,7 +86,7 @@ async fn e2e_server_taskres_dev_lifecycle() {
         .await
         .expect("ensure_collection failed");
 
-    let task = probe_task(&slug, "Taskres e2e probe");
+    let task = probe_task(&slug, "Restask e2e probe");
     let etag = client.put(&task).await.expect("put failed");
     assert!(!etag.is_empty(), "PUT must return a fresh etag");
 

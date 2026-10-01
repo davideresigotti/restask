@@ -346,7 +346,7 @@ impl Default for CaldavConfig {
     }
 }
 
-/// One `[[lists]]` binding: Taskres list display name → Radicale collection (§14.2).
+/// One `[[lists]]` binding: Restask list display name → Radicale collection (§14.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListBinding {
     /// Display name used in `restask-list` frontmatter.

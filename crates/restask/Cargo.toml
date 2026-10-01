@@ -3,7 +3,7 @@ name = "restask"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-description = "Taskres: Markdown checkboxes ⇄ VTODO (CalDAV) sync"
+description = "Restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

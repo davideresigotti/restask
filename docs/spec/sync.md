@@ -1,4 +1,4 @@
-# Taskres Spec — Reconciliation Algorithm (§11)
+# Restask Spec — Reconciliation Algorithm (§11)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -45,8 +45,8 @@ pub fn plan(s: Snapshots, now: chrono::DateTime<chrono::Utc>) -> Plan;
 | **R1** | `tp(cache) != tp(local)` AND `cache.last_modified > local.last_modified + 120s` | **Defer** (in-flight Syncthing write from a mobile plugin); `defer_count++`; ≥ 3 consecutive cycles → log `error` `vault_divergence`. Reset counter on any successful reconcile of the UID. |
 | **R2** | local only; `index.caldav_etag == None` | New local task → `caldav_put` + cache write + index upsert. |
 | **R3** | local only; `index.caldav_etag == Some(_)` | Server-side deletion → markdown `Delete` + tombstone + cache delete + index removal. |
-| **R4** | remote only (managed UID) | Remote-created/renamed task → markdown `Insert`. Routing: `X-TASKRES-SOURCE` if that note exists and is routed to the same list; else TODO Inbox. Subtask with known parent in same file → `UnderParent`; unknown parent → TodoInbox, drop link, log `orphan_subtask`. Cache write + index upsert. |
-| **R5** | remote only (foreign UID) in a **managed/bound** collection | **Adopt**: generate `TaskUid`, insert into the bound note (X-TASKRES-SOURCE if routed; else list's root note if any; else TodoInbox), `caldav_put` new UID, `caldav_delete` foreign resource. Log `task_adopted`. |
+| **R4** | remote only (managed UID) | Remote-created/renamed task → markdown `Insert`. Routing: `X-RESTASK-SOURCE` if that note exists and is routed to the same list; else TODO Inbox. Subtask with known parent in same file → `UnderParent`; unknown parent → TodoInbox, drop link, log `orphan_subtask`. Cache write + index upsert. |
+| **R5** | remote only (foreign UID) in a **managed/bound** collection | **Adopt**: generate `TaskUid`, insert into the bound note (X-RESTASK-SOURCE if routed; else list's root note if any; else TodoInbox), `caldav_put` new UID, `caldav_delete` foreign resource. Log `task_adopted`. |
 | **R6** | cache only | Stale cache → cache delete. |
 | **R7** | local + remote, `tp(local) == tp(remote)` | No-op; refresh `index.caldav_etag`; cache write only if cache differs. |
 | **R8** | local + remote, differ | LAST-MODIFIED duel: `|Δ| > 120s` → newer wins (remote wins ⇒ markdown `Mutate` incl. done-region placement; local wins ⇒ `caldav_put`). `|Δ| ≤ 120s` → **local wins** (vault authority). Log `conflict_resolved` when cache differs from both (true divergence). |
@@ -55,4 +55,4 @@ pub fn plan(s: Snapshots, now: chrono::DateTime<chrono::Utc>) -> Plan;
 
 ### 11.3 Remote-wins field decomposition (R8)
 
-`STATUS:COMPLETED` vs local Active → `SetStatus{checked:true}` + `MoveToDone` with `✅` date from `COMPLETED` (§4 reverse rule). Active vs local Completed → `RestoreFromDone` + `SetStatus{checked:false}`. Text → `EditText`. Priority → `SetPriority`. DUE/DTSTART/X-TASKRES-SCHEDULED → `SetWhen` per field. Known trade-off (v1): conflict resolution is task-level, not field-level; the loser's text edit is overwritten and the event is logged.
+`STATUS:COMPLETED` vs local Active → `SetStatus{checked:true}` + `MoveToDone` with `✅` date from `COMPLETED` (§4 reverse rule). Active vs local Completed → `RestoreFromDone` + `SetStatus{checked:false}`. Text → `EditText`. Priority → `SetPriority`. DUE/DTSTART/X-RESTASK-SCHEDULED → `SetWhen` per field. Known trade-off (v1): conflict resolution is task-level, not field-level; the loser's text edit is overwritten and the event is logged.

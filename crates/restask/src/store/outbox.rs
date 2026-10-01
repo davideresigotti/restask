@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::task::{ListSlug, Task};
 use crate::domain::uid::TaskUid;
 use crate::markdown::mutator::write_atomic;
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Name of the outbox file inside `.restask/`.
 const FILE_NAME: &str = "outbox.json";
@@ -45,14 +45,14 @@ pub struct Outbox {
 
 impl Outbox {
     /// Loads `.restask/outbox.json` from `dir`; a missing file yields an empty outbox.
-    pub fn load(dir: &Path) -> Result<Self, TaskresError> {
+    pub fn load(dir: &Path) -> Result<Self, RestaskError> {
         let path = dir.join(FILE_NAME);
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.into()),
         };
-        serde_json::from_str(&contents).map_err(|e| TaskresError::Validation {
+        serde_json::from_str(&contents).map_err(|e| RestaskError::Validation {
             field: "outbox",
             reason: format!("{}: {e}", path.display()),
         })
@@ -60,10 +60,10 @@ impl Outbox {
 
     /// Saves the outbox to `dir/outbox.json` atomically (tmp + fsync + rename), creating
     /// `dir` if needed.
-    pub fn save(&self, dir: &Path) -> Result<(), TaskresError> {
+    pub fn save(&self, dir: &Path) -> Result<(), RestaskError> {
         std::fs::create_dir_all(dir)?;
         let mut json =
-            serde_json::to_string_pretty(self).map_err(|e| TaskresError::Validation {
+            serde_json::to_string_pretty(self).map_err(|e| RestaskError::Validation {
                 field: "outbox",
                 reason: e.to_string(),
             })?;

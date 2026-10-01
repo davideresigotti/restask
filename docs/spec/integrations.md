@@ -1,4 +1,4 @@
-# Taskres Spec — Obsidian Plugin & Neovim (§15–§16)
+# Restask Spec — Obsidian Plugin & Neovim (§15–§16)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -28,7 +28,7 @@ TS port of §8.1 (serialize only) for the exact subset the plugin produces (comp
 
 ### 15.4 `main.ts` — commands & settings
 
-Commands: `Taskres: Toggle task done` (cursor line: flips checkbox, adds/removes `✅ <today>`, moves under Done heading newest-on-top, updates cache file), `Taskres: Add metadata` (opens modal), `Taskres: Sync now` (best-effort cache refresh of visible tasks). Settings: `enableCacheMirror` (default true), `doneHeading` (default "Done", must equal vault config). Obsidian API calls are isolated in `src/main.ts`; `markdown.ts`/`modal.ts`/`vtodo.ts` stay API-free and unit-testable under Vitest.
+Commands: `Restask: Toggle task done` (cursor line: flips checkbox, adds/removes `✅ <today>`, moves under Done heading newest-on-top, updates cache file), `Restask: Add metadata` (opens modal), `Restask: Sync now` (best-effort cache refresh of visible tasks). Settings: `enableCacheMirror` (default true), `doneHeading` (default "Done", must equal vault config). Obsidian API calls are isolated in `src/main.ts`; `markdown.ts`/`modal.ts`/`vtodo.ts` stay API-free and unit-testable under Vitest.
 
 ## §16 Neovim Integration (`neovim/lua/restask/`)
 

@@ -9,8 +9,8 @@ use restask::domain::{
     ListSlug, LocalDate, LocalDateTime, Priority, SourceRef, Status, Task, TaskUid, When,
 };
 
-const UID: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb";
-const PARENT: &str = "taskres-01arz3ndektsv4rrffq69g5fav";
+const UID: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
+const PARENT: &str = "restask-01arz3ndektsv4rrffq69g5fav";
 
 fn uid(raw: &str) -> TaskUid {
     TaskUid::parse(raw).unwrap()
@@ -143,7 +143,7 @@ fn cache_read_unparseable_is_none() {
 fn cache_read_foreign_is_none() {
     let dir = tempdir().unwrap();
     fs::create_dir_all(dir.path().join("tasks")).unwrap();
-    let foreign = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:not-a-taskres-uid\r\nSUMMARY:X\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+    let foreign = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:not-a-restask-uid\r\nSUMMARY:X\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
     fs::write(dir.path().join("tasks").join(format!("{UID}.ics")), foreign).unwrap();
     let tz = chrono::FixedOffset::east_opt(0).unwrap();
     assert!(restask::store::cache_read(dir.path(), &uid(UID), tz).is_none());

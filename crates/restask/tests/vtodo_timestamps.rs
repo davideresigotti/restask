@@ -48,7 +48,7 @@ fn list() -> ListSlug {
 
 fn base_task() -> Task {
     Task {
-        uid: TaskUid::parse("taskres-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
+        uid: TaskUid::parse("restask-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
         list: list(),
         text: "Timestamp contract".to_string(),
         status: Status::Active,
@@ -129,11 +129,11 @@ fn scheduled_follows_the_same_date_vs_floating_rules() {
     let mut task = base_task();
     task.scheduled = Some(When::parse_date_or_datetime("2026-09-23").unwrap());
     let out = to_vcalendar(&task, clock().now_utc());
-    assert!(out.contains("X-TASKRES-SCHEDULED;VALUE=DATE:20260923\r\n"));
+    assert!(out.contains("X-RESTASK-SCHEDULED;VALUE=DATE:20260923\r\n"));
     task.scheduled = Some(When::parse_date_or_datetime("2026-09-23 07:15").unwrap());
     let out = to_vcalendar(&task, clock().now_utc());
-    assert!(out.contains("X-TASKRES-SCHEDULED:20260923T071500\r\n"));
-    assert!(!out.contains("X-TASKRES-SCHEDULED:20260923T071500Z"));
+    assert!(out.contains("X-RESTASK-SCHEDULED:20260923T071500\r\n"));
+    assert!(!out.contains("X-RESTASK-SCHEDULED:20260923T071500Z"));
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn reverse_created_formats_the_utc_calendar_date() {
     let tz = FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Created late\r\n",
         "CREATED:20260919T233000Z\r\n",
         "END:VTODO\r\n",
@@ -177,7 +177,7 @@ fn reverse_completed_formats_the_utc_calendar_date() {
     // §4 row: COMPLETED:20260920T033000Z → ✅ 2026-09-20 (UTC calendar date of the instant).
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Done\r\n",
         "STATUS:COMPLETED\r\n",
         "COMPLETED:20260920T033000Z\r\n",
@@ -196,7 +196,7 @@ fn reverse_completed_formats_the_utc_calendar_date() {
 fn reverse_utc_due_becomes_device_local_wall_time() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:UTC due\r\n",
         "DUE:20260919T170000Z\r\n",
         "END:VTODO\r\n",
@@ -213,7 +213,7 @@ fn reverse_tzid_due_becomes_device_local_wall_time() {
     // 17:00 in America/New_York (EDT, -04:00) = 21:00Z = 23:00 in device-local +02:00.
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Remote-zone due\r\n",
         "DUE;TZID=America/New_York:20260919T170000\r\n",
         "END:VTODO\r\n",
@@ -229,7 +229,7 @@ fn reverse_tzid_due_becomes_device_local_wall_time() {
 fn reverse_value_date_stays_date_only() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:All-day\r\n",
         "DUE;VALUE=DATE:20260919\r\n",
         "END:VTODO\r\n",
@@ -245,7 +245,7 @@ fn reverse_value_date_stays_date_only() {
 fn reverse_floating_due_stays_floating() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Floating\r\n",
         "DUE:20260919T170000\r\n",
         "END:VTODO\r\n",

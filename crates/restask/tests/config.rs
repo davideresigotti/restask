@@ -127,7 +127,7 @@ fn vault_matchers_ignore_wins_over_track() {
     assert!(matchers.is_tracked("notes/idea.md"));
     assert!(matchers.is_tracked("projects/school/plan.md"));
     assert!(!matchers.is_tracked(".restask/index.json"));
-    assert!(!matchers.is_tracked(".restask/tasks/taskres-01abc.ics"));
+    assert!(!matchers.is_tracked(".restask/tasks/restask-01abc.ics"));
     assert!(!matchers.is_tracked(".obsidian/app.json"));
     assert!(!matchers.is_tracked(".trash/old.md"));
     assert!(!matchers.is_tracked(".git/config"));

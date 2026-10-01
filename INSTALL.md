@@ -1,6 +1,6 @@
-# Installing Taskres
+# Installing Restask
 
-Taskres links every routed Markdown checkbox in your [Obsidian](https://obsidian.md) vault to an RFC 5545 VTODO on your own [Radicale](https://radicale.org/) server — so Tasks.org, Thunderbird, and Obsidian stay in sync, offline-first.
+Restask links every routed Markdown checkbox in your [Obsidian](https://obsidian.md) vault to an RFC 5545 VTODO on your own [Radicale](https://radicale.org/) server — so Tasks.org, Thunderbird, and Obsidian stay in sync, offline-first.
 
 ## 1. Requirements
 
@@ -93,7 +93,7 @@ All clients use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>
 
 - **Tasks.org** (Android): Settings → Synchronization → Add account → CalDAV; enter the list URL, username, password. Tasks appear under each list name.
 - **Thunderbird**: Calendar → New calendar → On the Network → CalDAV; paste the URL, check "offline support".
-- **Obsidian**: copy `plugins/obsidian` into `<vault>/.obsidian/plugins/taskres/`, `npm install && npm run build` there, enable "Taskres" in Community Plugins. Provides task autocomplete (`hi` → high/highest) and offline completion mirroring.
+- **Obsidian**: copy `plugins/obsidian` into `<vault>/.obsidian/plugins/restask/`, `npm install && npm run build` there, enable "Restask" in Community Plugins. Provides task autocomplete (`hi` → high/highest) and offline completion mirroring.
 - **Neovim**: add `neovim/lua/restask` to your runtimepath; `<leader>td` toggles the task under the cursor (requires `restask` on PATH).
 
 ## 6. Verify

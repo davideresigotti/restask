@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::config::VaultConfig;
 use crate::domain::{Clock, LocalDate, Priority, TaskUid, When};
-use crate::error::TaskresError;
+use crate::error::RestaskError;
 use crate::markdown::parser::{parse, parse_line, TaskDraft, TaskLine};
 
 /// Which date-bearing token a [`Mutation::SetWhen`] targets (§6.3).
@@ -269,7 +269,7 @@ pub fn apply(
     ops: &[Mutation],
     cfg: &VaultConfig,
     clock: &dyn Clock,
-) -> Result<MutationOutcome, TaskresError> {
+) -> Result<MutationOutcome, RestaskError> {
     let mut lines = split_lines(contents);
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
@@ -406,12 +406,12 @@ pub fn apply(
 /// Writes `contents` to `path` atomically: a hidden `<dir>/.<name>.restask-tmp` file is
 /// created, written, flushed and fsynced, then renamed over `path` (same directory ⇒
 /// atomic rename on POSIX).
-pub fn write_atomic(path: &Path, contents: &str) -> Result<(), TaskresError> {
+pub fn write_atomic(path: &Path, contents: &str) -> Result<(), RestaskError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name =
         path.file_name()
             .and_then(|n| n.to_str())
-            .ok_or_else(|| TaskresError::Validation {
+            .ok_or_else(|| RestaskError::Validation {
                 field: "path",
                 reason: format!("{}: not a UTF-8 file name", path.display()),
             })?;

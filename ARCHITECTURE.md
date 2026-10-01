@@ -1,4 +1,4 @@
-# Taskres — Architecture (Index & Invariants)
+# Restask — Architecture (Index & Invariants)
 
 > **Status: NORMATIVE.** This file is the entry point: what the system is, its boundaries, its
 > invariants, and the index into the detailed specification in `docs/spec/`. Implementation
@@ -8,9 +8,9 @@
 > **Agents: never read the whole spec set.** Each checklist task in `AGENTS.md` names the ONE
 > `docs/spec/` file to read. Humans: use the index below.
 
-## What Taskres is
+## What Restask is
 
-Taskres is a local-first, offline-first task system linking Markdown checkboxes to RFC 5545
+Restask is a local-first, offline-first task system linking Markdown checkboxes to RFC 5545
 VTODO objects across devices. The Markdown vault (synced by Syncthing) is the source of truth;
 Radicale (CalDAV) is both a projection and an ingress point for external clients (Tasks.org,
 Thunderbird).
@@ -26,7 +26,7 @@ Thunderbird).
 
 | Concept | Name | Location |
 |---|---|---|
-| System/product name | **Taskres** | docs (the TODO.md marker reads `Restask`) |
+| System/product name | **Restask** | docs (the TODO.md marker reads `Restask`) |
 | CLI binary & Rust crate | **`restask`** | `crates/restask/` |
 | Per-vault state directory | **`.restask/`** | vault root |
 | Vault config | **`restask.toml`** | vault root (synced) |
@@ -58,7 +58,7 @@ Rules:
 ## Core invariants (the constitution)
 
 1. **Vault is truth.** Reconciliation conflicts inside a 120 s tie-window resolve LOCAL.
-2. **UIDs are eternal.** `taskres-<ULID>` assigned once, never regenerated, preserved across
+2. **UIDs are eternal.** `restask-<ULID>` assigned once, never regenerated, preserved across
    edits and list moves; deletion creates a tombstone; UIDs are never reused.
 3. **Local-only by default.** Unrouted notes are never parsed (beyond frontmatter), never
    modified, never synced.
@@ -67,7 +67,7 @@ Rules:
    setup` binds TODO.md to one existing server calendar typed by name (`vault.inbox_list`);
    every other list is declared by the user with frontmatter.
 5. **Foreign resources are safe.** In bound collections: VEVENTs never touched; foreign VTODOs
-   adopted with a fresh UID; only `taskres-*` resources managed.
+   adopted with a fresh UID; only `restask-*` resources managed.
 6. **Timestamps follow the §4 contract** (`docs/spec/domain.md`): date-only Markdown → midnight
    UTC; reverse direction formats the UTC calendar date; timed dues are floating local time.
 7. **Pure domain, adapters at the edge** (diagram above). No I/O in `domain`, `router`,

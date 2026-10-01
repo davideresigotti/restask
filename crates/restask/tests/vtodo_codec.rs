@@ -8,7 +8,7 @@ use restask::domain::priority::Priority;
 use restask::domain::task::{ListSlug, SourceRef, Status, Task};
 use restask::domain::uid::TaskUid;
 use restask::vtodo::{from_vcalendar, to_vcalendar};
-use restask::TaskresError;
+use restask::RestaskError;
 
 /// Byte-exact golden contract (App. A) — every line CRLF-terminated.
 const GOLDEN: &str = include_str!("../../../docs/contracts/vtodo-golden.ics");
@@ -21,7 +21,7 @@ fn now() -> DateTime<Utc> {
 
 fn golden_task() -> Task {
     Task {
-        uid: TaskUid::parse("taskres-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
+        uid: TaskUid::parse("restask-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
         list: ListSlug::from_name("Home Lab").unwrap(),
         text: "Setup SSL certificate renew alert".to_string(),
         status: Status::Active,
@@ -122,13 +122,13 @@ fn escapes_source_path() {
     let mut task = golden_task();
     task.source.path = "Notes; Sub, Dir/task.md".to_string();
     let out = to_vcalendar(&task, now());
-    assert!(out.contains("X-TASKRES-SOURCE;VALUE=TEXT:Notes\\; Sub\\, Dir/task.md\r\n"));
+    assert!(out.contains("X-RESTASK-SOURCE;VALUE=TEXT:Notes\\; Sub\\, Dir/task.md\r\n"));
 }
 
 #[test]
 fn property_order_full_task() {
-    let uid = TaskUid::parse("taskres-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap();
-    let parent = TaskUid::parse("taskres-01arz3ndektsv4rrffq69g5fav").unwrap();
+    let uid = TaskUid::parse("restask-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap();
+    let parent = TaskUid::parse("restask-01arz3ndektsv4rrffq69g5fav").unwrap();
     let task = Task {
         uid,
         list: ListSlug::from_name("Home Lab").unwrap(),
@@ -153,9 +153,9 @@ fn property_order_full_task() {
     let expected = crlf(
         "BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//taskres//restask 0.1.0//EN
+PRODID:-//restask//restask 0.1.0//EN
 BEGIN:VTODO
-UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0
+UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0
 DTSTAMP:20260922T143000Z
 CREATED:20260919T000000Z
 LAST-MODIFIED:20260922T143000Z
@@ -166,9 +166,9 @@ PRIORITY:3
 DTSTART:20260924T083000
 DUE;VALUE=DATE:20260925
 COMPLETED:20260920T000000Z
-RELATED-TO;TOREL=PARENT:taskres-01arz3ndektsv4rrffq69g5fav
-X-TASKRES-SCHEDULED:20260923T091500
-X-TASKRES-SOURCE;VALUE=TEXT:Notes\\; Sub\\, Dir/task.md
+RELATED-TO;TOREL=PARENT:restask-01arz3ndektsv4rrffq69g5fav
+X-RESTASK-SCHEDULED:20260923T091500
+X-RESTASK-SOURCE;VALUE=TEXT:Notes\\; Sub\\, Dir/task.md
 END:VTODO
 END:VCALENDAR",
     );
@@ -190,14 +190,14 @@ fn omits_unset_optional_properties() {
         "DUE",
         "COMPLETED",
         "RELATED-TO",
-        "X-TASKRES-SCHEDULED",
+        "X-RESTASK-SCHEDULED",
     ] {
         assert!(!out.contains(prefix), "unexpected {prefix}");
     }
     // CREATED falls back to now_utc when the ➕ date is absent (§8.1).
     assert!(out.contains("CREATED:20260922T143000Z\r\n"));
-    // X-TASKRES-SOURCE is always emitted.
-    assert!(out.contains("X-TASKRES-SOURCE;VALUE=TEXT:Home Lab Test.md\r\n"));
+    // X-RESTASK-SOURCE is always emitted.
+    assert!(out.contains("X-RESTASK-SOURCE;VALUE=TEXT:Home Lab Test.md\r\n"));
 }
 
 #[test]
@@ -209,7 +209,7 @@ fn datetime_when_emits_floating_form() {
     let out = to_vcalendar(&task, now());
     assert!(out.contains("DTSTART:20260924T080000\r\n"));
     assert!(out.contains("DUE:20260925T170000\r\n"));
-    assert!(out.contains("X-TASKRES-SCHEDULED:20260923T073000\r\n"));
+    assert!(out.contains("X-RESTASK-SCHEDULED:20260923T073000\r\n"));
 }
 
 // ---- T12: parser (§8.2) ----
@@ -253,9 +253,9 @@ fn parses_own_output_round_trip() {
 
 #[test]
 fn round_trip_full_task_with_datetimes() {
-    let parent = TaskUid::parse("taskres-01arz3ndektsv4rrffq69g5fav").unwrap();
+    let parent = TaskUid::parse("restask-01arz3ndektsv4rrffq69g5fav").unwrap();
     let original = Task {
-        uid: TaskUid::parse("taskres-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
+        uid: TaskUid::parse("restask-01jzetq1v2h3k4m5n6p7r8t9w0").unwrap(),
         list: ListSlug::from_name("Home Lab").unwrap(),
         text: "Complex; task, with \\slashes\nand newline".to_string(),
         status: Status::Completed {
@@ -311,14 +311,14 @@ fn flags_foreign_uid_and_populates_fields() {
         "UID:custom-app-12345@other-client\r\n",
         "SUMMARY:Foreign; item\\, escaped\r\n",
         "PRIORITY:0\r\n",
-        "X-TASKRES-SOURCE;VALUE=TEXT:Inbox.md\r\n",
+        "X-RESTASK-SOURCE;VALUE=TEXT:Inbox.md\r\n",
         "END:VTODO\r\n",
         "END:VCALENDAR\r\n",
     );
     let remote = from_vcalendar(text, tz_cet(), &list()).unwrap();
     assert!(!remote.managed);
     assert_eq!(remote.raw_uid, "custom-app-12345@other-client");
-    let placeholder = TaskUid::parse("taskres-00000000000000000000000000").unwrap();
+    let placeholder = TaskUid::parse("restask-00000000000000000000000000").unwrap();
     assert_eq!(remote.task.uid, placeholder);
     assert_eq!(remote.task.text, "Foreign; item, escaped");
     assert_eq!(remote.task.priority, None, "PRIORITY 0 is unmapped");
@@ -330,7 +330,7 @@ fn missing_source_property_yields_none() {
     let text = concat!(
         "BEGIN:VCALENDAR\r\n",
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:No source here\r\n",
         "END:VTODO\r\n",
         "END:VCALENDAR\r\n",
@@ -341,7 +341,7 @@ fn missing_source_property_yields_none() {
 
 #[test]
 fn unfolds_folded_lines_and_accepts_lf() {
-    let crlf_text = "BEGIN:VTODO\r\nUID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\nSUMMARY:Hello\r\n  world\r\nEND:VTODO\r\n";
+    let crlf_text = "BEGIN:VTODO\r\nUID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\nSUMMARY:Hello\r\n  world\r\nEND:VTODO\r\n";
     let lf_text = crlf_text.replace("\r\n", "\n");
     let expected = "Hello world";
     let from_crlf = from_vcalendar(crlf_text, tz_cet(), &list()).unwrap();
@@ -363,7 +363,7 @@ fn skips_vtimezone_valarm_and_unknown_properties() {
         "END:STANDARD\r\n",
         "END:VTIMEZONE\r\n",
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "X-CUSTOM-PROP:must be ignored\r\n",
         "SUMMARY:Real summary\r\n",
         "BEGIN:VALARM\r\n",
@@ -380,7 +380,7 @@ fn skips_vtimezone_valarm_and_unknown_properties() {
 fn utc_instant_due_becomes_local_wall_time() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:UTC due\r\n",
         "DUE:20260919T170000Z\r\n",
         "END:VTODO\r\n",
@@ -396,7 +396,7 @@ fn utc_instant_due_becomes_local_wall_time() {
 fn tzid_due_becomes_local_wall_time() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:TZID due\r\n",
         "DUE;TZID=Europe/Rome:20260919T170000\r\n",
         "END:VTODO\r\n",
@@ -414,7 +414,7 @@ fn completed_uses_utc_calendar_date() {
     // formats the UTC calendar date, so `on` must stay 2026-09-20.
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Done late\r\n",
         "DTSTAMP:20260922T143000Z\r\n",
         "STATUS:COMPLETED\r\n",
@@ -432,9 +432,9 @@ fn completed_uses_utc_calendar_date() {
 
 #[test]
 fn missing_summary_is_an_error() {
-    let text = "BEGIN:VTODO\r\nUID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\nEND:VTODO\r\n";
+    let text = "BEGIN:VTODO\r\nUID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\nEND:VTODO\r\n";
     match from_vcalendar(text, tz_cet(), &list()) {
-        Err(TaskresError::Validation { field, .. }) => assert_eq!(field, "summary"),
+        Err(RestaskError::Validation { field, .. }) => assert_eq!(field, "summary"),
         other => panic!("expected Validation error, got {other:?}"),
     }
 }
@@ -443,13 +443,30 @@ fn missing_summary_is_an_error() {
 fn malformed_due_is_an_error() {
     let text = concat!(
         "BEGIN:VTODO\r\n",
-        "UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
+        "UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0\r\n",
         "SUMMARY:Bad due\r\n",
         "DUE:not-a-date\r\n",
         "END:VTODO\r\n",
     );
     match from_vcalendar(text, tz_cet(), &list()) {
-        Err(TaskresError::Validation { field, .. }) => assert_eq!(field, "due"),
+        Err(RestaskError::Validation { field, .. }) => assert_eq!(field, "due"),
         other => panic!("expected Validation error, got {other:?}"),
     }
+}
+
+#[test]
+fn legacy_x_properties_and_uid_prefix_still_parse() {
+    let body = crlf(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VTODO\nUID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0\n\
+         DTSTAMP:20260922T143000Z\nSUMMARY:old\nX-TASKRES-SCHEDULED;VALUE=DATE:20260923\n\
+         X-TASKRES-SOURCE;VALUE=TEXT:Home Lab Test.md\nEND:VTODO\nEND:VCALENDAR",
+    );
+    let remote = from_vcalendar(&body, tz_cet(), &list()).unwrap();
+    assert!(remote.managed);
+    assert_eq!(remote.raw_uid, "taskres-01jzetq1v2h3k4m5n6p7r8t9w0");
+    assert_eq!(remote.source_path.as_deref(), Some("Home Lab Test.md"));
+    assert_eq!(
+        remote.task.scheduled,
+        Some(When::Date(LocalDate::parse("2026-09-23").unwrap()))
+    );
 }

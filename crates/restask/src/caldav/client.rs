@@ -24,7 +24,7 @@ use crate::caldav::protocol::{
 };
 use crate::domain::{ListSlug, Task};
 use crate::vtodo::{from_vcalendar, to_vcalendar, RemoteTask};
-use crate::{CaldavErrorKind, TaskresError};
+use crate::{CaldavErrorKind, RestaskError};
 
 /// Standard retry budget (§10.4): 1 s, 2 s, 4 s — four attempts total.
 const DEFAULT_RETRY_DELAYS: [u64; 3] = [1, 2, 4];
@@ -62,7 +62,7 @@ impl CaldavClient {
         base_url: &str,
         username: String,
         password: Option<String>,
-    ) -> Result<Self, TaskresError> {
+    ) -> Result<Self, RestaskError> {
         let delays = DEFAULT_RETRY_DELAYS
             .iter()
             .map(|secs| Duration::from_secs(*secs))
@@ -79,11 +79,11 @@ impl CaldavClient {
         username: String,
         password: Option<String>,
         delays: Vec<Duration>,
-    ) -> Result<Self, TaskresError> {
+    ) -> Result<Self, RestaskError> {
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
-            .map_err(|error| TaskresError::Caldav {
+            .map_err(|error| RestaskError::Caldav {
                 kind: CaldavErrorKind::Network,
                 status: None,
                 detail: format!("http client build failed: {error}"),
@@ -145,7 +145,7 @@ impl CaldavClient {
     }
 
     /// Sends `builder` under the retry budget (§10.4).
-    async fn send(&self, builder: RequestBuilder) -> Result<Response, TaskresError> {
+    async fn send(&self, builder: RequestBuilder) -> Result<Response, RestaskError> {
         let attempts = self.delays.len() + 1;
         let mut attempt = 0;
         loop {
@@ -153,7 +153,7 @@ impl CaldavClient {
                 tokio::time::sleep(self.delays[attempt - 1]).await;
             }
             let Some(outgoing) = builder.try_clone() else {
-                return Err(TaskresError::Caldav {
+                return Err(RestaskError::Caldav {
                     kind: CaldavErrorKind::Protocol,
                     status: None,
                     detail: "request is not replayable for retries".to_string(),
@@ -173,7 +173,7 @@ impl CaldavClient {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if is_retryable_status(status) {
-                        Err(TaskresError::Caldav {
+                        Err(RestaskError::Caldav {
                             kind: CaldavErrorKind::Network,
                             status: Some(status),
                             detail: format!("server error after retry budget: {status}"),
@@ -182,7 +182,7 @@ impl CaldavClient {
                         Ok(response)
                     }
                 }
-                Err(error) => Err(TaskresError::Caldav {
+                Err(error) => Err(RestaskError::Caldav {
                     kind: CaldavErrorKind::Network,
                     status: None,
                     detail: error.to_string(),
@@ -198,7 +198,7 @@ impl CaldavClient {
         url: &str,
         body: Option<String>,
         depth: Option<u8>,
-    ) -> Result<Response, TaskresError> {
+    ) -> Result<Response, RestaskError> {
         let mut builder = self.authenticate(self.http.request(method, url));
         if let Some(depth) = depth {
             builder = builder.header("Depth", depth.to_string());
@@ -210,13 +210,13 @@ impl CaldavClient {
     }
 
     /// Maps an unexpected HTTP status to the §12.1 taxonomy.
-    fn status_error(status: u16, operation: &str) -> TaskresError {
+    fn status_error(status: u16, operation: &str) -> RestaskError {
         let kind = match status {
             401 | 403 => CaldavErrorKind::Auth,
             412 => CaldavErrorKind::Conflict,
             _ => CaldavErrorKind::Protocol,
         };
-        TaskresError::Caldav {
+        RestaskError::Caldav {
             kind,
             status: Some(status),
             detail: format!("{operation} failed: HTTP {status}"),
@@ -228,12 +228,12 @@ impl CaldavClient {
         response: Response,
         expected: &[u16],
         operation: &str,
-    ) -> Result<String, TaskresError> {
+    ) -> Result<String, RestaskError> {
         let status = response.status().as_u16();
         if !expected.contains(&status) {
             return Err(Self::status_error(status, operation));
         }
-        response.text().await.map_err(|error| TaskresError::Caldav {
+        response.text().await.map_err(|error| RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             status: None,
             detail: format!("{operation}: body read failed: {error}"),
@@ -242,13 +242,13 @@ impl CaldavClient {
 
     /// Reads the `ETag` response header; a missing one is a protocol violation because
     /// every later `If-Match` depends on it.
-    fn response_etag(response: &Response, operation: &str) -> Result<String, TaskresError> {
+    fn response_etag(response: &Response, operation: &str) -> Result<String, RestaskError> {
         response
             .headers()
             .get(ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string)
-            .ok_or_else(|| TaskresError::Caldav {
+            .ok_or_else(|| RestaskError::Caldav {
                 kind: CaldavErrorKind::Protocol,
                 status: None,
                 detail: format!("{operation}: response lacks an ETag header"),
@@ -268,8 +268,8 @@ fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
 }
 
 /// Builds an HTTP method constant that is not among reqwest's built-ins.
-fn webdav_method(name: &'static str) -> Result<Method, TaskresError> {
-    Method::from_bytes(name.as_bytes()).map_err(|error| TaskresError::Validation {
+fn webdav_method(name: &'static str) -> Result<Method, RestaskError> {
+    Method::from_bytes(name.as_bytes()).map_err(|error| RestaskError::Validation {
         field: "method",
         reason: error.to_string(),
     })
@@ -281,7 +281,7 @@ fn same_path(a: &str, b: &str) -> bool {
 }
 
 impl CaldavPort for CaldavClient {
-    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, TaskresError> {
+    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError> {
         let response = self
             .request(
                 webdav_method("PROPFIND")?,
@@ -307,7 +307,7 @@ impl CaldavPort for CaldavClient {
             .collect())
     }
 
-    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), TaskresError> {
+    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError> {
         let probe = self
             .request(
                 webdav_method("PROPFIND")?,
@@ -340,7 +340,7 @@ impl CaldavPort for CaldavClient {
         }
     }
 
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, TaskresError> {
+    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError> {
         let response = self
             .request(
                 webdav_method("REPORT")?,
@@ -357,7 +357,7 @@ impl CaldavPort for CaldavClient {
         &self,
         slug: &ListSlug,
         name: &str,
-    ) -> Result<Option<(RemoteTask, String)>, TaskresError> {
+    ) -> Result<Option<(RemoteTask, String)>, RestaskError> {
         let response = self
             .request(Method::GET, &self.resource_url(slug, name), None, None)
             .await?;
@@ -368,7 +368,7 @@ impl CaldavPort for CaldavClient {
                 let body = response
                     .text()
                     .await
-                    .map_err(|error| TaskresError::Caldav {
+                    .map_err(|error| RestaskError::Caldav {
                         kind: CaldavErrorKind::Network,
                         status: None,
                         detail: format!("fetch: body read failed: {error}"),
@@ -381,7 +381,7 @@ impl CaldavPort for CaldavClient {
         }
     }
 
-    async fn put(&self, task: &Task) -> Result<String, TaskresError> {
+    async fn put(&self, task: &Task) -> Result<String, RestaskError> {
         let name = task.uid.as_str();
         let url = self.resource_url(&task.list, name);
         let path = self.resource_path(&task.list, name);
@@ -414,7 +414,7 @@ impl CaldavPort for CaldavClient {
         slug: &ListSlug,
         name: &str,
         etag: Option<&str>,
-    ) -> Result<(), TaskresError> {
+    ) -> Result<(), RestaskError> {
         let mut builder = self.authenticate(
             self.http
                 .request(Method::DELETE, self.resource_url(slug, name)),

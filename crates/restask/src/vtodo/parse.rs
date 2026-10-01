@@ -12,23 +12,23 @@ use crate::domain::dates::{LocalDate, LocalDateTime, When};
 use crate::domain::priority::Priority;
 use crate::domain::task::{ListSlug, SourceRef, Status, Task};
 use crate::domain::uid::TaskUid;
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// A VTODO resource fetched from a CalDAV collection (§8.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteTask {
     /// `UID` property verbatim.
     pub raw_uid: String,
-    /// `true` when `raw_uid` parses as a [`TaskUid`] (i.e. a Taskres-managed resource).
+    /// `true` when `raw_uid` parses as a [`TaskUid`] (i.e. a Restask-managed resource).
     pub managed: bool,
     /// Parsed task; when `!managed`, `uid` is a placeholder the engine replaces on adoption.
     pub task: Task,
-    /// `X-TASKRES-SOURCE` value — the vault-relative path the task routes back to.
+    /// `X-RESTASK-SOURCE` value — the vault-relative path the task routes back to.
     pub source_path: Option<String>,
 }
 
 /// Placeholder UID for foreign (unmanaged) tasks; the engine replaces it on adoption.
-const PLACEHOLDER_UID: &str = "taskres-00000000000000000000000000";
+const PLACEHOLDER_UID: &str = "restask-00000000000000000000000000";
 
 /// Parses an iCalendar body into a [`RemoteTask`] (§8.2).
 ///
@@ -39,7 +39,7 @@ pub fn from_vcalendar(
     text: &str,
     tz: FixedOffset,
     collection: &ListSlug,
-) -> Result<RemoteTask, TaskresError> {
+) -> Result<RemoteTask, RestaskError> {
     let props = collect_vtodo_properties(unfold(text));
     let mut raw_uid: Option<String> = None;
     let mut dtstamp: Option<DateTime<Utc>> = None;
@@ -71,7 +71,9 @@ pub fn from_vcalendar(
             "PRIORITY" => priority = prop.value.trim().parse::<u8>().ok(),
             "DUE" => due = Some(when(prop, tz, "due")?),
             "DTSTART" => start = Some(when(prop, tz, "dtstart")?),
-            "X-TASKRES-SCHEDULED" => scheduled = Some(when(prop, tz, "scheduled")?),
+            "X-RESTASK-SCHEDULED" | "X-TASKRES-SCHEDULED" => {
+                scheduled = Some(when(prop, tz, "scheduled")?)
+            }
             "RELATED-TO" => {
                 let is_parent = prop.params.is_empty()
                     || prop.params.iter().any(|(name, value)| {
@@ -81,7 +83,7 @@ pub fn from_vcalendar(
                     parent = Some(prop.value.clone());
                 }
             }
-            "X-TASKRES-SOURCE" if source_path.is_none() => {
+            "X-RESTASK-SOURCE" | "X-TASKRES-SOURCE" if source_path.is_none() => {
                 source_path = Some(unescape_text(&prop.value));
             }
             _ => {}
@@ -100,7 +102,7 @@ pub fn from_vcalendar(
     let task = Task {
         uid: TaskUid::parse(&raw_uid).unwrap_or_else(|_| placeholder_uid()),
         list: collection.clone(),
-        text: summary.ok_or_else(|| TaskresError::Validation {
+        text: summary.ok_or_else(|| RestaskError::Validation {
             field: "summary",
             reason: "VTODO has no SUMMARY property".to_string(),
         })?,
@@ -252,7 +254,7 @@ fn collect_vtodo_properties(lines: Vec<String>) -> Vec<Property> {
 }
 
 /// Parses an iCalendar UTC instant (`YYYYMMDDTHHMMSSZ`) into a `DateTime<Utc>`.
-fn instant(prop: &Property, field: &'static str) -> Result<DateTime<Utc>, TaskresError> {
+fn instant(prop: &Property, field: &'static str) -> Result<DateTime<Utc>, RestaskError> {
     let value = prop.value.trim();
     let body = value
         .strip_suffix('Z')
@@ -265,7 +267,7 @@ fn instant(prop: &Property, field: &'static str) -> Result<DateTime<Utc>, Taskre
 /// Parses a date property (§4): `VALUE=DATE` stays date-only, a floating date-time stays
 /// floating, a `Z`-suffixed instant and a `TZID`-qualified date-time are converted to
 /// device-local wall time via `tz` (chrono-tz lookup by name).
-fn when(prop: &Property, tz: FixedOffset, field: &'static str) -> Result<When, TaskresError> {
+fn when(prop: &Property, tz: FixedOffset, field: &'static str) -> Result<When, RestaskError> {
     let value = prop.value.trim();
     if let Some(tzid) = prop.param("TZID") {
         let naive = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
@@ -302,8 +304,8 @@ fn local_fallback(naive: NaiveDateTime, tz: FixedOffset) -> DateTime<Utc> {
 }
 
 /// Builds a validation error for a malformed property value.
-fn invalid(field: &'static str, value: &str) -> TaskresError {
-    TaskresError::Validation {
+fn invalid(field: &'static str, value: &str) -> RestaskError {
+    RestaskError::Validation {
         field,
         reason: format!("malformed iCalendar value `{value}`"),
     }

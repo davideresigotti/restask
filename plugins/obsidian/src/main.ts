@@ -1,5 +1,5 @@
 /**
- * Taskres Obsidian plugin (docs/spec/integrations.md §15.4): commands + settings.
+ * Restask Obsidian plugin (docs/spec/integrations.md §15.4): commands + settings.
  *
  * This file isolates every Obsidian API call; markdown.ts, modal.ts and vtodo.ts stay
  * API-free and unit-testable (AGENTS.md §3). The plugin mutates Markdown and mirrors
@@ -11,7 +11,7 @@ import { App, Editor, MarkdownView, Notice, Plugin, SuggestModal, TFile, normali
 import { linkParents, parse, parseLine, type TaskDraft } from "./markdown";
 import { suggestionsFor, type Suggestion } from "./modal";
 import { formatUtc, writeCacheFile, type AdapterPort, type CacheTask } from "./vtodo";
-import { DEFAULT_SETTINGS, TaskresSettingTab, type TaskresSettings } from "./settings";
+import { DEFAULT_SETTINGS, RestaskSettingTab, type RestaskSettings } from "./settings";
 
 /** Device-local calendar date `YYYY-MM-DD` (§3.3) — wall clock is allowed only here. */
 function localToday(now: Date): string {
@@ -31,7 +31,7 @@ function flipCheck(raw: string, checked: boolean): string {
 function withCompletedToken(raw: string, today: string): string {
 	const insertion = `✅ ${today}`;
 	const plus = raw.search(/➕[ \t]+\d{4}-\d{2}-\d{2}/);
-	const anchor = plus >= 0 ? plus : raw.search(/🆔[ \t]+taskres-/);
+	const anchor = plus >= 0 ? plus : raw.search(/🆔[ \t]+(?:restask|taskres)-/);
 	if (anchor >= 0) {
 		return `${raw.slice(0, anchor).replace(/[ \t]+$/, "")} ${insertion} ${raw.slice(anchor)}`;
 	}
@@ -71,13 +71,13 @@ class MetadataModal extends SuggestModal<Suggestion> {
 	}
 }
 
-/** The Taskres plugin: three commands (§15.4) over the pure markdown/modal/vtodo cores. */
-export default class TaskresPlugin extends Plugin {
-	settings: TaskresSettings = DEFAULT_SETTINGS;
+/** The Restask plugin: three commands (§15.4) over the pure markdown/modal/vtodo cores. */
+export default class RestaskPlugin extends Plugin {
+	settings: RestaskSettings = DEFAULT_SETTINGS;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
-		this.addSettingTab(new TaskresSettingTab(this.app, this));
+		this.addSettingTab(new RestaskSettingTab(this.app, this));
 
 		this.addCommand({
 			id: "toggle-task-done",
@@ -129,12 +129,12 @@ export default class TaskresPlugin extends Plugin {
 		try {
 			await writeCacheFile(this.adapter, cacheTask, formatUtc(new Date()));
 		} catch (error) {
-			console.error("Taskres: cache mirror failed", error);
+			console.error("Restask: cache mirror failed", error);
 		}
 	}
 
 	/**
-	 * `Taskres: Toggle task done` (§15.4): flips the cursor line's checkbox, adds/removes
+	 * `Restask: Toggle task done` (§15.4): flips the cursor line's checkbox, adds/removes
 	 * `✅ <today>`, on completion moves the line under the Done heading newest-on-top
 	 * (creating a level-3 heading at EOF per §6.3), then updates the cache file.
 	 */
@@ -143,7 +143,7 @@ export default class TaskresPlugin extends Plugin {
 		const raw = editor.getLine(lineIdx);
 		const task = parseLine(raw);
 		if (task === undefined) {
-			new Notice("Taskres: the cursor is not on a task line.");
+			new Notice("Restask: the cursor is not on a task line.");
 			return;
 		}
 
@@ -190,7 +190,7 @@ export default class TaskresPlugin extends Plugin {
 		}
 	}
 
-	/** `Taskres: Sync now` (§15.4): best-effort cache refresh of the visible file's tasks. */
+	/** `Restask: Sync now` (§15.4): best-effort cache refresh of the visible file's tasks. */
 	private async syncNow(): Promise<void> {
 		if (!this.settings.enableCacheMirror) return;
 		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -210,10 +210,10 @@ export default class TaskresPlugin extends Plugin {
 				);
 				refreshed += 1;
 			} catch (error) {
-				console.error("Taskres: cache refresh failed", error);
+				console.error("Restask: cache refresh failed", error);
 			}
 		}
-		new Notice(`Taskres: refreshed ${refreshed} cache ${refreshed === 1 ? "entry" : "entries"}.`);
+		new Notice(`Restask: refreshed ${refreshed} cache ${refreshed === 1 ? "entry" : "entries"}.`);
 	}
 
 	private cacheTaskFor(

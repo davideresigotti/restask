@@ -1,4 +1,4 @@
-# Taskres Spec — CalDAV Protocol (§10)
+# Restask Spec — CalDAV Protocol (§10)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -25,13 +25,13 @@ pub fn xml_unescape(s: &str) -> String;               // &amp; &lt; &gt; &quot; 
 pub struct CollectionInfo { pub href: String, pub slug: String, pub display_name: Option<String>, pub supports_vtodo: bool }
 
 pub trait CaldavPort: Clone + Send + Sync + 'static {
-    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, TaskresError>;          // PROPFIND depth 1 at <url>/<user>/
-    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), TaskresError>; // PROPFIND; MKCOL if absent
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, TaskresError>;   // REPORT (10.1)
-    async fn fetch(&self, slug: &ListSlug, name: &str) -> Result<Option<(RemoteTask, String)>, TaskresError>; // GET → (task, etag)
-    async fn put(&self, task: &Task) -> Result<String, TaskresError>;     // PUT <url>/<user>/<list>/<uid>.ics; If-None-Match:* on create,
+    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError>;          // PROPFIND depth 1 at <url>/<user>/
+    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError>; // PROPFIND; MKCOL if absent
+    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError>;   // REPORT (10.1)
+    async fn fetch(&self, slug: &ListSlug, name: &str) -> Result<Option<(RemoteTask, String)>, RestaskError>; // GET → (task, etag)
+    async fn put(&self, task: &Task) -> Result<String, RestaskError>;     // PUT <url>/<user>/<list>/<uid>.ics; If-None-Match:* on create,
                                                                            // If-Match:<etag> when known; returns new etag
-    async fn delete(&self, slug: &ListSlug, name: &str, etag: Option<&str>) -> Result<(), TaskresError>;
+    async fn delete(&self, slug: &ListSlug, name: &str, etag: Option<&str>) -> Result<(), RestaskError>;
 }
 ```
 
@@ -47,5 +47,5 @@ Network errors, 5xx, 429 → backoff 1 s, 2 s, 4 s (4 attempts total). `401/403`
 
 Bound collections (e.g. existing `university`, `inbox` event calendars) may hold foreign resources:
 - **VEVENTs are never read, written, or deleted.** The `REPORT` comp-filter `VTODO` excludes them from listings entirely.
-- Foreign **VTODOs** (UID not `taskres-*`, e.g. created in Tasks.org inside the list) are **adopted** (§11 R5).
-- Only resources whose name/UID matches `taskres-*` are managed.
+- Foreign **VTODOs** (UID not `restask-*`, e.g. created in Tasks.org inside the list) are **adopted** (§11 R5).
+- Only resources whose name/UID matches `restask-*` are managed.

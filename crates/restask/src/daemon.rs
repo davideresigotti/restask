@@ -18,7 +18,7 @@ use crate::caldav::CaldavPort;
 use crate::config::{MachineConfig, VaultConfig};
 use crate::domain::{Clock, SystemClock};
 use crate::sync::engine::{Engine, ReconcileReport};
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Daemon knobs (§13.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +47,7 @@ pub async fn run_once(
     vault: &Path,
     machine: &MachineConfig,
     clock: Arc<dyn Clock>,
-) -> Result<ReconcileReport, TaskresError> {
+) -> Result<ReconcileReport, RestaskError> {
     let caldav = build_client(machine)?;
     run_once_with(vault, machine, clock, caldav).await
 }
@@ -58,7 +58,7 @@ pub async fn run_once_with<C: CaldavPort>(
     machine: &MachineConfig,
     clock: Arc<dyn Clock>,
     caldav: C,
-) -> Result<ReconcileReport, TaskresError> {
+) -> Result<ReconcileReport, RestaskError> {
     let cfg = load_vault_config(vault)?;
     let engine = Engine::new(vault, cfg, machine.clone(), caldav, clock);
     engine.reconcile().await
@@ -71,7 +71,7 @@ pub async fn run(
     machine: MachineConfig,
     dc: DaemonConfig,
     shutdown: watch::Receiver<bool>,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     let caldav = build_client(&machine)?;
     run_with(vault, machine, dc, shutdown, caldav, Arc::new(SystemClock)).await
 }
@@ -84,7 +84,7 @@ pub async fn run_with<C: CaldavPort>(
     mut shutdown: watch::Receiver<bool>,
     caldav: C,
     clock: Arc<dyn Clock>,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     let cfg = load_vault_config(&vault)?;
     let engine = Arc::new(Engine::new(&vault, cfg, machine, caldav, clock));
 
@@ -173,7 +173,7 @@ impl DebounceQueue {
 fn spawn_watcher(
     vault: &Path,
     tx: mpsc::UnboundedSender<PathBuf>,
-) -> Result<notify::RecommendedWatcher, TaskresError> {
+) -> Result<notify::RecommendedWatcher, RestaskError> {
     let mut watcher =
         notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
             if let Ok(event) = event {
@@ -184,13 +184,13 @@ fn spawn_watcher(
                 }
             }
         })
-        .map_err(|error| TaskresError::Validation {
+        .map_err(|error| RestaskError::Validation {
             field: "watcher",
             reason: error.to_string(),
         })?;
     watcher
         .watch(vault, notify::RecursiveMode::Recursive)
-        .map_err(|error| TaskresError::Validation {
+        .map_err(|error| RestaskError::Validation {
             field: "watcher",
             reason: error.to_string(),
         })?;
@@ -198,12 +198,12 @@ fn spawn_watcher(
 }
 
 /// Builds the real CalDAV client from the machine config (§10.3, §14.2).
-pub(crate) fn build_client(machine: &MachineConfig) -> Result<CaldavClient, TaskresError> {
+pub(crate) fn build_client(machine: &MachineConfig) -> Result<CaldavClient, RestaskError> {
     let url = machine
         .caldav
         .url
         .clone()
-        .ok_or_else(|| TaskresError::Config {
+        .ok_or_else(|| RestaskError::Config {
             path: crate::config::machine_config_path().display().to_string(),
             reason: "no CalDAV url configured (run `restask setup`)".to_string(),
         })?;
@@ -211,23 +211,23 @@ pub(crate) fn build_client(machine: &MachineConfig) -> Result<CaldavClient, Task
         .caldav
         .username
         .clone()
-        .ok_or_else(|| TaskresError::Config {
+        .ok_or_else(|| RestaskError::Config {
             path: crate::config::machine_config_path().display().to_string(),
             reason: "no CalDAV username configured (run `restask setup`)".to_string(),
         })?;
     let password = machine
         .resolved_password()
-        .map_err(|error| TaskresError::Config {
+        .map_err(|error| RestaskError::Config {
             path: crate::config::machine_config_path().display().to_string(),
             reason: error.to_string(),
         })?;
     CaldavClient::new(&url, username, password)
 }
 
-/// Loads `<vault>/restask.toml`, mapping config failures to [`TaskresError::Config`].
-fn load_vault_config(vault: &Path) -> Result<VaultConfig, TaskresError> {
+/// Loads `<vault>/restask.toml`, mapping config failures to [`RestaskError::Config`].
+fn load_vault_config(vault: &Path) -> Result<VaultConfig, RestaskError> {
     let path = vault.join("restask.toml");
-    VaultConfig::load(&path).map_err(|error| TaskresError::Config {
+    VaultConfig::load(&path).map_err(|error| RestaskError::Config {
         path: path.display().to_string(),
         reason: error.to_string(),
     })

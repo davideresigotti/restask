@@ -8,8 +8,8 @@ const VALID_BODY: &str = "01jzabcdefghjkmnpqrstvwxyz";
 fn generated_uid_has_canonical_shape() {
     let uid = TaskUid::generate();
     let s = uid.as_str();
-    assert!(s.starts_with("taskres-"), "missing prefix: {s}");
-    let body = &s["taskres-".len()..];
+    assert!(s.starts_with("restask-"), "missing prefix: {s}");
+    let body = &s["restask-".len()..];
     assert_eq!(body.len(), 26, "body length: {s}");
     assert!(
         body.bytes()
@@ -37,8 +37,8 @@ fn parse_round_trip_and_display() {
 
 #[test]
 fn parse_trims_and_lowercases() {
-    let uid = TaskUid::parse(format!("  TASKRES-{VALID_BODY}  ").as_str()).unwrap();
-    assert_eq!(uid.as_str(), format!("taskres-{VALID_BODY}"));
+    let uid = TaskUid::parse(format!("  RESTASK-{VALID_BODY}  ").as_str()).unwrap();
+    assert_eq!(uid.as_str(), format!("restask-{VALID_BODY}"));
 }
 
 #[test]
@@ -48,11 +48,11 @@ fn parse_rejects_invalid() {
         "   ",
         VALID_BODY,
         &format!("other-{VALID_BODY}"),
-        &format!("taskres-{}", &VALID_BODY[..25]),
-        &format!("taskres-{VALID_BODY}0"),
-        &format!("taskres-{}i", &VALID_BODY[..25]),
-        &format!("taskres-{}u", &VALID_BODY[..25]),
-        &format!("taskres-{}-", &VALID_BODY[..25]),
+        &format!("restask-{}", &VALID_BODY[..25]),
+        &format!("restask-{VALID_BODY}0"),
+        &format!("restask-{}i", &VALID_BODY[..25]),
+        &format!("restask-{}u", &VALID_BODY[..25]),
+        &format!("restask-{}-", &VALID_BODY[..25]),
     ];
     for bad in invalid {
         let err: UidError = TaskUid::parse(bad).unwrap_err();
@@ -68,4 +68,16 @@ fn serde_round_trip() {
     assert_eq!(json, format!("\"{}\"", uid.as_str()));
     let back: TaskUid = serde_json::from_str(&json).unwrap();
     assert_eq!(back, uid);
+}
+
+#[test]
+fn legacy_prefix_parses_and_is_kept_verbatim() {
+    let legacy = format!("taskres-{VALID_BODY}");
+    let uid = TaskUid::parse(&legacy).unwrap();
+    assert_eq!(
+        uid.as_str(),
+        legacy,
+        "legacy UIDs are eternal, never rewritten"
+    );
+    assert!(TaskUid::generate().as_str().starts_with("restask-"));
 }

@@ -20,7 +20,7 @@ use crate::store::index::{Index, IndexEntry};
 use crate::store::outbox::{OutboundOp, Outbox};
 use crate::store::tombstones::Tombstones;
 use crate::sync::planner::{self, InsertTarget, MarkdownOp, Snapshots};
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Summary of one reconciliation pass (§13.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -89,7 +89,7 @@ impl<C: CaldavPort> Engine<C> {
     /// Performs one full reconciliation (§13.1 `run_once` core): flush the outbox, scan and
     /// register the vault, build snapshots, execute the planner's ops, persist state, and
     /// re-render TODO.md when the plan asks for it.
-    pub async fn reconcile(&self) -> Result<ReconcileReport, TaskresError> {
+    pub async fn reconcile(&self) -> Result<ReconcileReport, RestaskError> {
         let mut report = ReconcileReport::default();
         let now = self.clock.now_utc();
 
@@ -364,7 +364,7 @@ impl<C: CaldavPort> Engine<C> {
 
     /// Registers any new tasks in `path` and runs a full reconcile (§13.1 fs-change path;
     /// the daemon debounces before calling this).
-    pub async fn handle_fs_change(&self, path: &Path) -> Result<ReconcileReport, TaskresError> {
+    pub async fn handle_fs_change(&self, path: &Path) -> Result<ReconcileReport, RestaskError> {
         tracing::debug!(path = %path.display(), "fs_event");
         self.reconcile().await
     }
@@ -376,7 +376,7 @@ impl<C: CaldavPort> Engine<C> {
         text: &str,
         priority: Option<Priority>,
         due: Option<When>,
-    ) -> Result<Task, TaskresError> {
+    ) -> Result<Task, RestaskError> {
         let now = self.clock.now_utc();
         let task = Task {
             uid: TaskUid::generate(),
@@ -435,13 +435,13 @@ impl<C: CaldavPort> Engine<C> {
     /// Completes or reopens a task: applies the status mutation plus the done-region
     /// move/restore to its source file, then runs a full reconcile (§13.3 `restask
     /// done/undone`).
-    pub async fn set_done(&self, uid: &TaskUid, done: bool) -> Result<Task, TaskresError> {
+    pub async fn set_done(&self, uid: &TaskUid, done: bool) -> Result<Task, RestaskError> {
         let scan = self.scan_vault()?;
         let task = scan
             .local
             .get(uid)
             .cloned()
-            .ok_or_else(|| TaskresError::Validation {
+            .ok_or_else(|| RestaskError::Validation {
                 field: "uid",
                 reason: format!("task {uid} not found in the vault"),
             })?;
@@ -475,8 +475,8 @@ impl<C: CaldavPort> Engine<C> {
 
     /// Walks the vault (sorted, tracked files only), routes every note, registers
     /// unregistered task lines, and builds the local task set.
-    fn scan_vault(&self) -> Result<VaultScan, TaskresError> {
-        let matchers = self.cfg.matchers().map_err(|error| TaskresError::Config {
+    fn scan_vault(&self) -> Result<VaultScan, RestaskError> {
+        let matchers = self.cfg.matchers().map_err(|error| RestaskError::Config {
             path: self.vault.join("restask.toml").display().to_string(),
             reason: error.to_string(),
         })?;
@@ -530,8 +530,8 @@ impl<C: CaldavPort> Engine<C> {
 
     /// The inbox list (§5.2): the inbox file routes to `vault.inbox_list` (§14.1), whose
     /// slug names the CalDAV collection the user bound TODO.md to during setup.
-    fn inbox_list(&self) -> Result<ListSlug, TaskresError> {
-        ListSlug::from_name(&self.cfg.inbox_list).map_err(|_| TaskresError::Validation {
+    fn inbox_list(&self) -> Result<ListSlug, RestaskError> {
+        ListSlug::from_name(&self.cfg.inbox_list).map_err(|_| RestaskError::Validation {
             field: "inbox_list",
             reason: format!(
                 "cannot slugify the inbox list name `{}`",
@@ -548,7 +548,7 @@ impl<C: CaldavPort> Engine<C> {
         list: &ListSlug,
         scan: &mut VaultScan,
         seen: &mut BTreeMap<TaskUid, String>,
-    ) -> Result<(), TaskresError> {
+    ) -> Result<(), RestaskError> {
         let parsed = markdown::parse(contents, &self.cfg);
         let registers: Vec<Mutation> = parsed
             .tasks
@@ -594,7 +594,7 @@ impl<C: CaldavPort> Engine<C> {
                 continue;
             };
             if let Some(first) = seen.insert(uid.clone(), path.to_string()) {
-                return Err(TaskresError::UidConflict {
+                return Err(RestaskError::UidConflict {
                     uid,
                     a: first,
                     b: path.to_string(),
@@ -638,7 +638,7 @@ impl<C: CaldavPort> Engine<C> {
 
     /// Loads the VTODO cache (`.restask/tasks/*.ics`), overwriting each task's list from
     /// the index (routing truth, D30).
-    fn load_cache(&self, index: &Index) -> Result<BTreeMap<TaskUid, Task>, TaskresError> {
+    fn load_cache(&self, index: &Index) -> Result<BTreeMap<TaskUid, Task>, RestaskError> {
         let mut map = BTreeMap::new();
         let entries = match std::fs::read_dir(self.state_dir.join("tasks")) {
             Ok(entries) => entries,
@@ -668,7 +668,7 @@ impl<C: CaldavPort> Engine<C> {
 
     /// Applies line mutations to one vault file (single pass) and writes it back
     /// atomically. Returns the number of applied mutations.
-    fn apply_file(&self, path: &str, mutations: &[Mutation]) -> Result<usize, TaskresError> {
+    fn apply_file(&self, path: &str, mutations: &[Mutation]) -> Result<usize, RestaskError> {
         let file = self.vault.join(path);
         let contents = std::fs::read_to_string(&file)?;
         let out = mutator::apply(&contents, mutations, &self.cfg, self.clock.as_ref())?;
@@ -677,7 +677,7 @@ impl<C: CaldavPort> Engine<C> {
     }
 
     /// Executes one [`MarkdownOp::Insert`] against the vault.
-    fn insert_task(&self, task: &Task, target: &InsertTarget) -> Result<(), TaskresError> {
+    fn insert_task(&self, task: &Task, target: &InsertTarget) -> Result<(), RestaskError> {
         match target {
             // The line materializes through the TODO.md re-render (R10).
             InsertTarget::TodoInbox => Ok(()),
@@ -703,7 +703,7 @@ impl<C: CaldavPort> Engine<C> {
                     .tasks
                     .iter()
                     .find(|task| task.draft.uid.as_ref() == Some(after_uid))
-                    .ok_or_else(|| TaskresError::Validation {
+                    .ok_or_else(|| RestaskError::Validation {
                         field: "parent",
                         reason: format!("parent {after_uid} not found in {path}"),
                     })?;
@@ -756,7 +756,7 @@ fn dominant_ending(contents: &str) -> &'static str {
 }
 
 /// File mtime as a UTC instant.
-fn file_mtime(path: &Path) -> Result<DateTime<Utc>, TaskresError> {
+fn file_mtime(path: &Path) -> Result<DateTime<Utc>, RestaskError> {
     let modified = std::fs::metadata(path)?.modified()?;
     Ok(modified.into())
 }
@@ -767,7 +767,7 @@ fn walk(
     relative: &str,
     matchers: &VaultMatchers,
     out: &mut Vec<(String, String)>,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();

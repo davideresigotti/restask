@@ -6,7 +6,7 @@ use restask::domain::dates::{LocalDate, When};
 use restask::domain::priority::Priority;
 use restask::domain::task::{ListSlug, SourceRef, Status, Task};
 use restask::domain::uid::TaskUid;
-use restask::TaskresError;
+use restask::RestaskError;
 
 fn slug_of(name: &str) -> String {
     ListSlug::from_name(name).unwrap().as_str().to_string()
@@ -20,7 +20,7 @@ fn ts(s: &str) -> chrono::DateTime<Utc> {
 
 fn sample_task() -> Task {
     Task {
-        uid: TaskUid::parse("taskres-01arz3ndektsv4rrffq69g5fav").unwrap(),
+        uid: TaskUid::parse("restask-01arz3ndektsv4rrffq69g5fav").unwrap(),
         list: ListSlug::from_name("Home Lab").unwrap(),
         text: "Fix the router".to_string(),
         status: Status::Active,
@@ -75,7 +75,7 @@ fn slug_rejects_empty_result() {
         assert!(
             matches!(
                 ListSlug::from_name(bad),
-                Err(TaskresError::Validation { field: "list", .. })
+                Err(RestaskError::Validation { field: "list", .. })
             ),
             "input {bad:?}"
         );
@@ -131,7 +131,7 @@ fn thumbprint_changes_on_canonical_fields() {
     let variants = [
         (
             "uid",
-            mutated(|t| t.uid = TaskUid::parse("taskres-01arz3ndektsv4rrffq69g5faw").unwrap()),
+            mutated(|t| t.uid = TaskUid::parse("restask-01arz3ndektsv4rrffq69g5faw").unwrap()),
         ),
         (
             "list",
@@ -166,7 +166,7 @@ fn thumbprint_changes_on_canonical_fields() {
         (
             "parent",
             mutated(|t| {
-                t.parent = Some(TaskUid::parse("taskres-01arz3ndektsv4rrffq69g5fav").unwrap())
+                t.parent = Some(TaskUid::parse("restask-01arz3ndektsv4rrffq69g5fav").unwrap())
             }),
         ),
     ];

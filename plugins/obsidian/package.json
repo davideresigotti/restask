@@ -1,7 +1,7 @@
 {
-  "name": "taskres",
+  "name": "restask",
   "version": "0.1.0",
-  "description": "Taskres: Markdown checkboxes ⇄ VTODO (CalDAV) sync",
+  "description": "Restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync",
   "main": "main.js",
   "scripts": {
     "lint": "tsc --noEmit",

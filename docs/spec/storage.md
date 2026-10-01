@@ -1,4 +1,4 @@
-# Taskres Spec — Storage & State — .restask/ (§9)
+# Restask Spec — Storage & State — .restask/ (§9)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -25,8 +25,8 @@ pub struct IndexEntry {
 }
 pub struct Index { pub entries: std::collections::BTreeMap<TaskUid, IndexEntry> }
 impl Index {
-    pub fn load(dir: &Path) -> Result<Index, TaskresError>;      // missing file → empty
-    pub fn save(&self, dir: &Path) -> Result<(), TaskresError>;  // atomic tmp+rename
+    pub fn load(dir: &Path) -> Result<Index, RestaskError>;      // missing file → empty
+    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;  // atomic tmp+rename
     pub fn get(&self, uid: &TaskUid) -> Option<&IndexEntry>;
     pub fn upsert(&mut self, e: IndexEntry);
     pub fn remove(&mut self, uid: &TaskUid);
@@ -40,8 +40,8 @@ impl Index {
 ```rust
 pub struct Tombstones(std::collections::BTreeMap<TaskUid, chrono::DateTime<chrono::Utc>>);
 impl Tombstones {
-    pub fn load(dir: &Path) -> Result<Self, TaskresError>;
-    pub fn save(&self, dir: &Path) -> Result<(), TaskresError>;
+    pub fn load(dir: &Path) -> Result<Self, RestaskError>;
+    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;
     pub fn insert(&mut self, uid: TaskUid, at: chrono::DateTime<chrono::Utc>);
     pub fn contains(&self, uid: &TaskUid) -> bool;
     pub fn prune(&mut self, older_than: chrono::Duration);
@@ -49,14 +49,14 @@ impl Tombstones {
 
 pub fn cache_path(dir: &Path, uid: &TaskUid) -> std::path::PathBuf;  // .restask/tasks/<uid>.ics
 pub fn cache_read(dir: &Path, uid: &TaskUid, tz: chrono::FixedOffset) -> Option<Task>;
-pub fn cache_write(dir: &Path, task: &Task, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), TaskresError>;
-pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), TaskresError>;
+pub fn cache_write(dir: &Path, task: &Task, now_utc: chrono::DateTime<chrono::Utc>) -> Result<(), RestaskError>;
+pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), RestaskError>;
 
 pub enum OutboundOp { Put { task: Task }, Delete { uid: TaskUid, list: ListSlug, etag: Option<String> } }
 pub struct Outbox { queue: std::collections::VecDeque<OutboundOp> }
 impl Outbox {
-    pub fn load(dir: &Path) -> Result<Self, TaskresError>;
-    pub fn save(&self, dir: &Path) -> Result<(), TaskresError>;
+    pub fn load(dir: &Path) -> Result<Self, RestaskError>;
+    pub fn save(&self, dir: &Path) -> Result<(), RestaskError>;
     pub fn push(&mut self, op: OutboundOp);
     pub fn take_all(&mut self) -> Vec<OutboundOp>;
 }

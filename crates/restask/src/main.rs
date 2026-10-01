@@ -1,4 +1,4 @@
-//! Taskres CLI entry point.
+//! Restask CLI entry point.
 
 mod logging;
 

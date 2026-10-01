@@ -1,4 +1,4 @@
-# Taskres Spec — Markdown Grammar, Mutation & TODO.md View (§6–§7)
+# Restask Spec — Markdown Grammar, Mutation & TODO.md View (§6–§7)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -24,7 +24,7 @@ Metadata tokens are extracted from `body` anywhere after the first non-space cha
 | Scheduled | `⏳[ \t]+(…same pattern…)` | `scheduled` |
 | Completed | `✅[ \t]+(\d{4}-\d{2}-\d{2})` | `completed_on` |
 | Created | `➕[ \t]+(\d{4}-\d{2}-\d{2})` | `created` |
-| UID | `🆔[ \t]+(taskres-[0-9a-z]{26})` | `uid` |
+| UID | `🆔[ \t]+(restask-[0-9a-z]{26})` | `uid` |
 
 `text` = body with all matched token spans removed, then end-trimmed and internal runs of spaces/tabs collapsed to single spaces. `checked = true` for `[x]`/`[X]`.
 
@@ -77,10 +77,10 @@ pub struct MutationOutcome { pub contents: String, pub applied: Vec<Mutation>, p
 /// Pure string→string. Locates lines by 🆔 token; rewrites the metadata tail canonically;
 /// NEVER alters task text except via EditText; preserves indentation, list marker, and
 /// non-task lines byte-for-byte.
-pub fn apply(contents: &str, ops: &[Mutation], cfg: &VaultConfig, clock: &dyn Clock) -> Result<MutationOutcome, TaskresError>;
+pub fn apply(contents: &str, ops: &[Mutation], cfg: &VaultConfig, clock: &dyn Clock) -> Result<MutationOutcome, RestaskError>;
 
 /// Write via `<dir>/.<name>.restask-tmp` + fsync + rename (same directory ⇒ atomic on POSIX).
-pub fn write_atomic(path: &Path, contents: &str) -> Result<(), TaskresError>;
+pub fn write_atomic(path: &Path, contents: &str) -> Result<(), RestaskError>;
 ```
 
 Done-heading creation: append `\n<blank>\n### Done\n` (level 3) at end of file. The inbox file always carries `## Done` (§7), so creation only applies to vault notes.
@@ -103,10 +103,10 @@ restask-list: inbox
 # TODO
 
 ## Inbox
-- [ ] Buy milk ➕ 2026-09-22 🆔 taskres-01jz…
+- [ ] Buy milk ➕ 2026-09-22 🆔 restask-01jz…
 
 ## 🔺 Highest Priority
-- [ ] Setup SSL certificate renew alert 🔺 [[Home Lab Test#TODO|Home Lab Test]] 🆔 taskres-01jz…
+- [ ] Setup SSL certificate renew alert 🔺 [[Home Lab Test#TODO|Home Lab Test]] 🆔 restask-01jz…
 
 ## ⏫ High Priority
 …
@@ -118,7 +118,7 @@ restask-list: inbox
 …
 
 ## Done
-- [x] Take out trash 🔽 ✅ 2026-09-19 🆔 taskres-01jz…
+- [x] Take out trash 🔽 ✅ 2026-09-19 🆔 restask-01jz…
 ```
 
 Rules:

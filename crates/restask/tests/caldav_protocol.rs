@@ -75,14 +75,14 @@ fn propfind_body_requests_collection_properties() {
 const ETAGS_MULTISTATUS: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:">
  <D:response>
-  <D:href>/me/inbox/taskres-01jzq4tsvg2c9xkw7n5m8rhdpb.ics</D:href>
+  <D:href>/me/inbox/restask-01jzq4tsvg2c9xkw7n5m8rhdpb.ics</D:href>
   <D:propstat>
    <D:prop><D:getetag>"660d02eccf4b0b45"</D:getetag></D:prop>
    <D:status>HTTP/1.1 200 OK</D:status>
   </D:propstat>
  </D:response>
  <D:response>
-  <D:href>/me/inbox/taskres-01jzq4tsvg2c9xkw7n5m8rhdpc.ics</D:href>
+  <D:href>/me/inbox/restask-01jzq4tsvg2c9xkw7n5m8rhdpc.ics</D:href>
   <D:propstat>
    <D:prop><D:getetag>"aaaa1111bbbb2222"</D:getetag></D:prop>
    <D:status>HTTP/1.1 200 OK</D:status>
@@ -105,11 +105,11 @@ fn parse_etags_extracts_resources_in_document_order() {
         etags,
         vec![
             (
-                "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb".to_string(),
+                "restask-01jzq4tsvg2c9xkw7n5m8rhdpb".to_string(),
                 "\"660d02eccf4b0b45\"".to_string()
             ),
             (
-                "taskres-01jzq4tsvg2c9xkw7n5m8rhdpc".to_string(),
+                "restask-01jzq4tsvg2c9xkw7n5m8rhdpc".to_string(),
                 "\"aaaa1111bbbb2222\"".to_string()
             ),
         ]

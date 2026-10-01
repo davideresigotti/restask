@@ -1,4 +1,4 @@
-# Taskres Spec — Note Routing — Lists (§5)
+# Restask Spec — Note Routing — Lists (§5)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -39,8 +39,8 @@ pub struct Router { roots: std::collections::BTreeMap<String, ListSlug> } // dir
 
 impl Router {
     /// dir keys are vault-relative, '/'-separated, no trailing slash; "" = vault root.
-    /// Two different roots for the same dir → TaskresError::ListConflict (never silent).
-    pub fn build(metas: &[NoteMeta]) -> Result<Router, TaskresError>;
+    /// Two different roots for the same dir → RestaskError::ListConflict (never silent).
+    pub fn build(metas: &[NoteMeta]) -> Result<Router, RestaskError>;
     pub fn resolve(&self, path: &str, file_list: Option<&str>) -> NoteRouting;
 }
 ```

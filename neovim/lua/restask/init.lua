@@ -1,4 +1,4 @@
--- Taskres Neovim integration (§16): thin wrapper over the restask CLI.
+-- Restask Neovim integration (§16): thin wrapper over the restask CLI.
 -- No Markdown parsing here — all logic lives in the CLI (zero drift).
 local M = {}
 

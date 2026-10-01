@@ -16,10 +16,10 @@ use common::{sample_task, MockCaldav};
 use restask::caldav::protocol::report_vtodo_etags;
 use restask::caldav::{CaldavClient, CaldavPort};
 use restask::domain::{ListSlug, LocalDate, When};
-use restask::{CaldavErrorKind, TaskresError};
+use restask::{CaldavErrorKind, RestaskError};
 
-const UID_A: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb";
-const UID_B: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpc";
+const UID_A: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
+const UID_B: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpc";
 
 /// Radicale-style depth-1 PROPFIND answer: user root, a VTODO calendar, an event calendar.
 const COLLECTIONS_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -43,11 +43,11 @@ const COLLECTIONS_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 const ETAGS_XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:">
  <D:response>
-  <D:href>/me/inbox/taskres-01jzq4tsvg2c9xkw7n5m8rhdpb.ics</D:href>
+  <D:href>/me/inbox/restask-01jzq4tsvg2c9xkw7n5m8rhdpb.ics</D:href>
   <D:propstat><D:prop><D:getetag>"etag-a"</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
  </D:response>
  <D:response>
-  <D:href>/me/inbox/taskres-01jzq4tsvg2c9xkw7n5m8rhdpc.ics</D:href>
+  <D:href>/me/inbox/restask-01jzq4tsvg2c9xkw7n5m8rhdpc.ics</D:href>
   <D:propstat><D:prop><D:getetag>"etag-b"</D:getetag></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
  </D:response>
 </D:multistatus>
@@ -242,7 +242,7 @@ fn vtodo(uid: &str, summary: &str) -> String {
     for line in [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//Taskres//EN",
+        "PRODID:-//Restask//EN",
         "BEGIN:VTODO",
         &format!("UID:{uid}"),
         &format!("SUMMARY:{summary}"),
@@ -432,7 +432,7 @@ async fn put_precondition_conflict_without_retry() {
         .put(&sample_task(UID_A, "inbox", "local edit"))
         .await;
     match result {
-        Err(TaskresError::Caldav {
+        Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Conflict,
             status: Some(412),
             ..
@@ -451,7 +451,7 @@ async fn auth_failure_is_fatal_and_unretried() {
     }));
     let result = client(&server.base_url).list_collections().await;
     match result {
-        Err(TaskresError::Caldav {
+        Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Auth,
             status: Some(401),
             ..
@@ -485,7 +485,7 @@ async fn server_errors_exhaust_retry_budget() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(429)));
     let result = client(&server.base_url).list_etags(&slug("inbox")).await;
     match result {
-        Err(TaskresError::Caldav {
+        Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             status: Some(429),
             ..
@@ -508,7 +508,7 @@ async fn network_errors_exhaust_retry_budget() {
     .unwrap();
     let result = unreachable.list_collections().await;
     match result {
-        Err(TaskresError::Caldav {
+        Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             status: None,
             ..
@@ -608,7 +608,7 @@ async fn mock_caldav_scripted_failures_fire_once() {
     let inbox = slug("inbox");
     mock.fail_next(CaldavErrorKind::Network);
     match mock.list_etags(&inbox).await {
-        Err(TaskresError::Caldav {
+        Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             ..
         }) => {}

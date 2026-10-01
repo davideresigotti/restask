@@ -1,4 +1,4 @@
-# Taskres Spec — Errors, Logging, Daemon, CLI & Setup (§12–§13)
+# Restask Spec — Errors, Logging, Daemon, CLI & Setup (§12–§13)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -8,7 +8,7 @@
 
 ```rust
 #[derive(Debug, thiserror::Error)]
-pub enum TaskresError {
+pub enum RestaskError {
     #[error("config invalid: {path}: {reason}")]
     Config { path: String, reason: String },
     #[error("parse error in {path} at byte {offset}: {reason}")]
@@ -50,8 +50,8 @@ poll timer (poll_secs, default 300) ─────┘   (full reconcile via Eng
 
 ```rust
 pub struct DaemonConfig { pub debounce_ms: u64 /*300*/, pub poll_secs: u64 /*300*/, pub once: bool }
-pub async fn run_once(vault: &Path, machine: &MachineConfig, clock: std::sync::Arc<dyn Clock>) -> Result<ReconcileReport, TaskresError>;
-pub async fn run(vault: PathBuf, machine: MachineConfig, dc: DaemonConfig, shutdown: tokio::sync::watch::Receiver<bool>) -> Result<(), TaskresError>;
+pub async fn run_once(vault: &Path, machine: &MachineConfig, clock: std::sync::Arc<dyn Clock>) -> Result<ReconcileReport, RestaskError>;
+pub async fn run(vault: PathBuf, machine: MachineConfig, dc: DaemonConfig, shutdown: tokio::sync::watch::Receiver<bool>) -> Result<(), RestaskError>;
 ```
 
 ### 13.2 Setup wizard (`src/setup.rs` + `src/tui.rs`) — `restask setup`

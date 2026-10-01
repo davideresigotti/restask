@@ -9,7 +9,7 @@ use crate::domain::dates::When;
 use crate::domain::task::{Status, Task};
 
 /// `PRODID` value emitted in every serialized calendar (§8.1).
-const PRODID: &str = "-//taskres//restask 0.1.0//EN";
+const PRODID: &str = "-//restask//restask 0.1.0//EN";
 
 /// Maximum octets per physical line before folding (§8.1).
 const FOLD_LIMIT: usize = 75;
@@ -17,7 +17,7 @@ const FOLD_LIMIT: usize = 75;
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1), terminated by CRLF.
 ///
 /// Properties are emitted in the exact §8.1 order; `PRIORITY`, `DTSTART`, `DUE`,
-/// `COMPLETED`, `RELATED-TO`, and `X-TASKRES-SCHEDULED` are omitted when their source
+/// `COMPLETED`, `RELATED-TO`, and `X-RESTASK-SCHEDULED` are omitted when their source
 /// value is `None`. `DTSTAMP` and `LAST-MODIFIED` carry `now_utc`; `CREATED` derives from
 /// the creation date (midnight UTC) or falls back to `now_utc`.
 pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
@@ -64,12 +64,12 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
         );
     }
     if let Some(scheduled) = task.scheduled {
-        push_line(&mut out, &when_property("X-TASKRES-SCHEDULED", scheduled));
+        push_line(&mut out, &when_property("X-RESTASK-SCHEDULED", scheduled));
     }
     push_line(
         &mut out,
         &format!(
-            "X-TASKRES-SOURCE;VALUE=TEXT:{}",
+            "X-RESTASK-SOURCE;VALUE=TEXT:{}",
             escape_text(&task.source.path)
         ),
     );

@@ -3,7 +3,7 @@
 
 use restask::domain::ListSlug;
 use restask::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
-use restask::TaskresError;
+use restask::RestaskError;
 
 fn meta(path: &str, file_list: Option<&str>, folder_list: Option<&str>) -> NoteMeta {
     NoteMeta {
@@ -174,7 +174,7 @@ fn conflicting_roots_for_one_directory_are_a_hard_error() {
         meta("Areas/B.md", None, Some("Work")),
     ];
     match Router::build(&metas) {
-        Err(TaskresError::ListConflict { dir, a, b }) => {
+        Err(RestaskError::ListConflict { dir, a, b }) => {
             assert_eq!(dir, "Areas");
             assert_eq!(a, "Home Lab");
             assert_eq!(b, "Work");
@@ -190,7 +190,7 @@ fn conflicting_roots_at_the_vault_root_are_a_hard_error() {
         meta("Two.md", None, Some("Beta")),
     ];
     match Router::build(&metas) {
-        Err(TaskresError::ListConflict { dir, a, b }) => {
+        Err(RestaskError::ListConflict { dir, a, b }) => {
             assert_eq!(dir, "");
             assert_eq!(a, "Alpha");
             assert_eq!(b, "Beta");
@@ -216,7 +216,7 @@ fn identical_list_declared_twice_is_not_a_conflict() {
 fn root_name_that_slugifies_to_empty_is_rejected() {
     let metas = vec![meta("a.md", None, Some("!!!"))];
     match Router::build(&metas) {
-        Err(TaskresError::Validation { field, .. }) => assert_eq!(field, "list"),
+        Err(RestaskError::Validation { field, .. }) => assert_eq!(field, "list"),
         other => panic!("expected Validation, got {other:?}"),
     }
 }

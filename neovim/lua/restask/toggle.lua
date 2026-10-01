@@ -1,4 +1,4 @@
--- Taskres toggle (§16): cursor-line toggle and inbox add, backed by the restask CLI.
+-- Restask toggle (§16): cursor-line toggle and inbox add, backed by the restask CLI.
 -- Reads the cursor line/file and shells out to `restask done|undone|add`; the CLI
 -- resolves the vault and does all parsing. The buffer is refreshed after a mutation.
 local M = {}
@@ -83,8 +83,8 @@ end
 
 --- Registers the global keymaps (§16): `<leader>td` toggle, `<leader>ta` add.
 function M.register_keymaps()
-	vim.keymap.set("n", "<leader>td", M.toggle, { silent = true, desc = "Taskres: toggle task" })
-	vim.keymap.set("n", "<leader>ta", M.add, { silent = true, desc = "Taskres: add task" })
+	vim.keymap.set("n", "<leader>td", M.toggle, { silent = true, desc = "Restask: toggle task" })
+	vim.keymap.set("n", "<leader>ta", M.add, { silent = true, desc = "Restask: add task" })
 end
 
 return M

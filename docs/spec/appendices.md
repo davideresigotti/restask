@@ -1,4 +1,4 @@
-# Taskres Spec — Appendices B–E (Dependencies, Manifests, CI, Deployment)
+# Restask Spec — Appendices B–E (Dependencies, Manifests, CI, Deployment)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -10,7 +10,7 @@ name = "restask"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-description = "Taskres: Markdown checkboxes ⇄ VTODO (CalDAV) sync"
+description = "Restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -40,7 +40,7 @@ Workspace `Cargo.toml`: `resolver = "2"`, `members = ["crates/restask"]`, `[work
 
 ## Appendix C — Plugin manifests
 
-`package.json` (scripts: `lint = tsc --noEmit`, `test = vitest run`, `build = tsc --noEmit && node esbuild.config.mjs`; devDependencies pinned: `@types/node 22`, `builtin-modules 5`, `esbuild 0.25`, `obsidian github:obsidianmd/obsidian-api`, `typescript 5.6`, `vitest 2.1`; commit the lockfile). `manifest.json`: `id: "taskres"`, `name: "Taskres"`, `minAppVersion: "1.5.0"`, `isDesktopOnly: false`. `tsconfig.json`: `strict: true`, `target: ES2022`, `module: ESNext`, `moduleResolution: bundler`. `esbuild.config.mjs`: bundles `src/main.ts` → `main.js` (external: `obsidian`, `builtin-modules`), format cjs, minify. `main.js` is git-ignored (built at install time).
+`package.json` (scripts: `lint = tsc --noEmit`, `test = vitest run`, `build = tsc --noEmit && node esbuild.config.mjs`; devDependencies pinned: `@types/node 22`, `builtin-modules 5`, `esbuild 0.25`, `obsidian github:obsidianmd/obsidian-api`, `typescript 5.6`, `vitest 2.1`; commit the lockfile). `manifest.json`: `id: "restask"`, `name: "Restask"`, `minAppVersion: "1.5.0"`, `isDesktopOnly: false`. `tsconfig.json`: `strict: true`, `target: ES2022`, `module: ESNext`, `moduleResolution: bundler`. `esbuild.config.mjs`: bundles `src/main.ts` → `main.js` (external: `obsidian`, `builtin-modules`), format cjs, minify. `main.js` is git-ignored (built at install time).
 
 ## Appendix D — CI (`.github/workflows/ci.yml`)
 

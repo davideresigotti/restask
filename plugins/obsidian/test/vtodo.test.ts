@@ -14,7 +14,7 @@ import {
 } from "../src/vtodo";
 
 const NOW = "20260922T143000Z";
-const GOLDEN_UID = "taskres-01jzetq1v2h3k4m5n6p7r8t9w0";
+const GOLDEN_UID = "restask-01jzetq1v2h3k4m5n6p7r8t9w0";
 
 const GOLDEN_BYTES = readFileSync(
 	fileURLToPath(new URL("../../../docs/contracts/vtodo-golden.ics", import.meta.url)),
@@ -112,7 +112,7 @@ describe("§8.1 serializer", () => {
 			NOW,
 		);
 		expect(out).toContain("DTSTART;VALUE=DATE:20260920\r\n");
-		expect(out).toContain("X-TASKRES-SCHEDULED:20260921T083000\r\n");
+		expect(out).toContain("X-RESTASK-SCHEDULED:20260921T083000\r\n");
 	});
 
 	it("created defaults to now when absent", () => {
@@ -121,8 +121,8 @@ describe("§8.1 serializer", () => {
 	});
 
 	it("related-to parent", () => {
-		const out = toVcalendar({ ...goldenTask(), parent: "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb" }, NOW);
-		expect(out).toContain("RELATED-TO;TOREL=PARENT:taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\r\n");
+		const out = toVcalendar({ ...goldenTask(), parent: "restask-01jzq4tsvg2c9xkw7n5m8rhdpb" }, NOW);
+		expect(out).toContain("RELATED-TO;TOREL=PARENT:restask-01jzq4tsvg2c9xkw7n5m8rhdpb\r\n");
 	});
 
 	it("summary escaping", () => {

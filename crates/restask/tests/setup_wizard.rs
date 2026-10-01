@@ -18,7 +18,7 @@ use restask::setup::{
     daemon_unit_content, match_collection, parse_collections, run_setup, DaemonInstaller, SetupArgs,
 };
 use restask::store::Index;
-use restask::TaskresError;
+use restask::RestaskError;
 
 fn clock() -> Arc<FixedClock> {
     Arc::new(FixedClock(
@@ -79,9 +79,9 @@ impl RecordingInstaller {
 }
 
 impl DaemonInstaller for RecordingInstaller {
-    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError> {
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError> {
         if self.fail {
-            return Err(TaskresError::Validation {
+            return Err(RestaskError::Validation {
                 field: "daemon",
                 reason: "injected failure".to_string(),
             });
@@ -102,7 +102,7 @@ fn collection_flags_must_be_list_equals_collection() {
     );
     assert!(matches!(
         parse_collections(&["Home".to_string()]),
-        Err(TaskresError::Validation { .. })
+        Err(RestaskError::Validation { .. })
     ));
 }
 
@@ -198,7 +198,7 @@ async fn setup_recreates_todo_md_on_rerun() {
 #[test]
 fn setup_vault_falls_back_to_cwd_with_todo_md() {
     let vault = tempfile::tempdir().unwrap();
-    std::fs::write(vault.path().join("TODO.md"), "# Taskres\n").unwrap();
+    std::fs::write(vault.path().join("TODO.md"), "# Restask\n").unwrap();
 
     assert_eq!(
         cli::resolve_setup_vault_with(None, None, vault.path(), true).unwrap(),
@@ -212,7 +212,7 @@ fn setup_vault_falls_back_to_cwd_with_todo_md() {
     );
     assert!(matches!(
         cli::resolve_setup_vault_with(None, None, bare.path(), true),
-        Err(TaskresError::Config { .. })
+        Err(RestaskError::Config { .. })
     ));
 }
 
@@ -387,5 +387,5 @@ fn daemon_unit_content_is_a_valid_user_unit() {
     assert!(content.contains("Restart=on-failure"));
     assert!(content.contains("RestartSec=5"));
     assert!(content.contains("WantedBy=default.target"));
-    assert!(content.contains("Description=Taskres sync daemon (vault <-> Radicale)"));
+    assert!(content.contains("Description=Restask sync daemon (vault <-> Radicale)"));
 }

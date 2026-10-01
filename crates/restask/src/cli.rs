@@ -24,7 +24,7 @@ use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::setup;
 use crate::store::{cache_remove, cache_write, Index, IndexEntry};
 use crate::sync::Engine;
-use crate::{CaldavErrorKind, TaskresError};
+use crate::{CaldavErrorKind, RestaskError};
 
 /// `RESTASK_VAULT` (§14.3; ARCHITECTURE naming map).
 const ENV_VAULT: &str = "RESTASK_VAULT";
@@ -170,7 +170,7 @@ pub struct StatusReport {
 /// Environment entry point (§13.3): resolves the vault and machine config, builds the
 /// CalDAV client for server-bound commands, and dispatches. Offline commands ([`Command::Status`],
 /// [`Command::Rebuild`], `list show`/`list bind`) never construct a server client.
-pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
+pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
     let Cli { vault, command } = cli;
     // `setup` carries its own vault fallback (§13.2 step 1): cwd, confirmed or
     // TODO.md-marked — a fresh vault has no markers for the strict search to find.
@@ -211,7 +211,7 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
             let password_env = match &args.password_env {
                 Some(name) => name.clone(),
                 None => {
-                    return Err(TaskresError::Validation {
+                    return Err(RestaskError::Validation {
                         field: "password-env",
                         reason: "--password-env is required with --non-interactive".to_string(),
                     })
@@ -220,7 +220,7 @@ pub async fn execute(cli: Cli) -> Result<i32, TaskresError> {
             let password = std::env::var(&password_env)
                 .ok()
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| TaskresError::Validation {
+                .ok_or_else(|| RestaskError::Validation {
                     field: "password-env",
                     reason: format!("${password_env} is not set"),
                 })?;
@@ -288,7 +288,7 @@ pub async fn run_with<C: CaldavPort>(
     config_path: PathBuf,
     caldav: C,
     clock: Arc<dyn Clock>,
-) -> Result<i32, TaskresError> {
+) -> Result<i32, RestaskError> {
     match command {
         Command::Setup {
             non_interactive,
@@ -400,7 +400,7 @@ pub fn resolve_vault_with(
     flag: Option<&Path>,
     env: Option<&str>,
     start: &Path,
-) -> Result<PathBuf, TaskresError> {
+) -> Result<PathBuf, RestaskError> {
     if let Some(flag) = flag {
         return Ok(flag.to_path_buf());
     }
@@ -416,7 +416,7 @@ pub fn resolve_vault_with(
             break;
         }
     }
-    Err(TaskresError::Config {
+    Err(RestaskError::Config {
         path: "<vault>".to_string(),
         reason: "no vault found: pass --vault, set RESTASK_VAULT, or run inside a vault \
                  (restask.toml or .restask/)"
@@ -433,12 +433,12 @@ pub fn resolve_setup_vault_with(
     env: Option<&str>,
     start: &Path,
     non_interactive: bool,
-) -> Result<PathBuf, TaskresError> {
+) -> Result<PathBuf, RestaskError> {
     if let Ok(vault) = resolve_vault_with(flag, env, start) {
         return Ok(vault);
     }
     if non_interactive && !start.join("TODO.md").is_file() {
-        return Err(TaskresError::Config {
+        return Err(RestaskError::Config {
             path: "<vault>".to_string(),
             reason: "no vault found: --non-interactive setup needs --vault, RESTASK_VAULT, \
                      an existing vault marker, or a directory containing TODO.md"
@@ -452,14 +452,14 @@ pub fn resolve_setup_vault_with(
 pub fn resolve_setup_vault(
     flag: Option<&Path>,
     non_interactive: bool,
-) -> Result<PathBuf, TaskresError> {
+) -> Result<PathBuf, RestaskError> {
     let env = std::env::var(ENV_VAULT).ok();
     let cwd = std::env::current_dir()?;
     resolve_setup_vault_with(flag, env.as_deref(), &cwd, non_interactive)
 }
 
 /// [`resolve_vault_with`] against the process environment and working directory.
-pub fn resolve_vault(flag: Option<&Path>) -> Result<PathBuf, TaskresError> {
+pub fn resolve_vault(flag: Option<&Path>) -> Result<PathBuf, RestaskError> {
     let env = std::env::var(ENV_VAULT).ok();
     let cwd = std::env::current_dir()?;
     resolve_vault_with(flag, env.as_deref(), &cwd)
@@ -467,10 +467,10 @@ pub fn resolve_vault(flag: Option<&Path>) -> Result<PathBuf, TaskresError> {
 
 /// Process exit code for `error` (§12.1): 4 config invalid (incl. no vault found), 3
 /// CalDAV unreachable, 1 any other runtime failure; clap reports usage errors as 2.
-pub fn exit_code(error: &TaskresError) -> i32 {
+pub fn exit_code(error: &RestaskError) -> i32 {
     match error {
-        TaskresError::Config { .. } => 4,
-        TaskresError::Caldav {
+        RestaskError::Config { .. } => 4,
+        RestaskError::Caldav {
             kind: CaldavErrorKind::Network | CaldavErrorKind::Tls,
             ..
         } => 3,
@@ -480,7 +480,7 @@ pub fn exit_code(error: &TaskresError) -> i32 {
 
 /// Computes the [`StatusReport`] for `vault` (§13.3): a read-only vault scan plus the
 /// index and outbox state under `.restask/`.
-pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, TaskresError> {
+pub fn status_report(vault: &Path, clock: &dyn Clock) -> Result<StatusReport, RestaskError> {
     let cfg = load_vault_config(vault)?;
     let tasks = scan_local(vault, &cfg, clock)?;
     let index = Index::load(&vault.join(".restask"))?;
@@ -572,7 +572,7 @@ pub async fn doctor<C: CaldavPort>(
     caldav: Option<C>,
     config_path: &Path,
     clock: Arc<dyn Clock>,
-) -> Result<DoctorReport, TaskresError> {
+) -> Result<DoctorReport, RestaskError> {
     let mut checks: Vec<DoctorCheck> = Vec::new();
     let mut exit_code = 0i32;
 
@@ -619,7 +619,7 @@ pub async fn doctor<C: CaldavPort>(
                 format!("{} routed task(s)", tasks.len()),
             ));
         }
-        Err(TaskresError::ListConflict { dir, a, b }) => {
+        Err(RestaskError::ListConflict { dir, a, b }) => {
             checks.push(check(
                 "routing",
                 DoctorStatus::Fail,
@@ -627,13 +627,13 @@ pub async fn doctor<C: CaldavPort>(
             ));
             exit_code = 1;
         }
-        Err(error @ TaskresError::UidConflict { .. }) => {
+        Err(error @ RestaskError::UidConflict { .. }) => {
             // Routing succeeded (no list conflict); the duplicate UID broke the scan.
             checks.push(check("routing", DoctorStatus::Ok, "no list conflicts"));
             checks.push(check("scan", DoctorStatus::Fail, error));
             exit_code = 1;
         }
-        Err(TaskresError::Config { path, reason }) => {
+        Err(RestaskError::Config { path, reason }) => {
             checks.push(check(
                 "vault-config",
                 DoctorStatus::Fail,
@@ -661,7 +661,7 @@ pub async fn doctor<C: CaldavPort>(
             "todo-marker",
             DoctorStatus::Warn,
             format!(
-                "{} lacks the Taskres marker (restask setup writes it)",
+                "{} lacks the Restask marker (restask setup writes it)",
                 cfg.inbox_file
             ),
         )),
@@ -727,7 +727,7 @@ pub async fn doctor<C: CaldavPort>(
                                                 exit_code = 1;
                                             }
                                         }
-                                        Err(TaskresError::Caldav {
+                                        Err(RestaskError::Caldav {
                                             kind: CaldavErrorKind::Auth,
                                             ..
                                         }) => checks.push(check(
@@ -767,7 +767,7 @@ pub async fn doctor<C: CaldavPort>(
                     }
                 }
             }
-            Err(TaskresError::Caldav {
+            Err(RestaskError::Caldav {
                 kind: CaldavErrorKind::Network | CaldavErrorKind::Tls,
                 detail,
                 ..
@@ -818,7 +818,7 @@ async fn set_done<C: CaldavPort>(
     clock: Arc<dyn Clock>,
     selector: Selector,
     done: bool,
-) -> Result<i32, TaskresError> {
+) -> Result<i32, RestaskError> {
     let cfg = load_vault_config(vault)?;
     let uid = resolve_selector(vault, &cfg, &selector)?;
     let engine = Engine::new(vault, cfg, machine, caldav, clock);
@@ -833,9 +833,9 @@ fn resolve_selector(
     vault: &Path,
     cfg: &VaultConfig,
     selector: &Selector,
-) -> Result<TaskUid, TaskresError> {
+) -> Result<TaskUid, RestaskError> {
     if let Some(raw) = &selector.uid {
-        return TaskUid::parse(raw).map_err(|error| TaskresError::Validation {
+        return TaskUid::parse(raw).map_err(|error| RestaskError::Validation {
             field: "uid",
             reason: error.0,
         });
@@ -843,7 +843,7 @@ fn resolve_selector(
     let (file, line) = match (&selector.file, selector.line) {
         (Some(file), Some(line)) => (file, line),
         _ => {
-            return Err(TaskresError::Validation {
+            return Err(RestaskError::Validation {
                 field: "selector",
                 reason: "use --uid or both --file and --line".to_string(),
             })
@@ -855,16 +855,16 @@ fn resolve_selector(
         .into_iter()
         .find(|task| task.line_no == line)
         .and_then(|task| task.draft.uid)
-        .ok_or_else(|| TaskresError::Validation {
+        .ok_or_else(|| RestaskError::Validation {
             field: "line",
             reason: format!("no registered task at {file}:{line}"),
         })
 }
 
 /// Parses `--priority` (§13.3): one of the five CLI names.
-fn parse_priority(raw: Option<String>) -> Result<Option<Priority>, TaskresError> {
+fn parse_priority(raw: Option<String>) -> Result<Option<Priority>, RestaskError> {
     raw.map(|name| {
-        Priority::from_cli_name(&name).ok_or_else(|| TaskresError::Validation {
+        Priority::from_cli_name(&name).ok_or_else(|| RestaskError::Validation {
             field: "priority",
             reason: format!(
                 "unknown priority `{name}` (expected highest, high, medium, low, lowest)"
@@ -875,9 +875,9 @@ fn parse_priority(raw: Option<String>) -> Result<Option<Priority>, TaskresError>
 }
 
 /// Parses `--due` (§13.3): `YYYY-MM-DD[ HH:MM]` (§4: a date-only value is midnight UTC).
-fn parse_due(raw: Option<String>) -> Result<Option<When>, TaskresError> {
+fn parse_due(raw: Option<String>) -> Result<Option<When>, RestaskError> {
     raw.map(|text| {
-        When::parse_date_or_datetime(&text).map_err(|error| TaskresError::Validation {
+        When::parse_date_or_datetime(&text).map_err(|error| RestaskError::Validation {
             field: "due",
             reason: error.to_string(),
         })
@@ -886,11 +886,11 @@ fn parse_due(raw: Option<String>) -> Result<Option<When>, TaskresError> {
 }
 
 /// Prints the [`StatusReport`] (human text or JSON) to stdout (§12.2 one-shot format).
-fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, TaskresError> {
+fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, RestaskError> {
     let report = status_report(vault, clock.as_ref())?;
     if json {
         let rendered =
-            serde_json::to_string(&report).map_err(|error| TaskresError::Validation {
+            serde_json::to_string(&report).map_err(|error| RestaskError::Validation {
                 field: "status",
                 reason: error.to_string(),
             })?;
@@ -915,7 +915,7 @@ fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, 
 }
 
 /// Re-derives state and prints the outcome (§13.3 `restask rebuild`).
-fn run_rebuild(vault: &Path, clock: Arc<dyn Clock>) -> Result<i32, TaskresError> {
+fn run_rebuild(vault: &Path, clock: Arc<dyn Clock>) -> Result<i32, RestaskError> {
     let cfg = load_vault_config(vault)?;
     let count = rebuild_state(vault, &cfg, clock.as_ref())?;
     println!("re-derived {count} task(s)");
@@ -929,7 +929,7 @@ fn rebuild_state(
     vault: &Path,
     cfg: &VaultConfig,
     clock: &dyn Clock,
-) -> Result<usize, TaskresError> {
+) -> Result<usize, RestaskError> {
     let state_dir = vault.join(".restask");
     let tasks = scan_local(vault, cfg, clock)?;
     let now = clock.now_utc();
@@ -973,12 +973,12 @@ fn save_binding(
     path: &Path,
     mut machine: MachineConfig,
     binding: ListBinding,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     machine
         .lists
         .retain(|existing| existing.name != binding.name);
     machine.lists.push(binding);
-    machine.save(path).map_err(|error| TaskresError::Config {
+    machine.save(path).map_err(|error| RestaskError::Config {
         path: path.display().to_string(),
         reason: error.to_string(),
     })
@@ -986,7 +986,7 @@ fn save_binding(
 
 /// Loads the machine config (§14.2) with §14.3 env overrides; a missing file yields the
 /// default config (fresh machine).
-fn load_machine(path: &Path) -> Result<MachineConfig, TaskresError> {
+fn load_machine(path: &Path) -> Result<MachineConfig, RestaskError> {
     match MachineConfig::load(path) {
         Ok(mut machine) => {
             machine.apply_env();
@@ -997,17 +997,17 @@ fn load_machine(path: &Path) -> Result<MachineConfig, TaskresError> {
             machine.apply_env();
             Ok(machine)
         }
-        Err(error) => Err(TaskresError::Config {
+        Err(error) => Err(RestaskError::Config {
             path: path.display().to_string(),
             reason: error.to_string(),
         }),
     }
 }
 
-/// Loads `<vault>/restask.toml`, mapping config failures to [`TaskresError::Config`].
-fn load_vault_config(vault: &Path) -> Result<VaultConfig, TaskresError> {
+/// Loads `<vault>/restask.toml`, mapping config failures to [`RestaskError::Config`].
+fn load_vault_config(vault: &Path) -> Result<VaultConfig, RestaskError> {
     let path = vault.join("restask.toml");
-    VaultConfig::load(&path).map_err(|error| TaskresError::Config {
+    VaultConfig::load(&path).map_err(|error| RestaskError::Config {
         path: path.display().to_string(),
         reason: error.to_string(),
     })
@@ -1035,8 +1035,8 @@ fn scan_local(
     vault: &Path,
     cfg: &VaultConfig,
     clock: &dyn Clock,
-) -> Result<BTreeMap<TaskUid, Task>, TaskresError> {
-    let matchers = cfg.matchers().map_err(|error| TaskresError::Config {
+) -> Result<BTreeMap<TaskUid, Task>, RestaskError> {
+    let matchers = cfg.matchers().map_err(|error| RestaskError::Config {
         path: vault.join("restask.toml").display().to_string(),
         reason: error.to_string(),
     })?;
@@ -1056,7 +1056,7 @@ fn scan_local(
         })
         .collect();
     let router = Router::build(&metas)?;
-    let inbox = ListSlug::from_name(&cfg.inbox_list).map_err(|_| TaskresError::Validation {
+    let inbox = ListSlug::from_name(&cfg.inbox_list).map_err(|_| RestaskError::Validation {
         field: "inbox_list",
         reason: format!("cannot slugify the inbox list name `{}`", cfg.inbox_list),
     })?;
@@ -1098,7 +1098,7 @@ fn scan_local(
                 continue;
             };
             if let Some(first) = seen.insert(uid.clone(), path.clone()) {
-                return Err(TaskresError::UidConflict {
+                return Err(RestaskError::UidConflict {
                     uid,
                     a: first,
                     b: path.clone(),
@@ -1142,7 +1142,7 @@ fn scan_local(
 }
 
 /// File mtime as a UTC instant (the engine's scan semantics).
-fn file_mtime(path: &Path) -> Result<DateTime<Utc>, TaskresError> {
+fn file_mtime(path: &Path) -> Result<DateTime<Utc>, RestaskError> {
     Ok(std::fs::metadata(path)?.modified()?.into())
 }
 
@@ -1153,7 +1153,7 @@ fn walk(
     relative: &str,
     matchers: &VaultMatchers,
     out: &mut Vec<(String, String)>,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();

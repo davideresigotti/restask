@@ -1,4 +1,4 @@
-# Taskres Spec — Domain Model & Timestamp Contract (§3–§4)
+# Restask Spec — Domain Model & Timestamp Contract (§3–§4)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -9,7 +9,7 @@ All public types derive `Debug, Clone, PartialEq, Serialize, Deserialize` unless
 ### 3.1 `uid.rs`
 
 ```rust
-pub struct TaskUid(String);          // "taskres-" + 26-char lowercase Crockford base32 (ULID)
+pub struct TaskUid(String);          // "restask-" + 26-char lowercase Crockford base32 (ULID)
 
 #[derive(Debug, thiserror::Error)]
 #[error("invalid task UID: {0}")]
@@ -23,7 +23,7 @@ impl TaskUid {
 impl std::fmt::Display for TaskUid;                  // writes self.0
 ```
 
-Filename-safe: `taskres-01jz…` is used verbatim as `.restask/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
+Filename-safe: `restask-01jz…` is used verbatim as `.restask/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
 
 ### 3.2 `priority.rs`
 
@@ -89,7 +89,7 @@ Domain code **never** calls `chrono::Utc::now()` / `Local::now()` directly — o
 pub struct ListSlug(String);   // kebab-case: "Home Lab" → "home-lab"
 
 impl ListSlug {
-    pub fn from_name(name: &str) -> Result<Self, TaskresError>; // lowercase; [^a-z0-9]+→'-'; trim '-'; non-empty
+    pub fn from_name(name: &str) -> Result<Self, RestaskError>; // lowercase; [^a-z0-9]+→'-'; trim '-'; non-empty
     pub fn as_str(&self) -> &str;
     pub fn display_name(&self) -> String;                       // "home-lab" → "Home Lab" (title-case words)
 }
@@ -137,7 +137,7 @@ All Markdown dates are **device-local**. All VTODO instants (`CREATED`, `COMPLET
 | `✅ 2026-09-19` | `COMPLETED:20260919T000000Z` | date-only → midnight UTC |
 | `📅 2026-09-19` | `DUE;VALUE=DATE:20260919` | all-day (RFC 5545 §3.8.5.3) |
 | `📅 2026-09-19 17:00` | `DUE:20260919T170000` | **floating** local time — no `Z`, no TZID |
-| `🛫 …` / `⏳ …` | `DTSTART` / `X-TASKRES-SCHEDULED` | same DATE vs floating DATE-TIME rules as DUE |
+| `🛫 …` / `⏳ …` | `DTSTART` / `X-RESTASK-SCHEDULED` | same DATE vs floating DATE-TIME rules as DUE |
 | — (engine mutation) | `LAST-MODIFIED:<now>Z` | UTC now at the moment the engine rewrites the line/file |
 | — (every emission) | `DTSTAMP:<now>Z` | UTC now at serialization; caller-supplied, never read from clock |
 | (remote) `COMPLETED:20260920T033000Z` | `✅ 2026-09-20` | reverse rule: format UTC calendar date of the instant |

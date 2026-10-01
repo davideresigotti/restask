@@ -87,7 +87,10 @@ const START_RE = /🛫[ \t]+(\d{4}-\d{2}-\d{2}(?:[ \t]+\d{2}:\d{2})?)/gu;
 const SCHEDULED_RE = /⏳[ \t]+(\d{4}-\d{2}-\d{2}(?:[ \t]+\d{2}:\d{2})?)/gu;
 const COMPLETED_RE = /✅[ \t]+(\d{4}-\d{2}-\d{2})/gu;
 const CREATED_RE = /➕[ \t]+(\d{4}-\d{2}-\d{2})/gu;
-const UID_RE = /🆔[ \t]+(taskres-[0-9a-z]{26})/gu;
+const UID_RE = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
+
+// `restask-` and the legacy `taskres-` prefix are both 8 characters long.
+const UID_PREFIX_LENGTH = "restask-".length;
 
 // Crockford base32: the ULID alphabet excludes i, l, o, u (§3.1).
 const ULID_BODY_RE = /^[0-9a-hjkmnp-tv-z]{26}$/;
@@ -192,7 +195,7 @@ export function parseLine(line: string): TaskLine | undefined {
 	const completedValue =
 		completed.value !== undefined && validDate(completed.value) ? completed.value : undefined;
 	const uidValue =
-		uid.value !== undefined && ULID_BODY_RE.test(uid.value.slice("taskres-".length)) ? uid.value : undefined;
+		uid.value !== undefined && ULID_BODY_RE.test(uid.value.slice(UID_PREFIX_LENGTH)) ? uid.value : undefined;
 
 	let anomalies = 0;
 	if (due.value !== undefined && dueValue === undefined) anomalies++;

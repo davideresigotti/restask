@@ -3,10 +3,10 @@
 
 use std::io::{self, BufRead, Write};
 
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Prints `message` and reads one trimmed line from stdin.
-pub fn prompt(message: &str) -> Result<String, TaskresError> {
+pub fn prompt(message: &str) -> Result<String, RestaskError> {
     print!("{message} ");
     io::stdout().flush()?;
     let mut line = String::new();
@@ -15,12 +15,12 @@ pub fn prompt(message: &str) -> Result<String, TaskresError> {
 }
 
 /// Prints `message` and reads one hidden line (rpassword, §13.2 step 4).
-pub fn secret(message: &str) -> Result<String, TaskresError> {
+pub fn secret(message: &str) -> Result<String, RestaskError> {
     Ok(rpassword::prompt_password(message)?.trim().to_string())
 }
 
 /// Yes/no confirmation; empty input means no.
-pub fn confirm(message: &str) -> Result<bool, TaskresError> {
+pub fn confirm(message: &str) -> Result<bool, RestaskError> {
     loop {
         let answer = prompt(&format!("{message} [y/N]"))?;
         match answer.as_str() {

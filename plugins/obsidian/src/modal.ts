@@ -1,5 +1,5 @@
 /**
- * Pure autocomplete core for the Taskres metadata modal (docs/spec/integrations.md §15.2).
+ * Pure autocomplete core for the Restask metadata modal (docs/spec/integrations.md §15.2).
  *
  * Keyword table + case-insensitive prefix filter. No Obsidian API, no I/O, no wall
  * clock: the local date is injected so `today`/`tomorrow` entries stay pure and

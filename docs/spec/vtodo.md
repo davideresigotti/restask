@@ -1,4 +1,4 @@
-# Taskres Spec — VTODO Codec & Golden Contract (§8, App. A)
+# Restask Spec — VTODO Codec & Golden Contract (§8, App. A)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
@@ -12,15 +12,15 @@ pub fn to_vcalendar(task: &Task, now_utc: chrono::DateTime<chrono::Utc>) -> Stri
 
 Emits a `VCALENDAR`/`VTODO` with **CRLF** line endings, properties in this exact order:
 
-`BEGIN:VCALENDAR`, `VERSION:2.0`, `PRODID:-//taskres//restask 0.1.0//EN`, `BEGIN:VTODO`, `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`, `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, `RELATED-TO`, `X-TASKRES-SCHEDULED`, `X-TASKRES-SOURCE`, `END:VTODO`, `END:VCALENDAR`.
+`BEGIN:VCALENDAR`, `VERSION:2.0`, `PRODID:-//restask//restask 0.1.0//EN`, `BEGIN:VTODO`, `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`, `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, `RELATED-TO`, `X-RESTASK-SCHEDULED`, `X-RESTASK-SOURCE`, `END:VTODO`, `END:VCALENDAR`.
 
 Property rules:
-- `UID:<taskres-…>` verbatim. `DTSTAMP`/`LAST-MODIFIED` = `now_utc` (§4). `CREATED` from `➕` date or `now_utc` if absent.
+- `UID:<restask-…>` verbatim. `DTSTAMP`/`LAST-MODIFIED` = `now_utc` (§4). `CREATED` from `➕` date or `now_utc` if absent.
 - `SUMMARY:<text>` with iCalendar TEXT escaping: `\` → `\\`, `;` → `\;`, `,` → `\,`, newline → `\n`.
 - `STATUS:NEEDS-ACTION` | `COMPLETED`; `PERCENT-COMPLETE:0` | `100`.
-- `PRIORITY` per §3.2 (omitted when `None`). `DTSTART`/`DUE`/`COMPLETED`/`X-TASKRES-SCHEDULED;VALUE=DATE` per §4 (omitted when `None`).
+- `PRIORITY` per §3.2 (omitted when `None`). `DTSTART`/`DUE`/`COMPLETED`/`X-RESTASK-SCHEDULED;VALUE=DATE` per §4 (omitted when `None`).
 - `RELATED-TO;TOREL=PARENT:<uid>` when `parent` is `Some`.
-- `X-TASKRES-SOURCE;VALUE=TEXT:<vault-relative path>` (escaped) — lets remote-created tasks route back to the right note.
+- `X-RESTASK-SOURCE;VALUE=TEXT:<vault-relative path>` (escaped) — lets remote-created tasks route back to the right note.
 - Line folding: physical lines ≤ 75 **octets** (UTF-8), folded with a leading SPACE continuation, never splitting a codepoint; short enough lines are never folded.
 
 ### 8.2 Parsing
@@ -30,12 +30,12 @@ pub struct RemoteTask {
     pub raw_uid: String,        // UID property verbatim
     pub managed: bool,          // raw_uid parses as TaskUid
     pub task: Task,             // when !managed: fields populated, uid = placeholder (engine replaces on adoption)
-    pub source_path: Option<String>, // X-TASKRES-SOURCE
+    pub source_path: Option<String>, // X-RESTASK-SOURCE
 }
 
 /// Unfolds folded lines, accepts CRLF/LF, skips VTIMEZONE/VALARM and unknown properties,
 /// tolerates missing optional properties. TZID/UTC datetimes converted via `tz` (chrono-tz lookup by name).
-pub fn from_vcalendar(text: &str, tz: chrono::FixedOffset, collection: &ListSlug) -> Result<RemoteTask, TaskresError>;
+pub fn from_vcalendar(text: &str, tz: chrono::FixedOffset, collection: &ListSlug) -> Result<RemoteTask, RestaskError>;
 ```
 
 Round-trip property: for any `Task` produced by the parser, `to_vcalendar(parse(to_vcalendar(t, now)), now) == to_vcalendar(t, now)`.
@@ -51,9 +51,9 @@ Byte-exact contract; every physical line ends CRLF (`0x0D 0x0A`). Nothing here r
 ```ical
 BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//taskres//restask 0.1.0//EN
+PRODID:-//restask//restask 0.1.0//EN
 BEGIN:VTODO
-UID:taskres-01jzetq1v2h3k4m5n6p7r8t9w0
+UID:restask-01jzetq1v2h3k4m5n6p7r8t9w0
 DTSTAMP:20260922T143000Z
 CREATED:20260919T000000Z
 LAST-MODIFIED:20260922T143000Z
@@ -62,10 +62,10 @@ STATUS:NEEDS-ACTION
 PERCENT-COMPLETE:0
 PRIORITY:1
 DUE;VALUE=DATE:20260925
-X-TASKRES-SCHEDULED;VALUE=DATE:20260923
-X-TASKRES-SOURCE;VALUE=TEXT:Home Lab Test.md
+X-RESTASK-SCHEDULED;VALUE=DATE:20260923
+X-RESTASK-SOURCE;VALUE=TEXT:Home Lab Test.md
 END:VTODO
 END:VCALENDAR
 ```
 
-Source task: uid `taskres-01jzetq1v2h3k4m5n6p7r8t9w0`, text `Setup SSL certificate renew alert`, priority Highest, due 2026-09-25 (date-only), scheduled 2026-09-23, created 2026-09-19, list `home-lab`, `now_utc = 2026-09-22T14:30:00Z`, `last_modified = now_utc`.
+Source task: uid `restask-01jzetq1v2h3k4m5n6p7r8t9w0`, text `Setup SSL certificate renew alert`, priority Highest, due 2026-09-25 (date-only), scheduled 2026-09-23, created 2026-09-19, list `home-lab`, `now_utc = 2026-09-22T14:30:00Z`, `last_modified = now_utc`.

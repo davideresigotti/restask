@@ -14,16 +14,16 @@ use crate::config::{CaldavConfig, ListBinding, MachineConfig, VaultConfig, Vault
 use crate::domain::{Clock, ListSlug};
 use crate::markdown::{mutator, render};
 use crate::sync::{Engine, ReconcileReport};
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Parses the repeatable `--collection list=collection` flag values (§13.2).
-pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, TaskresError> {
+pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, RestaskError> {
     raw.iter()
         .map(|item| match item.split_once('=') {
             Some((name, collection)) if !name.is_empty() && !collection.is_empty() => {
                 Ok((name.to_string(), collection.to_string()))
             }
-            _ => Err(TaskresError::Validation {
+            _ => Err(RestaskError::Validation {
                 field: "collection",
                 reason: format!("expected list=collection, got `{item}`"),
             }),
@@ -66,8 +66,8 @@ impl SetupArgs {
         username: Option<String>,
         password_env: Option<String>,
         mut collections: Vec<(String, String)>,
-    ) -> Result<Self, TaskresError> {
-        let missing = |flag: &str| TaskresError::Validation {
+    ) -> Result<Self, RestaskError> {
+        let missing = |flag: &str| RestaskError::Validation {
             field: "setup",
             reason: format!("--{flag} is required with --non-interactive"),
         };
@@ -115,7 +115,7 @@ pub async fn run_setup<C: CaldavPort>(
     caldav: C,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
-) -> Result<SetupSummary, TaskresError> {
+) -> Result<SetupSummary, RestaskError> {
     prepare_and_sync(args, caldav, clock, installer).await
 }
 
@@ -127,10 +127,10 @@ pub async fn run_interactive(
     config_path: PathBuf,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
-) -> Result<(), TaskresError> {
+) -> Result<(), RestaskError> {
     let known = vault.join("restask.toml").is_file() || vault.join(".restask").is_dir();
     if !known && !crate::tui::confirm(&format!("Use {} as the vault?", vault.display()))? {
-        return Err(TaskresError::Validation {
+        return Err(RestaskError::Validation {
             field: "vault",
             reason: "setup cancelled".to_string(),
         });
@@ -145,7 +145,7 @@ pub async fn run_interactive(
         match candidate.list_collections().await {
             Ok(_) => break candidate,
             Err(
-                error @ TaskresError::Caldav {
+                error @ RestaskError::Caldav {
                     kind: crate::CaldavErrorKind::Auth,
                     ..
                 },
@@ -171,7 +171,7 @@ pub async fn run_interactive(
     // with `restask-list` frontmatter in the notes; no per-list wizard probing happens.
     let server_collections = client.list_collections().await?;
     if server_collections.is_empty() {
-        return Err(TaskresError::Validation {
+        return Err(RestaskError::Validation {
             field: "collections",
             reason: "no calendars found on the server; create one and re-run `restask setup` \
                      — binding TODO.md is required for sync"
@@ -226,7 +226,7 @@ async fn prepare_and_sync<C: CaldavPort>(
     caldav: C,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
-) -> Result<SetupSummary, TaskresError> {
+) -> Result<SetupSummary, RestaskError> {
     let vault = args.vault.clone();
 
     // Step 1 — vault: §14-default restask.toml when missing, plus `.restask/`.
@@ -340,7 +340,7 @@ pub trait DaemonInstaller {
     /// unit (no systemd session) — setup continues without one.
     ///
     /// `vault` is the folder the unit points at; `exec` is the `restask` binary to run.
-    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError>;
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError>;
 }
 
 /// Real [`DaemonInstaller`]: writes `restask.service` into
@@ -350,7 +350,7 @@ pub trait DaemonInstaller {
 pub struct SystemdInstaller;
 
 impl DaemonInstaller for SystemdInstaller {
-    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, TaskresError> {
+    fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError> {
         if !systemd_user_available() {
             return Ok(None);
         }
@@ -392,7 +392,7 @@ pub fn systemd_user_available() -> bool {
 /// with spaces survive systemd's argv splitter.
 pub fn daemon_unit_content(vault: &Path, exec: &Path) -> String {
     format!(
-        "[Unit]\nDescription=Taskres sync daemon (vault <-> Radicale)\n\n[Service]\n\
+        "[Unit]\nDescription=Restask sync daemon (vault <-> Radicale)\n\n[Service]\n\
          ExecStart=\"{}\" daemon --vault \"{}\"\nRestart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n",
         exec.display(),
@@ -434,7 +434,7 @@ fn install_daemon(installer: Option<&dyn DaemonInstaller>, vault: &Path) -> Opti
 }
 
 /// Runs a helper command, failing when it cannot start or exits non-zero.
-fn run(program: &str, args: &[&str]) -> Result<(), TaskresError> {
+fn run(program: &str, args: &[&str]) -> Result<(), RestaskError> {
     let status = Command::new(program).args(args).status()?;
     if status.success() {
         Ok(())
@@ -444,7 +444,7 @@ fn run(program: &str, args: &[&str]) -> Result<(), TaskresError> {
 }
 
 /// Writes the password to `path` with mode 0600 on Unix (§17).
-fn write_secret(path: &Path, password: &str) -> Result<(), TaskresError> {
+fn write_secret(path: &Path, password: &str) -> Result<(), RestaskError> {
     #[cfg(unix)]
     {
         use std::io::Write as _;
@@ -486,8 +486,8 @@ pub fn print_summary(summary: &SetupSummary) {
 }
 
 /// Maps a [`crate::config::ConfigError`] to the crate error for `path`.
-fn config_error(path: &Path, error: impl std::fmt::Display) -> TaskresError {
-    TaskresError::Config {
+fn config_error(path: &Path, error: impl std::fmt::Display) -> RestaskError {
+    RestaskError::Config {
         path: path.display().to_string(),
         reason: error.to_string(),
     }

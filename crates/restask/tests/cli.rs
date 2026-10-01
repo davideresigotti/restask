@@ -15,7 +15,7 @@ use restask::config::{CaldavConfig, ListBinding, MachineConfig};
 use restask::domain::{ListSlug, Priority, TaskUid};
 use restask::store::{cache_path, cache_write, Index, IndexEntry};
 use restask::vtodo::to_vcalendar;
-use restask::{CaldavErrorKind, TaskresError};
+use restask::{CaldavErrorKind, RestaskError};
 
 /// Fixed clock: 2026-09-22 12:00 UTC (in the past, so file mtimes are always newer than
 /// cached stamps and the planner's R1 tie-window never defers), device-local +02:00.
@@ -38,7 +38,7 @@ fn machine() -> MachineConfig {
 }
 
 /// Runs one command against the temp vault and mock server.
-async fn run(command: Command, vault: &Path, mock: &MockCaldav) -> Result<i32, TaskresError> {
+async fn run(command: Command, vault: &Path, mock: &MockCaldav) -> Result<i32, RestaskError> {
     cli::run_with(
         command,
         vault.to_path_buf(),
@@ -108,7 +108,7 @@ async fn add_registers_pushes_and_renders() {
     let contents = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     let line = contents.lines().find(|l| l.contains("buy milk")).unwrap();
     assert!(line.starts_with("- [ ] buy milk"));
-    assert!(uid.starts_with("taskres-"));
+    assert!(uid.starts_with("restask-"));
 
     assert_eq!(mock.resource_names("inbox"), vec![uid.clone()]);
     let index = Index::load(&vault.path().join(".restask")).unwrap();
@@ -426,21 +426,21 @@ fn vault_resolution_flag_env_then_upward_search() {
     let empty = tempfile::tempdir().unwrap();
     assert!(matches!(
         cli::resolve_vault_with(None, None, empty.path()),
-        Err(TaskresError::Config { .. })
+        Err(RestaskError::Config { .. })
     ));
 }
 
 #[test]
 fn exit_code_follows_the_taxonomy() {
     assert_eq!(
-        cli::exit_code(&TaskresError::Config {
+        cli::exit_code(&RestaskError::Config {
             path: "p".into(),
             reason: "r".into()
         }),
         4
     );
     assert_eq!(
-        cli::exit_code(&TaskresError::Caldav {
+        cli::exit_code(&RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             status: None,
             detail: "d".into(),
@@ -448,7 +448,7 @@ fn exit_code_follows_the_taxonomy() {
         3
     );
     assert_eq!(
-        cli::exit_code(&TaskresError::Validation {
+        cli::exit_code(&RestaskError::Validation {
             field: "f",
             reason: "r".into()
         }),
@@ -466,7 +466,7 @@ fn selector_requires_uid_or_file_and_line() {
         "restask",
         "done",
         "--uid",
-        "taskres-01jzetq1v2h3k4m5n6p7r8t9w0",
+        "restask-01jzetq1v2h3k4m5n6p7r8t9w0",
         "--file",
         "TODO.md",
         "--line",

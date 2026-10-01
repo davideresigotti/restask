@@ -63,7 +63,7 @@ struct PutAlwaysFails(MockCaldav);
 impl CaldavPort for PutAlwaysFails {
     async fn list_collections(
         &self,
-    ) -> Result<Vec<restask::caldav::CollectionInfo>, restask::TaskresError> {
+    ) -> Result<Vec<restask::caldav::CollectionInfo>, restask::RestaskError> {
         self.0.list_collections().await
     }
 
@@ -71,14 +71,14 @@ impl CaldavPort for PutAlwaysFails {
         &self,
         slug: &ListSlug,
         display: &str,
-    ) -> Result<(), restask::TaskresError> {
+    ) -> Result<(), restask::RestaskError> {
         self.0.ensure_collection(slug, display).await
     }
 
     async fn list_etags(
         &self,
         slug: &ListSlug,
-    ) -> Result<Vec<(String, String)>, restask::TaskresError> {
+    ) -> Result<Vec<(String, String)>, restask::RestaskError> {
         self.0.list_etags(slug).await
     }
 
@@ -86,12 +86,12 @@ impl CaldavPort for PutAlwaysFails {
         &self,
         slug: &ListSlug,
         name: &str,
-    ) -> Result<Option<(restask::vtodo::RemoteTask, String)>, restask::TaskresError> {
+    ) -> Result<Option<(restask::vtodo::RemoteTask, String)>, restask::RestaskError> {
         self.0.fetch(slug, name).await
     }
 
-    async fn put(&self, _task: &Task) -> Result<String, restask::TaskresError> {
-        Err(restask::TaskresError::Caldav {
+    async fn put(&self, _task: &Task) -> Result<String, restask::RestaskError> {
+        Err(restask::RestaskError::Caldav {
             kind: restask::CaldavErrorKind::Network,
             status: None,
             detail: "put always fails".to_string(),
@@ -103,7 +103,7 @@ impl CaldavPort for PutAlwaysFails {
         slug: &ListSlug,
         name: &str,
         etag: Option<&str>,
-    ) -> Result<(), restask::TaskresError> {
+    ) -> Result<(), restask::RestaskError> {
         self.0.delete(slug, name, etag).await
     }
 }
@@ -172,18 +172,18 @@ async fn first_sync_registers_pushes_and_renders() {
 #[tokio::test]
 async fn remote_created_task_is_inserted_into_its_routed_note() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "anchor");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "anchor");
     let mock = MockCaldav::new();
     mock.seed_collection("home", "Home");
     let remote = task(
-        "taskres-01jz0000000000000000000002",
+        "restask-01jz0000000000000000000002",
         "home",
         "from the server",
         "notes/home.md",
     );
     mock.seed_resource(
         "home",
-        "taskres-01jz0000000000000000000002",
+        "restask-01jz0000000000000000000002",
         &seeded_body(&remote, MARKER_TIME),
     );
     let engine = engine(&dir, mock.clone(), false);
@@ -193,15 +193,15 @@ async fn remote_created_task_is_inserted_into_its_routed_note() {
 
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     assert!(note.contains("from the server"));
-    assert!(note.contains("taskres-01jz0000000000000000000002"));
+    assert!(note.contains("restask-01jz0000000000000000000002"));
 
     let index = Index::load(&dir.path().join(".restask")).unwrap();
-    let entry = &index.entries[&TaskUid::parse("taskres-01jz0000000000000000000002").unwrap()];
+    let entry = &index.entries[&TaskUid::parse("restask-01jz0000000000000000000002").unwrap()];
     assert_eq!(entry.source_path, "notes/home.md");
     assert!(entry.caldav_etag.is_some());
     assert!(dir
         .path()
-        .join(".restask/tasks/taskres-01jz0000000000000000000002.ics")
+        .join(".restask/tasks/restask-01jz0000000000000000000002.ics")
         .exists());
 
     let todo = std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
@@ -211,12 +211,12 @@ async fn remote_created_task_is_inserted_into_its_routed_note() {
 #[tokio::test]
 async fn server_side_deletion_tombstones_and_removes_the_line() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "doomed");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "doomed");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     engine.reconcile().await.unwrap();
 
-    mock.delete(&slug("home"), "taskres-01jz0000000000000000000001", None)
+    mock.delete(&slug("home"), "restask-01jz0000000000000000000001", None)
         .await
         .unwrap();
     engine.reconcile().await.unwrap();
@@ -224,24 +224,24 @@ async fn server_side_deletion_tombstones_and_removes_the_line() {
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     assert!(!note.contains("doomed"));
     let tombstones = Tombstones::load(&dir.path().join(".restask")).unwrap();
-    assert!(tombstones.contains(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap()));
+    assert!(tombstones.contains(&TaskUid::parse("restask-01jz0000000000000000000001").unwrap()));
     let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
     assert!(!dir
         .path()
-        .join(".restask/tasks/taskres-01jz0000000000000000000001.ics")
+        .join(".restask/tasks/restask-01jz0000000000000000000001.ics")
         .exists());
 }
 
 #[tokio::test]
 async fn vault_side_deletion_purges_cache_and_remote() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "gone");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "gone");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     engine.reconcile().await.unwrap();
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_some());
 
     // The user deletes the line from the note; the server copy survives.
@@ -249,10 +249,10 @@ async fn vault_side_deletion_purges_cache_and_remote() {
     engine.reconcile().await.unwrap();
 
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_none());
     let tombstones = Tombstones::load(&dir.path().join(".restask")).unwrap();
-    assert!(tombstones.contains(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap()));
+    assert!(tombstones.contains(&TaskUid::parse("restask-01jz0000000000000000000001").unwrap()));
     let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
@@ -271,32 +271,32 @@ fn seeded_note_without_task(dir: &TempDir) {
 #[tokio::test]
 async fn rerouting_a_note_moves_the_task_between_collections() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "commute");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "commute");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     engine.reconcile().await.unwrap();
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_some());
 
     write_vault_file(
         &dir,
         "notes/home.md",
-        "---\nrestask-list: Work\n---\n\n# Home\n\n- [ ] commute \u{1F194} taskres-01jz0000000000000000000001\n",
+        "---\nrestask-list: Work\n---\n\n# Home\n\n- [ ] commute \u{1F194} restask-01jz0000000000000000000001\n",
     );
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.moves, 1);
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_none());
     assert!(mock
-        .resource("work", "taskres-01jz0000000000000000000001")
+        .resource("work", "restask-01jz0000000000000000000001")
         .is_some());
     let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(
         index
             .entries
-            .get(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap())
+            .get(&TaskUid::parse("restask-01jz0000000000000000000001").unwrap())
             .unwrap()
             .list,
         slug("work")
@@ -306,14 +306,14 @@ async fn rerouting_a_note_moves_the_task_between_collections() {
 #[tokio::test]
 async fn remote_wins_duel_mutates_the_note() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "alpha");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "alpha");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     engine.reconcile().await.unwrap();
 
     // A far-future remote edit (beyond the tie window vs. any filesystem mtime).
     let mut remote = task(
-        "taskres-01jz0000000000000000000001",
+        "restask-01jz0000000000000000000001",
         "home",
         "beta",
         "notes/home.md",
@@ -321,7 +321,7 @@ async fn remote_wins_duel_mutates_the_note() {
     remote.status = Status::Active;
     mock.seed_resource(
         "home",
-        "taskres-01jz0000000000000000000001",
+        "restask-01jz0000000000000000000001",
         &seeded_body(&remote, 1_900_000_000),
     );
     engine.reconcile().await.unwrap();
@@ -331,7 +331,7 @@ async fn remote_wins_duel_mutates_the_note() {
     assert!(!note.contains("alpha"));
     let cached = std::fs::read_to_string(
         dir.path()
-            .join(".restask/tasks/taskres-01jz0000000000000000000001.ics"),
+            .join(".restask/tasks/restask-01jz0000000000000000000001.ics"),
     )
     .unwrap();
     assert!(cached.contains("beta"));
@@ -340,14 +340,14 @@ async fn remote_wins_duel_mutates_the_note() {
 #[tokio::test]
 async fn local_wins_duel_pushes_the_vault_copy() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "alpha");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "alpha");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     engine.reconcile().await.unwrap();
 
     // A far-past remote edit: the vault authority wins.
     let mut remote = task(
-        "taskres-01jz0000000000000000000001",
+        "restask-01jz0000000000000000000001",
         "home",
         "stale beta",
         "notes/home.md",
@@ -355,13 +355,13 @@ async fn local_wins_duel_pushes_the_vault_copy() {
     remote.status = Status::Active;
     mock.seed_resource(
         "home",
-        "taskres-01jz0000000000000000000001",
+        "restask-01jz0000000000000000000001",
         &seeded_body(&remote, 10),
     );
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.pushes, 1);
     let body = mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .unwrap()
         .body;
     assert!(body.contains("alpha"));
@@ -373,7 +373,7 @@ async fn local_wins_duel_pushes_the_vault_copy() {
 #[tokio::test]
 async fn failed_push_parks_to_the_outbox_and_flushes_later() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "queued");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "queued");
     let failing = PutAlwaysFails::default();
     let failing_engine = engine_with(&dir, failing.clone(), true, Vec::new());
 
@@ -381,7 +381,7 @@ async fn failed_push_parks_to_the_outbox_and_flushes_later() {
     assert_eq!(report.parked, 1);
     assert!(failing
         .0
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_none());
     let mut outbox = restask::store::outbox::Outbox::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(outbox.take_all().len(), 1);
@@ -391,12 +391,12 @@ async fn failed_push_parks_to_the_outbox_and_flushes_later() {
     let healthy = engine(&dir, mock.clone(), true);
     healthy.reconcile().await.unwrap();
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_some());
     let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert!(index
         .entries
-        .get(&TaskUid::parse("taskres-01jz0000000000000000000001").unwrap())
+        .get(&TaskUid::parse("restask-01jz0000000000000000000001").unwrap())
         .unwrap()
         .caldav_etag
         .is_some());
@@ -410,7 +410,7 @@ async fn foreign_task_is_adopted_into_the_inbox() {
     let mock = MockCaldav::new();
     mock.seed_collection("home", "Home");
     let foreign = task(
-        "taskres-01jz0000000000000000000001",
+        "restask-01jz0000000000000000000001",
         "home",
         "made in Tasks.org",
         "",
@@ -419,7 +419,7 @@ async fn foreign_task_is_adopted_into_the_inbox() {
         &foreign,
         Utc.timestamp_opt(MARKER_TIME, 0).single().unwrap(),
     )
-    .replace("taskres-01jz0000000000000000000001", "1789@example.com");
+    .replace("restask-01jz0000000000000000000001", "1789@example.com");
     mock.seed_resource("home", "1789@example.com", &body);
     // The collection is bound by the wizard (§13.2 step 5), which is what puts it in the
     // engine's scan scope.
@@ -439,7 +439,7 @@ async fn foreign_task_is_adopted_into_the_inbox() {
     let adopted = mock
         .resource_names("home")
         .into_iter()
-        .find(|name| name.starts_with("taskres-"))
+        .find(|name| name.starts_with("restask-"))
         .expect("adopted resource pushed");
     assert!(mock
         .resource("home", &adopted)
@@ -505,11 +505,11 @@ async fn unrouted_notes_are_never_touched() {
 #[tokio::test]
 async fn duplicate_uids_across_notes_are_a_hard_error() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "first");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "first");
     write_vault_file(
         &dir,
         "notes/other.md",
-        "---\nrestask-list: Home\n---\n\n- [ ] second \u{1F194} taskres-01jz0000000000000000000001\n",
+        "---\nrestask-list: Home\n---\n\n- [ ] second \u{1F194} restask-01jz0000000000000000000001\n",
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock, true);
@@ -520,7 +520,7 @@ async fn duplicate_uids_across_notes_are_a_hard_error() {
 #[tokio::test]
 async fn handle_fs_change_runs_a_full_reconcile() {
     let dir = temp_vault();
-    seeded_note(&dir, "taskres-01jz0000000000000000000001", "watched");
+    seeded_note(&dir, "restask-01jz0000000000000000000001", "watched");
     let mock = MockCaldav::new();
     let engine = engine(&dir, mock.clone(), true);
     let report = engine
@@ -529,6 +529,6 @@ async fn handle_fs_change_runs_a_full_reconcile() {
         .unwrap();
     assert_eq!(report.pushes, 1);
     assert!(mock
-        .resource("home", "taskres-01jz0000000000000000000001")
+        .resource("home", "restask-01jz0000000000000000000001")
         .is_some());
 }

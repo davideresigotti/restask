@@ -1,5 +1,5 @@
 [Unit]
-Description=Taskres sync daemon (vault <-> Radicale)
+Description=Restask sync daemon (vault <-> Radicale)
 
 [Service]
 ExecStart=%h/.cargo/bin/restask daemon --vault %h/Vault

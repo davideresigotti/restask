@@ -8,7 +8,7 @@ use fnv::FnvHasher;
 use crate::domain::dates::{LocalDate, When};
 use crate::domain::priority::Priority;
 use crate::domain::uid::TaskUid;
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Kebab-case list identifier derived from a display name (§3.4): `"Home Lab"` → `home-lab`.
 ///
@@ -22,7 +22,7 @@ pub struct ListSlug(String);
 impl ListSlug {
     /// Slugifies a display name: lowercase; every run of non-`[a-z0-9]` characters becomes a
     /// single `-`; leading/trailing `-` trimmed; the result must be non-empty.
-    pub fn from_name(name: &str) -> Result<Self, TaskresError> {
+    pub fn from_name(name: &str) -> Result<Self, RestaskError> {
         let mut slug = String::with_capacity(name.len());
         let mut separator = true;
         for ch in name.to_lowercase().chars() {
@@ -36,7 +36,7 @@ impl ListSlug {
         }
         let trimmed = slug.trim_matches('-');
         if trimmed.is_empty() {
-            return Err(TaskresError::Validation {
+            return Err(RestaskError::Validation {
                 field: "list",
                 reason: format!("name `{name}` produces an empty list slug"),
             });

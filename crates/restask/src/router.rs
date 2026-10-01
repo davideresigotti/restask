@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::ListSlug;
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Where a note's tasks belong (§5.2 resolution chain).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,11 +76,11 @@ pub struct Router {
 impl Router {
     /// Builds a router from scanned notes. Every `restask-list-root` declaration maps its
     /// file's directory to the slugified list name; two different roots for the same
-    /// directory are a hard [`TaskresError::ListConflict`] (never silent). Declarations that
+    /// directory are a hard [`RestaskError::ListConflict`] (never silent). Declarations that
     /// slugify identically (e.g. differing only in case) count as the same list.
     ///
-    /// A root name that produces an empty slug fails with [`TaskresError::Validation`].
-    pub fn build(metas: &[NoteMeta]) -> Result<Router, TaskresError> {
+    /// A root name that produces an empty slug fails with [`RestaskError::Validation`].
+    pub fn build(metas: &[NoteMeta]) -> Result<Router, RestaskError> {
         let mut roots: BTreeMap<String, (ListSlug, String)> = BTreeMap::new();
         for meta in metas {
             let Some(name) = meta.folder_list.as_deref() else {
@@ -91,7 +91,7 @@ impl Router {
             match roots.get(dir) {
                 Some((existing, first_declared)) if existing == &slug => {}
                 Some((_, first_declared)) => {
-                    return Err(TaskresError::ListConflict {
+                    return Err(RestaskError::ListConflict {
                         dir: dir.to_string(),
                         a: first_declared.clone(),
                         b: name.to_string(),

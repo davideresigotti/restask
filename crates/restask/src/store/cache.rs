@@ -10,7 +10,7 @@ use crate::domain::task::{ListSlug, Task};
 use crate::domain::uid::TaskUid;
 use crate::markdown::mutator::write_atomic;
 use crate::vtodo::{from_vcalendar, to_vcalendar};
-use crate::TaskresError;
+use crate::RestaskError;
 
 /// Subdirectory of `.restask/` holding the cached VTODOs.
 const TASKS_DIR: &str = "tasks";
@@ -25,7 +25,7 @@ pub fn cache_path(dir: &Path, uid: &TaskUid) -> PathBuf {
 /// `"cache"` is pure ASCII letters, hence always a valid slug; the `Option` mirrors the
 /// no-unwrap handling of the static regex table in `markdown::parser`.
 fn cache_list() -> Option<ListSlug> {
-    static LIST: OnceLock<Result<ListSlug, TaskresError>> = OnceLock::new();
+    static LIST: OnceLock<Result<ListSlug, RestaskError>> = OnceLock::new();
     LIST.get_or_init(|| ListSlug::from_name("cache"))
         .as_ref()
         .ok()
@@ -64,13 +64,13 @@ pub fn cache_read(dir: &Path, uid: &TaskUid, tz: FixedOffset) -> Option<Task> {
 /// Serializes `task` (with `now_utc` as DTSTAMP/LAST-MODIFIED) and writes it to the cache
 /// atomically, creating the `tasks/` directory if needed. The bytes match what is pushed
 /// to Radicale for the same task and instant.
-pub fn cache_write(dir: &Path, task: &Task, now_utc: DateTime<Utc>) -> Result<(), TaskresError> {
+pub fn cache_write(dir: &Path, task: &Task, now_utc: DateTime<Utc>) -> Result<(), RestaskError> {
     std::fs::create_dir_all(dir.join(TASKS_DIR))?;
     write_atomic(&cache_path(dir, &task.uid), &to_vcalendar(task, now_utc))
 }
 
 /// Removes the cached VTODO for `uid`; a missing entry is not an error.
-pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), TaskresError> {
+pub fn cache_remove(dir: &Path, uid: &TaskUid) -> Result<(), RestaskError> {
     match std::fs::remove_file(cache_path(dir, uid)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),

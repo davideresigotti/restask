@@ -1,4 +1,4 @@
-//! Taskres library: Markdown checkboxes ⇄ CalDAV VTODO sync.
+//! Restask library: Markdown checkboxes ⇄ CalDAV VTODO sync.
 
 pub mod caldav;
 pub mod cli;
@@ -14,4 +14,4 @@ pub mod sync;
 pub mod tui;
 pub mod vtodo;
 
-pub use error::{CaldavErrorKind, TaskresError};
+pub use error::{CaldavErrorKind, RestaskError};

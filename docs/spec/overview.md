@@ -1,16 +1,16 @@
-# Taskres Spec — System Overview & Repository Layout (§1–§2)
+# Restask Spec — System Overview & Repository Layout (§1–§2)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 
 ## §1 System Overview, Naming & Boundaries
 
-Taskres is a local-first, offline-first task system linking Markdown checkboxes to RFC 5545 VTODO objects across devices. The Markdown vault (synced by Syncthing) is the source of truth; Radicale (CalDAV) is both a projection and an ingress point for external clients (Tasks.org, Thunderbird).
+Restask is a local-first, offline-first task system linking Markdown checkboxes to RFC 5545 VTODO objects across devices. The Markdown vault (synced by Syncthing) is the source of truth; Radicale (CalDAV) is both a projection and an ingress point for external clients (Tasks.org, Thunderbird).
 
 ### 1.1 Naming map
 
 | Concept | Name | Location |
 |---|---|---|
-| System/product name | **Taskres** | docs, TODO.md marker |
+| System/product name | **Restask** | docs, TODO.md marker |
 | CLI binary & Rust crate | **`restask`** | `crates/restask/` |
 | Per-vault state directory | **`.restask/`** | vault root |
 | Vault config | **`restask.toml`** | vault root (synced) |

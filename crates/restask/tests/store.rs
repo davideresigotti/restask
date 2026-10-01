@@ -8,8 +8,8 @@ use tempfile::tempdir;
 use restask::domain::{ListSlug, TaskUid};
 use restask::store::{Index, IndexEntry, Tombstones};
 
-const UID1: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb";
-const UID2: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpc";
+const UID1: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
+const UID2: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpc";
 
 fn uid(raw: &str) -> TaskUid {
     TaskUid::parse(raw).unwrap()
@@ -132,13 +132,13 @@ fn tombstones_roundtrip_and_contains() {
     tombstones.insert(uid(UID2), now - Duration::hours(3));
     assert!(tombstones.contains(&uid(UID1)));
     assert!(tombstones.contains(&uid(UID2)));
-    assert!(!tombstones.contains(&uid("taskres-01arz3ndektsv4rrffq69g5fav")));
+    assert!(!tombstones.contains(&uid("restask-01arz3ndektsv4rrffq69g5fav")));
 
     tombstones.save(dir.path()).unwrap();
     let loaded = Tombstones::load(dir.path()).unwrap();
     assert!(loaded.contains(&uid(UID1)));
     assert!(loaded.contains(&uid(UID2)));
-    assert!(!loaded.contains(&uid("taskres-01arz3ndektsv4rrffq69g5fav")));
+    assert!(!loaded.contains(&uid("restask-01arz3ndektsv4rrffq69g5fav")));
 }
 
 #[test]

@@ -1,6 +1,6 @@
-# AGENTS.md — Taskres Implementation Contract
+# AGENTS.md — Restask Implementation Contract
 
-> **You are the implementation agent for Taskres, executed by OpenCode (GLM-5.3-Flash).**
+> **You are the implementation agent for Restask, executed by OpenCode (GLM-5.3-Flash).**
 > `ARCHITECTURE.md` (index + invariants) and `docs/spec/*.md` (details) are normative.
 > This file is your operating contract. This file is **static** — never edit it.
 > If this contract and the specification conflict: STOP and use the Stop-and-Clarify template (§5).
@@ -24,7 +24,7 @@
 | `luac` | any ≥ 5.4 (Fedora: `dnf install lua`) | syntax gate for neovim/ |
 | git | 2.x | `main` branch |
 
-External services (development only, read-mostly): Radicale `http://192.168.1.10:5232` user `me` (⚠ auth currently disabled — see ARCHITECTURE.md §17), SSH alias `docker`. E2E tests use the dedicated `Taskres-Dev` collection only (env-gated, `#[ignore]`).
+External services (development only, read-mostly): Radicale `http://192.168.1.10:5232` user `me` (⚠ auth currently disabled — see ARCHITECTURE.md §17), SSH alias `docker`. E2E tests use the dedicated `Restask-Dev` collection only (env-gated, `#[ignore]`).
 
 ## §2 Quality Gates — exact commands
 
@@ -54,7 +54,7 @@ Full-suite policy: `cargo test --workspace` and bare `npm test` are run **only**
 
 **Rust** (crate `restask`, edition 2021, MSRV 1.98):
 - Dependencies: **only** those in ARCHITECTURE.md Appendix B, at those versions. Adding/changing any dependency = Stop-and-Clarify.
-- No `unsafe`. No `.unwrap()`/`.expect()` outside `#[cfg(test)]` and `main.rs` bootstrap. Errors: `TaskresError` (§12.1) via `?`.
+- No `unsafe`. No `.unwrap()`/`.expect()` outside `#[cfg(test)]` and `main.rs` bootstrap. Errors: `RestaskError` (§12.1) via `?`.
 - Pure modules (`domain`, `router`, `markdown`, `vtodo`, `sync::planner`) perform **zero I/O**; time comes from `Clock` or parameters.
 - Async only where the architecture shows it (caldav/daemon/engine); no blocking calls inside async fns; `std::fs` is allowed only in `store`, `sync::engine`, `setup`, `daemon`.
 - `std::process::Command` is allowed **only** for `ssh` in `setup.rs`/doctor.
@@ -162,7 +162,7 @@ Every task: implement the listed files → write the listed test cases → run t
 | ID | Deliverable | Files | Test file | Isolated verify |
 |---|---|---|---|---|
 | T11 | Serializer + golden (§8.1, App. A) | `src/vtodo/mod.rs`; `src/vtodo/serialize.rs`; `docs/contracts/vtodo-golden.ics` (copy App. A byte-exact, CRLF) | `tests/vtodo_codec.rs` (golden byte-equality; folding >75 octets incl. multi-byte emoji; escaping; property order) | `cargo test -p restask --test vtodo_codec` |
-| T12 | Parser + round-trip (§8.2) | `src/vtodo/parse.rs` (`RemoteTask`, unfolding, TZID/UTC/floating, unknown props skipped, VTIMEZONE/VALARM skipped) | append `tests/vtodo_codec.rs` (round-trip property; foreign UID flagging; X-TASKRES-SOURCE) | `cargo test -p restask --test vtodo_codec` |
+| T12 | Parser + round-trip (§8.2) | `src/vtodo/parse.rs` (`RemoteTask`, unfolding, TZID/UTC/floating, unknown props skipped, VTIMEZONE/VALARM skipped) | append `tests/vtodo_codec.rs` (round-trip property; foreign UID flagging; X-RESTASK-SOURCE) | `cargo test -p restask --test vtodo_codec` |
 | T13 | Timestamp contract (§4) | no new source files — conformance layer | `tests/vtodo_timestamps.rs` (every §4 row, both directions, FixedClock; midnight-UTC synthesis; UTC-date reverse; TZID→local) | `cargo test -p restask --test vtodo_timestamps` |
 
 ### Phase 4 — Storage
@@ -210,7 +210,7 @@ Every task: implement the listed files → write the listed test cases → run t
 |---|---|---|---|---|
 | T28 | Neovim integration (§16) | `neovim/lua/restask/init.lua`; `neovim/lua/restask/toggle.lua` | — | `luac -p neovim/lua/restask/*.lua` |
 | T29 | Deployment + docs (App. E) | `contrib/restask.service`; `contrib/docker/{Dockerfile,docker-compose.yml}`; update `README.md` (lists/routing section per §5, INSTALL pointers); review `INSTALL.md` | — | `cargo build --release` |
-| T30 | Release gate + e2e | `crates/restask/tests/e2e_server.rs` (`#[ignore]`, env `RESTASK_E2E_URL/USERNAME/PASSWORD`, dedicated `Taskres-Dev` collection only) | — | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; `npm run lint && npm test && npm run build` (workdir `plugins/obsidian`); `luac -p neovim/lua/restask/*.lua`; optional live: `cargo test -p restask --test e2e_server -- --ignored` |
+| T30 | Release gate + e2e | `crates/restask/tests/e2e_server.rs` (`#[ignore]`, env `RESTASK_E2E_URL/USERNAME/PASSWORD`, dedicated `Restask-Dev` collection only) | — | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`; `npm run lint && npm test && npm run build` (workdir `plugins/obsidian`); `luac -p neovim/lua/restask/*.lua`; optional live: `cargo test -p restask --test e2e_server -- --ignored` |
 
 ## §7 Recovery Playbook
 

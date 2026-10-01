@@ -5,8 +5,8 @@ use tempfile::tempdir;
 use restask::domain::{ListSlug, SourceRef, Status, Task, TaskUid};
 use restask::store::{OutboundOp, Outbox};
 
-const UID1: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb";
-const UID2: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpc";
+const UID1: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
+const UID2: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpc";
 
 fn uid(raw: &str) -> TaskUid {
     TaskUid::parse(raw).unwrap()

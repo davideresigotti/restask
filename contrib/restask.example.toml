@@ -1,4 +1,4 @@
-# Taskres vault configuration (`restask.toml` at the vault root).
+# Restask vault configuration (`restask.toml` at the vault root).
 # Synced with the vault and safe to commit — no secrets belong here.
 # Reference: docs/spec/config.md §14.1.
 

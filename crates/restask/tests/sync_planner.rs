@@ -23,7 +23,7 @@ fn slug(name: &str) -> ListSlug {
 }
 
 fn uid(n: u64) -> TaskUid {
-    TaskUid::parse(&format!("taskres-01jz{:0>22}", n)).unwrap()
+    TaskUid::parse(&format!("restask-01jz{:0>22}", n)).unwrap()
 }
 
 fn task(n: u64, list: &str, text: &str) -> Task {
@@ -418,7 +418,7 @@ fn r4_unrouted_source_falls_back_to_the_inbox() {
 #[test]
 fn r5_foreign_task_is_adopted_with_a_fresh_uid() {
     let mut foreign = task(0, "home", "made in Tasks.org");
-    foreign.uid = TaskUid::parse("taskres-00000000000000000000000000").unwrap();
+    foreign.uid = TaskUid::parse("restask-00000000000000000000000000").unwrap();
     foreign.source.path = String::new();
     let rt = RemoteTask {
         raw_uid: "1789@example.com".to_string(),
@@ -441,9 +441,9 @@ fn r5_foreign_task_is_adopted_with_a_fresh_uid() {
     let adopted = &p.caldav_puts[0];
     assert_ne!(
         adopted.uid,
-        TaskUid::parse("taskres-00000000000000000000000000").unwrap()
+        TaskUid::parse("restask-00000000000000000000000000").unwrap()
     );
-    assert!(adopted.uid.as_str().starts_with("taskres-"));
+    assert!(adopted.uid.as_str().starts_with("restask-"));
     assert_eq!(adopted.text, "made in Tasks.org");
     assert_eq!(adopted.list, slug("home"));
     assert_eq!(p.caldav_deletes.len(), 1);

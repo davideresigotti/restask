@@ -1,4 +1,4 @@
-# Taskres Spec — Configuration & Security (§14, §17)
+# Restask Spec — Configuration & Security (§14, §17)
 
 > Normative. Split of `ARCHITECTURE.md` (index + invariants live there). Section numbers preserved — `AGENTS.md` references them.
 

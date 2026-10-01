@@ -31,8 +31,9 @@ const COMPLETED_PATTERN: &str = r"✅[ \t]+(\d{4}-\d{2}-\d{2})";
 /// Created token (§6.1): `➕` plus a date-only value.
 const CREATED_PATTERN: &str = r"➕[ \t]+(\d{4}-\d{2}-\d{2})";
 
-/// UID token (§6.1): `🆔` plus `taskres-` and 26 lowercase alphanumerics.
-const UID_PATTERN: &str = r"🆔[ \t]+(taskres-[0-9a-z]{26})";
+/// UID token (§6.1): `🆔` plus `restask-` (or the legacy `taskres-`) and 26 lowercase
+/// alphanumerics.
+const UID_PATTERN: &str = r"🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})";
 
 /// ATX heading (§6.2): 1–6 `#`, one space, text with an optional closing hash sequence.
 const HEADING_PATTERN: &str = r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$";

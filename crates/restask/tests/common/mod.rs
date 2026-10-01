@@ -15,7 +15,7 @@ use restask::caldav::{CaldavPort, CollectionInfo};
 use restask::domain::{Clock, ListSlug, LocalDate, Task, TaskUid};
 use restask::markdown::MARKER;
 use restask::vtodo::{from_vcalendar, to_vcalendar, RemoteTask};
-use restask::{CaldavErrorKind, TaskresError};
+use restask::{CaldavErrorKind, RestaskError};
 
 /// Fixed-instant clock (§3.3): `now_utc` is the first field, the device-local offset the
 /// second, so `today_local` is deterministic.
@@ -124,11 +124,11 @@ impl MockCaldav {
         format!("\"mock-{}\"", state.etag_counter)
     }
 
-    fn scripted_failure(&self) -> Option<TaskresError> {
+    fn scripted_failure(&self) -> Option<RestaskError> {
         self.lock()
             .failures
             .pop_front()
-            .map(|kind| TaskresError::Caldav {
+            .map(|kind| RestaskError::Caldav {
                 kind,
                 status: None,
                 detail: "scripted mock failure".to_string(),
@@ -137,7 +137,7 @@ impl MockCaldav {
 }
 
 impl CaldavPort for MockCaldav {
-    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, TaskresError> {
+    async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -154,7 +154,7 @@ impl CaldavPort for MockCaldav {
             .collect())
     }
 
-    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), TaskresError> {
+    async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -165,7 +165,7 @@ impl CaldavPort for MockCaldav {
         Ok(())
     }
 
-    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, TaskresError> {
+    async fn list_etags(&self, slug: &ListSlug) -> Result<Vec<(String, String)>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -182,7 +182,7 @@ impl CaldavPort for MockCaldav {
         &self,
         slug: &ListSlug,
         name: &str,
-    ) -> Result<Option<(RemoteTask, String)>, TaskresError> {
+    ) -> Result<Option<(RemoteTask, String)>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -199,7 +199,7 @@ impl CaldavPort for MockCaldav {
         }
     }
 
-    async fn put(&self, task: &Task) -> Result<String, TaskresError> {
+    async fn put(&self, task: &Task) -> Result<String, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -223,7 +223,7 @@ impl CaldavPort for MockCaldav {
         slug: &ListSlug,
         name: &str,
         _etag: Option<&str>,
-    ) -> Result<(), TaskresError> {
+    ) -> Result<(), RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }

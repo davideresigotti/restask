@@ -1,12 +1,17 @@
-//! Task UIDs (§3.1): `"taskres-"` + 26-char lowercase Crockford base32 (ULID).
+//! Task UIDs (§3.1): `"restask-"` + 26-char lowercase Crockford base32 (ULID). UIDs minted
+//! before the project rename carry the legacy `"taskres-"` prefix and stay valid forever
+//! (UIDs are eternal).
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-/// Shared prefix of every Taskres-generated UID.
-pub const UID_PREFIX: &str = "taskres-";
+/// Prefix of every UID this build generates.
+pub const UID_PREFIX: &str = "restask-";
 
-/// A stable, filename-safe task identifier: `taskres-` + 26-char lowercase Crockford base32.
+/// Prefix of UIDs minted before the project was renamed; parsed and kept verbatim.
+pub const LEGACY_UID_PREFIX: &str = "taskres-";
+
+/// A stable, filename-safe task identifier: `restask-` + 26-char lowercase Crockford base32.
 ///
 /// Used verbatim as `.restask/tasks/<uid>.ics` and as the Radicale resource name `<uid>.ics`.
 /// UIDs are assigned once and never regenerated (ARCHITECTURE.md invariant 2). Ordering is
@@ -34,17 +39,18 @@ impl TaskUid {
         Self(format!("{}{}", UID_PREFIX, ulid.to_string().to_lowercase()))
     }
 
-    /// Returns the full UID string, e.g. `taskres-01jzabcdefghjkmnpqrstvwxyz`.
+    /// Returns the full UID string, e.g. `restask-01jzabcdefghjkmnpqrstvwxyz`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Parses a UID: trims surrounding whitespace, lowercases, then validates the
-    /// 26-char Crockford base32 body after the `taskres-` prefix.
+    /// 26-char Crockford base32 body after the `restask-` (or legacy `taskres-`) prefix.
     pub fn parse(raw: &str) -> Result<Self, UidError> {
         let lowered = raw.trim().to_lowercase();
         let body = lowered
             .strip_prefix(UID_PREFIX)
+            .or_else(|| lowered.strip_prefix(LEGACY_UID_PREFIX))
             .ok_or_else(|| UidError(raw.to_string()))?;
         if body.len() != ulid::ULID_LEN {
             return Err(UidError(raw.to_string()));

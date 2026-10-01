@@ -1,9 +1,9 @@
 //! Crate-wide error taxonomy (§12.1). Introduced in T04 because the domain spec (§3.4)
-//! requires it; every later fallible API returns `Result<_, TaskresError>`.
+//! requires it; every later fallible API returns `Result<_, RestaskError>`.
 
 /// Crate-wide error type (§12.1).
 #[derive(Debug, thiserror::Error)]
-pub enum TaskresError {
+pub enum RestaskError {
     /// A configuration file is invalid.
     #[error("config invalid: {path}: {reason}")]
     Config {

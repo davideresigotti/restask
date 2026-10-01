@@ -21,7 +21,7 @@ const PRIORITY_ICAL: Readonly<Record<Priority, number>> = {
 };
 
 /** `PRODID` of every emitted calendar (§8.1, golden contract). */
-export const PRODID = "-//taskres//restask 0.1.0//EN";
+export const PRODID = "-//restask//restask 0.1.0//EN";
 
 /** Per-vault state directory (§15.3). */
 export const CACHE_DIR = ".restask";
@@ -44,7 +44,7 @@ export interface CacheTask {
 	created: string | undefined;
 	/** Nearest ancestor UID; emits `RELATED-TO;TOREL=PARENT` when present (§6.2). */
 	parent: string | undefined;
-	/** Vault-relative source path for `X-TASKRES-SOURCE` (§8.1). */
+	/** Vault-relative source path for `X-RESTASK-SOURCE` (§8.1). */
 	sourcePath: string;
 }
 
@@ -136,9 +136,9 @@ export function toVcalendar(task: CacheTask, nowUtc: string): string {
 	if (task.parent !== undefined) props.push(`RELATED-TO;TOREL=PARENT:${task.parent}`);
 	if (task.scheduled !== undefined) {
 		const w = icalWhen(task.scheduled);
-		props.push(`X-TASKRES-SCHEDULED${w.params}:${w.value}`);
+		props.push(`X-RESTASK-SCHEDULED${w.params}:${w.value}`);
 	}
-	props.push(`X-TASKRES-SOURCE;VALUE=TEXT:${escapeText(task.sourcePath)}`);
+	props.push(`X-RESTASK-SOURCE;VALUE=TEXT:${escapeText(task.sourcePath)}`);
 	props.push("END:VTODO", "END:VCALENDAR");
 	return props.map(fold).join("\r\n") + "\r\n";
 }

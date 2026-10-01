@@ -10,13 +10,13 @@ use restask::domain::{
 };
 use restask::markdown::todo_view::{inbox_line, mirror_line, render, MARKER};
 
-const U1: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpb";
-const U2: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpc";
-const U3: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpd";
-const U4: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpe";
-const U5: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpf";
-const U6: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpg";
-const U7: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdph";
+const U1: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
+const U2: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpc";
+const U3: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpd";
+const U4: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpe";
+const U5: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpf";
+const U6: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpg";
+const U7: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdph";
 
 fn fixed_time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 22, 12, 0, 0).unwrap()
@@ -123,23 +123,23 @@ fn render_full_scenario() {
             "# TODO\n",
             "\n",
             "## Inbox\n",
-            "- [ ] Buy milk ➕ 2026-09-22 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [ ] Buy milk ➕ 2026-09-22 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
             "\n",
             "## 🔺 Highest Priority\n",
-            "- [ ] Setup SSL certificate renew alert 🔺 [[Home Lab Test#To Do|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "- [ ] Setup SSL certificate renew alert 🔺 [[Home Lab Test#To Do|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
             "\n",
             "## ⏫ High Priority\n",
-            "- [ ] Review architecture plan ⏫ [[Project Alpha Test#Tasks|Project Alpha Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
+            "- [ ] Review architecture plan ⏫ [[Project Alpha Test#Tasks|Project Alpha Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
             "\n",
             "## 🔼 Medium Priority\n",
-            "- [ ] Configure automatic backup to NAS 🔼 [[Home Lab Test#To Do|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpf\n",
-            "- [ ] Update documentation 🔼 [[Project Alpha Test#Tasks|Project Alpha Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
+            "- [ ] Configure automatic backup to NAS 🔼 [[Home Lab Test#To Do|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpf\n",
+            "- [ ] Update documentation 🔼 [[Project Alpha Test#Tasks|Project Alpha Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
             "\n",
             "## 🔽 Low Priority\n",
-            "- [ ] Deploy Talos Linux on mini-PC 🔽 [[Home Lab Test#To Do|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpg\n",
+            "- [ ] Deploy Talos Linux on mini-PC 🔽 [[Home Lab Test#To Do|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpg\n",
             "\n",
             "## Done\n",
-            "- [x] Take out trash 🔽 ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdph\n",
+            "- [x] Take out trash 🔽 ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdph\n",
         )
     );
 }
@@ -161,7 +161,7 @@ fn empty_sections_are_omitted() {
             "# TODO\n",
             "\n",
             "## Inbox\n",
-            "- [ ] Buy milk 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+            "- [ ] Buy milk 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
             "\n",
             "## Done\n",
         )
@@ -214,9 +214,9 @@ fn done_newest_on_top_and_completed_vault_tasks_omitted() {
             "# TODO\n",
             "\n",
             "## Done\n",
-            "- [x] C ✅ 2026-09-20 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
-            "- [x] D ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
-            "- [x] B ✅ 2026-09-19 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
+            "- [x] C ✅ 2026-09-20 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpd\n",
+            "- [x] D ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpe\n",
+            "- [x] B ✅ 2026-09-19 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n",
         )
     );
 }
@@ -237,7 +237,7 @@ fn mirror_line_rules() {
     linked.source_heading = Some("To Do".to_string());
     assert_eq!(
         mirror_line(&linked),
-        "- [ ] Write docs [[Home Lab Test#To Do|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [ ] Write docs [[Home Lab Test#To Do|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     let mut no_heading = vault_task(U1, "Write docs", "Home Lab Test.md", 5);
@@ -246,20 +246,20 @@ fn mirror_line_rules() {
     };
     assert_eq!(
         mirror_line(&no_heading),
-        "- [x] Write docs [[Home Lab Test|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [x] Write docs [[Home Lab Test|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     let hostile = vault_task(U1, "Weird", "We[ird|Task#1.md", 2);
     assert_eq!(
         mirror_line(&hostile),
-        "- [ ] Weird We[ird|Task#1 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [ ] Weird We[ird|Task#1 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     let mut hostile_heading = vault_task(U1, "Weird", "We[ird|Task#1.md", 2);
     hostile_heading.source_heading = Some("Head".to_string());
     assert_eq!(
         mirror_line(&hostile_heading),
-        "- [ ] Weird We[ird|Task#1#Head 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [ ] Weird We[ird|Task#1#Head 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     let mut scheduled = vault_task(U1, "Write docs", "Home Lab Test.md", 5);
@@ -271,7 +271,7 @@ fn mirror_line_rules() {
     scheduled.due = Some(When::Date(date("2026-09-23")));
     assert_eq!(
         mirror_line(&scheduled),
-        "- [ ] Write docs 🔼 🛫 2026-09-21 ⏳ 2026-09-22 08:00 📅 2026-09-23 [[Home Lab Test|Home Lab Test]] 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [ ] Write docs 🔼 🛫 2026-09-21 ⏳ 2026-09-22 08:00 📅 2026-09-23 [[Home Lab Test|Home Lab Test]] 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 }
 
@@ -292,12 +292,12 @@ fn inbox_line_full_canonical() {
     full.created = Some(date("2026-09-01"));
     assert_eq!(
         inbox_line(&full),
-        "- [x] Plan week 🔼 🛫 2026-09-21 ⏳ 2026-09-22 08:00 📅 2026-09-23 17:30 ✅ 2026-09-20 ➕ 2026-09-01 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpb"
+        "- [x] Plan week 🔼 🛫 2026-09-21 ⏳ 2026-09-22 08:00 📅 2026-09-23 17:30 ✅ 2026-09-20 ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     assert_eq!(
         inbox_line(&task(U2, "Buy milk")),
-        "- [ ] Buy milk 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpc"
+        "- [ ] Buy milk 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc"
     );
 }
 
