@@ -39,23 +39,30 @@ end
 --- Conceals the tokens in the current window when it shows a Markdown file of a vault,
 -- and undoes that when it shows anything else. 'conceallevel' is raised to 2 and
 -- 'concealcursor' gains the modes above; both get their previous value back, unless
--- something else changed them in the meantime.
+-- something else changed them in the meantime. In a vault window the two options are
+-- brought back up whenever another plugin resets them (render-markdown.nvim does so on
+-- every render), which is why this also runs on `OptionSet`.
 function M.refresh()
 	local buf = vim.api.nvim_get_current_buf()
 	local wanted = vim.bo[buf].filetype == "markdown" and M.in_vault(vim.api.nvim_buf_get_name(buf))
 	local state = vim.w.restask_conceal
-	if wanted and not state then
-		state = {
-			match = vim.fn.matchadd("Conceal", M.PATTERN, 10, -1, { conceal = "" }),
-			level = vim.wo.conceallevel,
-			cursor = vim.wo.concealcursor,
-		}
-		vim.wo.conceallevel = math.max(state.level, 2)
-		vim.wo.concealcursor = M.with_modes(state.cursor, M.concealcursor)
-		state.set_level = vim.wo.conceallevel
-		state.set_cursor = vim.wo.concealcursor
+	if wanted then
+		state = state
+			or {
+				match = vim.fn.matchadd("Conceal", M.PATTERN, 10, -1, { conceal = "" }),
+				level = vim.wo.conceallevel,
+				cursor = vim.wo.concealcursor,
+			}
+		state.set_level = math.max(vim.wo.conceallevel, 2)
+		state.set_cursor = M.with_modes(vim.wo.concealcursor, M.concealcursor)
+		if vim.wo.conceallevel ~= state.set_level then
+			vim.wo.conceallevel = state.set_level
+		end
+		if vim.wo.concealcursor ~= state.set_cursor then
+			vim.wo.concealcursor = state.set_cursor
+		end
 		vim.w.restask_conceal = state
-	elseif state and not wanted then
+	elseif state then
 		pcall(vim.fn.matchdelete, state.match)
 		if vim.wo.conceallevel == state.set_level then
 			vim.wo.conceallevel = state.level
@@ -76,6 +83,11 @@ function M.register(concealcursor)
 	local group = vim.api.nvim_create_augroup("restask_conceal", { clear = true })
 	vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "FileType" }, {
 		group = group,
+		callback = M.refresh,
+	})
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = group,
+		pattern = { "conceallevel", "concealcursor" },
 		callback = M.refresh,
 	})
 	M.refresh()

@@ -108,7 +108,9 @@ and the `🆔` token.
   Markdown file of a vault (a `restask.toml` or `.restask/` above the file). The file is
   not changed: a window match conceals the text, `conceallevel` is raised to 2 and the
   modes of `concealcursor` (default `nc`) are added to the window's option; all three
-  are undone when the window shows something else. Insert mode is not among the default
+  are undone when the window shows something else. The two options are raised again
+  whenever something else resets them in such a window (`OptionSet`;
+  render-markdown.nvim does on every render). Insert mode is not among the default
   modes, so the line being typed in shows its token — Neovim has no guard like §15.5's.
 - `init.lua`: `require("restask").setup({ keymaps = true, conceal = true })` →
   `<leader>td` toggle, `<leader>ta` add, tokens concealed (`conceal = false` turns that
