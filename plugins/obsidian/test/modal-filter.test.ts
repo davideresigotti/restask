@@ -90,3 +90,9 @@ describe("§15.2 typing trigger", () => {
 		expect(triggerAt("- [ ] highway", TODAY)).toBeUndefined();
 	});
 });
+
+describe("§15.2 repeat keyword", () => {
+	it("re suggests the repeat rule opener", () => {
+		expect(suggestionsFor("re", TODAY)).toEqual([{ keyword: "repeat", insert: "🔁 every " }]);
+	});
+});

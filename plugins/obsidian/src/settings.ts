@@ -42,7 +42,7 @@ export class RestaskSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Suggest while typing")
 			.setDesc(
-				"In a task line, typing two or more letters of a keyword (high, medium, low, due, start, scheduled, today, tomorrow) offers the matching metadata. Esc dismisses the menu.",
+				"In a task line, typing two or more letters of a keyword (high, medium, low, due, start, scheduled, repeat, today, tomorrow) offers the matching metadata. Esc dismisses the menu.",
 			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.suggestWhileTyping).onChange(async (value) => {

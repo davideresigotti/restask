@@ -14,7 +14,11 @@ engine's base snapshots and no other program may write them.)
 ### 15.1 `markdown.ts` — grammar port
 
 A port of §6.1/§6.2 (same regexes, same codepoints, same nesting rules), tested against
-copies of the Rust fixtures under `test/fixtures/`.
+copies of the Rust fixtures under `test/fixtures/`. The `🔁` token is recognised with the
+same boundaries as the engine (`recurrenceLength`, same cases as
+`tests/domain_recurrence.rs`); the plugin does not interpret the rule — completing a
+recurring task leaves the checked line under the done heading and the daemon rolls the
+series forward (§11.6).
 
 ### 15.2 `modal.ts` — metadata suggestions
 
@@ -22,6 +26,7 @@ copies of the Rust fixtures under `test/fixtures/`.
 |---|---|
 | `highest` / `high` / `medium` / `low` / `lowest` | 🔺 ⏫ 🔼 🔽 ⏬ |
 | `due` / `start` / `scheduled` | `📅 ` / `🛫 ` / `⏳ ` |
+| `repeat` | `🔁 every ` (then type the rule: `week on Monday`, `month on the 15th`, …) |
 | `today` / `tomorrow` | `📅 <date>` |
 
 - `suggestionsFor(fragment, today)`: entries whose keyword starts with the fragment;

@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::config::VaultConfig;
-use crate::domain::{LocalDate, Priority, TaskUid, When};
+use crate::domain::{LocalDate, Priority, Recurrence, TaskUid, When};
 
 /// The §6.1 task-line regex, verbatim: single-line unordered-list checkbox.
 const TASK_LINE_PATTERN: &str =
@@ -91,6 +91,8 @@ pub struct TaskDraft {
     pub created: Option<LocalDate>,
     /// `✅` value.
     pub completed_on: Option<LocalDate>,
+    /// `🔁` rule.
+    pub recurrence: Option<Recurrence>,
 }
 
 impl From<&crate::domain::Task> for TaskDraft {
@@ -110,6 +112,7 @@ impl From<&crate::domain::Task> for TaskDraft {
             scheduled: task.scheduled,
             created: task.created,
             completed_on,
+            recurrence: task.recurrence.clone(),
         }
     }
 }
@@ -177,6 +180,11 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
     spans.extend(uid_spans);
     let uid = uid.and_then(|v| TaskUid::parse(&v).ok());
 
+    let recurrence = scan_recurrence(body).map(|(span, rule)| {
+        spans.push(span);
+        rule
+    });
+
     let text = extract_text(body, &spans);
     Some(TaskLine {
         indent_chars: indent.chars().count(),
@@ -191,8 +199,26 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
             scheduled,
             created,
             completed_on,
+            recurrence,
         },
     })
+}
+
+/// Recurrence token (§6.1): `🔁`, whitespace, then a rule in the vault spelling
+/// ([`Recurrence::from_text`]). The span covers the emoji and exactly the words that form
+/// the rule; a `🔁` not followed by a rule is ordinary text.
+fn scan_recurrence(body: &str) -> Option<(Range<usize>, Recurrence)> {
+    const SYMBOL: &str = "🔁";
+    let at = body.find(SYMBOL)?;
+    let after = &body[at + SYMBOL.len()..];
+    let rule_text = after.trim_start_matches([' ', '\t']);
+    let gap = after.len() - rule_text.len();
+    if gap == 0 {
+        return None;
+    }
+    let (rule, len) = Recurrence::from_text(rule_text)?;
+    let start = at + SYMBOL.len() + gap;
+    Some((at..start + len, rule))
 }
 
 /// Byte offsets of every priority emoji occurring as a standalone token in `body`,

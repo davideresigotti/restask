@@ -57,6 +57,7 @@ async fn add(
             text: text.to_string(),
             priority: priority.map(str::to_string),
             due: due.map(str::to_string),
+            repeat: None,
         },
         vault.path(),
         mock,
@@ -385,6 +386,7 @@ async fn lists_and_local_commands_need_no_server() {
             text: "captured offline".to_string(),
             priority: None,
             due: None,
+            repeat: None,
         },
         vault.path().to_path_buf(),
         machine(),
@@ -665,4 +667,33 @@ async fn doctor_without_a_configured_endpoint_stays_soft() {
     assert_eq!(report.exit_code, 0);
     assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "caldav-auth"), None);
+}
+
+#[tokio::test]
+async fn add_with_a_repeat_rule() {
+    let vault = temp_vault();
+    let mock = MockCaldav::new();
+    let add = |repeat: &str| Command::Add {
+        text: "water the plants".to_string(),
+        priority: None,
+        due: Some("2026-09-21".to_string()),
+        repeat: Some(repeat.to_string()),
+    };
+    let code = run(add("every 2 weeks on mon"), vault.path(), &mock)
+        .await
+        .unwrap();
+    assert_eq!(code, 0);
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.contains("- [ ] water the plants 🔁 every 2 weeks on Monday 📅 2026-09-21"));
+    let uid = uid_of(&vault, "water the plants");
+    assert!(mock
+        .resource("inbox", &uid)
+        .unwrap()
+        .body
+        .contains("RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO\r\n"));
+
+    for bad in ["sometimes", "every week and then some"] {
+        let error = run(add(bad), vault.path(), &mock).await.unwrap_err();
+        assert!(error.to_string().contains("repeat"), "{error}");
+    }
 }

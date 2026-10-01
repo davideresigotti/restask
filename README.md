@@ -18,6 +18,7 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 | 🔺 ⏫ 🔼 🔽 ⏬ | priority: highest, high, medium, low, lowest | `- [ ] Renew the certificate ⏫` |
 | 📅 | due (date, or date and time) | `📅 2026-09-19`, `📅 2026-09-19 17:00` |
 | 🛫 / ⏳ | start / scheduled | `🛫 2026-09-18` |
+| 🔁 | repeats | `🔁 every week`, `🔁 every 2 weeks on Monday, Thursday`, `🔁 every month on the 15th`, `🔁 every month on the last Friday`, `🔁 every year`, `… for 5 times`, `… until 2026-12-31` |
 | ✅ | completed on | `✅ 2026-09-19` |
 | ➕ | created on (added automatically) | `➕ 2026-09-17` |
 | 🆔 | the task's UID (added automatically; leave it alone) | `🆔 restask-01jz…` |
@@ -38,7 +39,7 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 
 ## Completion Behaviour
 - Once a task is checked off — in Obsidian, in any editor, or in Tasks.org — it disappears from the active list and is moved under a `### Done` heading in its source file (or in `TODO.md` for on-the-fly tasks), marked with completion date syntax like `✅ 2026-09-19`.
-- A task set to repeat in Tasks.org repeats in the vault too: checking it off leaves the finished occurrence under `### Done` and puts the task back in the active list with its next date.
+- A repeating task (`🔁 every week`, or a repeat set in Tasks.org — the two are the same thing) is never finished for good: checking it off leaves the finished occurrence under `### Done` and puts the task back in the active list with its next date.
 - Tasks in the `### Done` section follow a newest-on-top sort order. If a task is accidentally checked, it can easily be recovered since it appears at the very top: uncheck it and it returns to the active list.
 
 # Lists & Routing

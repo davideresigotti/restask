@@ -42,7 +42,7 @@ fn source_link(task: &Task) -> String {
 }
 
 /// Renders a task sourced from a vault note as a mirror line (§7):
-/// `- [<check>] <text> <priority?> <🛫?><⏳?><📅?> [[<stem>#<heading>|<stem>]] 🆔 <uid>`;
+/// `- [<check>] <text> <priority?> <🔁?><🛫?><⏳?><📅?> [[<stem>#<heading>|<stem>]] 🆔 <uid>`;
 /// `#<heading>` is omitted when the task has no preceding heading.
 pub fn mirror_line(task: &Task) -> String {
     let mut parts: Vec<String> = vec![format!("- {}", checkbox(task))];
@@ -51,6 +51,9 @@ pub fn mirror_line(task: &Task) -> String {
     }
     if let Some(priority) = task.priority {
         parts.push(priority.emoji().to_string());
+    }
+    if let Some(rule) = &task.recurrence {
+        parts.push(format!("🔁 {}", rule.to_text()));
     }
     if let Some(when) = task.start {
         parts.push(format!("🛫 {}", fmt_when(when)));
@@ -253,6 +256,12 @@ pub fn mirror_edits(
             ops.push(Mutation::SetPriority {
                 uid: uid.clone(),
                 priority: now.priority,
+            });
+        }
+        if now.recurrence != was.recurrence && source.recurrence == was.recurrence {
+            ops.push(Mutation::SetRecurrence {
+                uid: uid.clone(),
+                recurrence: now.recurrence.clone(),
             });
         }
         for (field, now, was, held) in [

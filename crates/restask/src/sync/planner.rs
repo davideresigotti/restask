@@ -6,12 +6,12 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::caldav::RemoteResource;
-use crate::domain::{ListSlug, LocalDate, LocalDateTime, Status, Task, TaskUid, When};
+use crate::domain::{ListSlug, LocalDate, LocalDateTime, Recurrence, Status, Task, TaskUid, When};
 use crate::markdown::mutator::Mutation;
 use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
 use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
-use crate::vtodo::Recurrence;
+use crate::vtodo::recurrence::{consume_count, find_in_extras};
 
 /// Consecutive cycles a stale-looking vault file is waited on (R1) before the vault is
 /// taken at its word again (vault authority).
@@ -257,30 +257,15 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .or_default()
                     .extend(merged.mutations);
             }
-            if let Some(roll) = roll_forward(&merged.task, resource) {
+            if let Some(roll) = roll_forward(&merged.task, Some(resource)) {
                 // R8r — one occurrence of a recurring task was completed in the vault:
                 // the checked line becomes a record of its own, the series moves on.
-                tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
-                let ops = p.mutations.entry(local.source.path.clone()).or_default();
-                ops.push(Mutation::Rekey {
-                    uid: uid.clone(),
-                    new_uid: roll.record.uid.clone(),
-                });
-                ops.push(Mutation::Insert {
-                    draft: TaskDraft::from(&roll.series),
-                    under: None,
-                });
+                let (task, extras) = apply_roll(&mut p, &local.source.path, uid, roll);
                 p.puts.push(PutOp {
-                    task: roll.series,
+                    task,
                     name: resource.name.clone(),
-                    extras: roll.extras,
+                    extras,
                     if_match: Some(resource.etag.clone()),
-                });
-                p.puts.push(PutOp {
-                    name: roll.record.uid.as_str().to_string(),
-                    task: roll.record,
-                    extras: Vec::new(),
-                    if_match: None,
                 });
             } else if merged.push {
                 p.puts.push(PutOp {
@@ -305,25 +290,8 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .extend(merged.mutations);
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
-            let (task, extras) = match roll_forward(&merged.task, origin.1) {
-                Some(roll) => {
-                    let ops = p.mutations.entry(local.source.path.clone()).or_default();
-                    ops.push(Mutation::Rekey {
-                        uid: uid.clone(),
-                        new_uid: roll.record.uid.clone(),
-                    });
-                    ops.push(Mutation::Insert {
-                        draft: TaskDraft::from(&roll.series),
-                        under: None,
-                    });
-                    p.puts.push(PutOp {
-                        name: roll.record.uid.as_str().to_string(),
-                        task: roll.record,
-                        extras: Vec::new(),
-                        if_match: None,
-                    });
-                    (roll.series, roll.extras)
-                }
+            let (task, extras) = match roll_forward(&merged.task, Some(origin.1)) {
+                Some(roll) => apply_roll(&mut p, &local.source.path, uid, roll),
                 None => (merged.task, origin.1.task.extras.clone()),
             };
             p.moves.push(MoveOp {
@@ -349,11 +317,16 @@ pub fn plan(s: &Snapshots) -> Plan {
             p.forgets.push(uid.clone());
             tracing::info!(uid = %uid, path = %local.source.path, "task_deleted");
         } else {
-            // R2 — the server has never seen it (or lost it wholesale): push.
+            // R2 — the server has never seen it (or lost it wholesale): push. A recurring
+            // task that is already checked rolls forward first (R8r).
+            let (task, extras) = match roll_forward(local, None) {
+                Some(roll) => apply_roll(&mut p, &local.source.path, uid, roll),
+                None => (local.clone(), Vec::new()),
+            };
             p.puts.push(PutOp {
-                task: local.clone(),
+                task,
                 name: uid.as_str().to_string(),
-                extras: Vec::new(),
+                extras,
                 if_match: None,
             });
         }
@@ -586,18 +559,28 @@ struct Roll {
     extras: Vec<String>,
 }
 
-/// Rolls a recurring task forward when the merge says "completed" while the server copy
-/// is still open — i.e. the completion was made in the vault. `None` when the task does
-/// not recur, when this was the rule's last occurrence, or when the rule has ended: then
-/// the completion is an ordinary one.
-fn roll_forward(merged: &Task, resource: &RemoteResource) -> Option<Roll> {
+/// Rolls a recurring task forward when it is completed in the vault while the server
+/// copy (if any) is still open. `None` when the task does not recur, when this was the
+/// rule's last occurrence, or when the rule has ended: then the completion is an
+/// ordinary one.
+fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> {
     let Status::Completed { on } = merged.status else {
         return None;
     };
-    if resource.task.task.status != Status::Active {
+    if remote.is_some_and(|resource| resource.task.task.status != Status::Active) {
         return None;
     }
-    let rule = Recurrence::find(&resource.task.extras)?;
+    let mut extras = remote
+        .map(|resource| resource.task.extras.clone())
+        .unwrap_or_default();
+    // The task's own rule (`🔁`), else a rule only the server can express.
+    let (rule, unmanaged) = match &merged.recurrence {
+        Some(rule) => (rule.clone(), None),
+        None => {
+            let (index, rule) = find_in_extras(&extras)?;
+            (rule, Some(index))
+        }
+    };
     if rule.is_last() {
         return None;
     }
@@ -614,6 +597,7 @@ fn roll_forward(merged: &Task, resource: &RemoteResource) -> Option<Roll> {
 
     let mut series = merged.clone();
     series.status = Status::Active;
+    series.recurrence = merged.recurrence.as_ref().map(Recurrence::consumed);
     if merged.due.is_some() || (merged.start.is_none() && merged.scheduled.is_none()) {
         series.due = Some(next);
     }
@@ -633,16 +617,37 @@ fn roll_forward(merged: &Task, resource: &RemoteResource) -> Option<Roll> {
         on.0.and_hms_opt(0, 0, 0).map(|at| at.and_utc()),
     );
     record.parent = None;
+    record.recurrence = None;
 
-    let mut extras = resource.task.extras.clone();
-    if let Some(line) = extras.get_mut(rule.index) {
-        *line = rule.after_one_occurrence();
+    if let Some(line) = unmanaged.and_then(|index| extras.get_mut(index)) {
+        *line = consume_count(line);
     }
     Some(Roll {
         series,
         record,
         extras,
     })
+}
+
+/// Queues the vault edits and the record's creation for a roll; returns the series write.
+fn apply_roll(p: &mut Plan, path: &str, uid: &TaskUid, roll: Roll) -> (Task, Vec<String>) {
+    tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
+    let ops = p.mutations.entry(path.to_string()).or_default();
+    ops.push(Mutation::Rekey {
+        uid: uid.clone(),
+        new_uid: roll.record.uid.clone(),
+    });
+    ops.push(Mutation::Insert {
+        draft: TaskDraft::from(&roll.series),
+        under: None,
+    });
+    p.puts.push(PutOp {
+        name: roll.record.uid.as_str().to_string(),
+        task: roll.record,
+        extras: Vec::new(),
+        if_match: None,
+    });
+    (roll.series, roll.extras)
 }
 
 /// The calendar day of a date or wall time.

@@ -72,7 +72,7 @@ Two readings that the snapshots keep apart on purpose: a list missing from `remo
 For a task present in the vault and in its collection, with `base` its settled content (or
 none):
 
-For each **sync field** (text, status, priority, due, start, scheduled):
+For each **sync field** (text, status, priority, repeat rule, due, start, scheduled):
 
 | local vs remote | base | result |
 |---|---|---|
@@ -94,7 +94,7 @@ Not merged:
 
 Outputs: the merged task; the mutations that turn the vault line into it (a completion is
 `SetStatus` + `MoveToDone`, a reopening `RestoreFromDone` + `SetStatus`, the rest
-`EditText` / `SetPriority` / `SetWhen`); and whether the server copy must be replaced
+`EditText` / `SetPriority` / `SetRecurrence` / `SetWhen`); and whether the server copy must be replaced
 (merged ≠ remote in any sync field, parent, creation date or source path). Both can
 happen at once: fields changed on different sides are all kept.
 
@@ -118,7 +118,7 @@ Task **in the vault**:
 | — | its list was not listed this pass | nothing (unknown) |
 | **R1** | valid base, base ≠ vault in a sync field, and the base is newer than the vault file by > 120 s, fewer than 3 consecutive deferrals | **defer**: a vault copy that file sync has not caught up yet. After 3 passes the vault is taken at its word. |
 | **R7/R8** | a copy in its list | merge (§11.3). Vault mutations and/or a put (`If-Match` the listed etag, extras carried); if neither, settle when base/index are missing or stale. Other copies of the UID are strays → delete. |
-| **R8r** | as R8, the merge says *completed*, the server copy is still open and carries an `RRULE` with a next occurrence | **roll forward** (§11.6) instead of completing the series |
+| **R8r** | the task is completed in the vault, the server copy is open or absent, and the task has a repeat rule with a next occurrence (applies to R8, R9 and R2) | **roll forward** (§11.6) instead of completing the series |
 | **R9** | copies only in other lists | **move**: merge with the first copy, put into the task's list (create), then delete the old copy; further copies are strays. |
 | — | no copy, an adoption for this UID is in flight | handled by R5 |
 | **R3** | no copy; settled; the collection it was settled in was listed and is not a *reset* | deleted on the server → delete the vault line, tombstone, forget |
@@ -144,38 +144,38 @@ parent's adopted UID, and inserts are ordered parents-first.
 
 ### 11.6 Recurring tasks
 
-restask does not author recurrence; a rule is set in another client (Tasks.org) and
-travels with the task as unmanaged content (`RRULE` among the extras, §8.2). Recurring
-clients complete one occurrence by moving the task to its next date and leaving it open.
-restask does the same when an occurrence is completed **in the vault** — pushing
-`STATUS:COMPLETED` would end the whole series.
+A repeat rule comes from the vault (`🔁 every …`, §6.1) or from another client (`RRULE`).
+A rule both can spell is a managed field of the task (§3.6) and merges like any other
+sync field: set, changed or removed on either side, it reaches the other. A richer rule
+stays on the server as unmanaged content and is not shown in the vault.
 
-When the merge yields a completed task while the server copy is open and has a rule
-(`vtodo::Recurrence`):
+Either way, recurring clients complete one occurrence by moving the task to its next date
+and leaving it open, and restask does the same when an occurrence is completed **in the
+vault** — pushing `STATUS:COMPLETED` would end the whole series.
+
+When a task is completed in the vault while the server copy is open (or does not exist
+yet) and the task has a rule — its own, else an unmanaged one among the server's extras:
 
 - **The series** keeps its UID, becomes active again, and is dated at the next occurrence:
   the first one after the occurrence just done that also lies after the completion date
   (a long-overdue task jumps to its next upcoming date, not to another overdue one). The
   occurrence is identified by the due date — else the start, else the scheduled date,
   else the completion day (the task then gets a due date). The other dates move by the
-  same number of days; a time of day is kept. It is put with its extras; a `COUNT` in the
-  rule is decremented.
+  same number of days; a time of day is kept. A `COUNT` is decremented (`for 5 times` →
+  `for 4 times`; in an unmanaged rule, in place, the rest handed back as written).
 - **The occurrence that was done** stays in the vault as what it is — the checked line
-  under the done heading — and becomes a task of its own: its UID is derived from the
-  series UID and the occurrence date (`Rekey`), and it is created on the server as an
-  ordinary completed task, without the rule.
-- In the vault this is `Rekey` on the checked line plus `Insert` of the series line at
-  the bottom of the active list.
+  under the done heading — and becomes a task of its own, without the rule: its UID is
+  derived from the series UID and the occurrence date, and it is created on the server
+  as an ordinary completed task.
+- In the vault this is `Rekey` on the checked line (new UID, `🔁` removed) plus `Insert`
+  of the series line at the bottom of the active list.
 
 Not rolled, i.e. an ordinary completion: a task without a rule; the rule's last
-occurrence (`COUNT=1`); a rule that has ended (`UNTIL` passed); a completion made on the
-server side (that client decided to end the task).
+occurrence (`for 1 time` / `COUNT=1`); a rule that has ended (`until` passed); a
+completion made on the server side (that client decided to end the task).
 
-Supported rule parts: `FREQ` (`MINUTELY` … `YEARLY`), `INTERVAL`, `BYDAY` (weekly lists;
-monthly with or without ordinals such as `2TU`, `-1FR`), `BYMONTHDAY` (negative values
-count from the month's end), `COUNT`, `UNTIL`. Months or years lacking the anchor's day
-have no occurrence (RFC 5545). Other parts are ignored for the computation and kept in
-the rule as written.
+The roll is decided by the planner, so it happens at the first pass that reaches the
+server; until then the checked line simply waits under the done heading.
 
 ### 11.5 Failure and idempotence
 

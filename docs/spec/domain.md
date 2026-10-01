@@ -85,6 +85,7 @@ pub struct Task {
     pub due: Option<When>,
     pub start: Option<When>,
     pub scheduled: Option<When>,
+    pub recurrence: Option<Recurrence>,   // §3.6
     pub created: Option<LocalDate>,
     pub parent: Option<TaskUid>,
     pub source: SourceRef,
@@ -95,11 +96,59 @@ pub struct Task {
 ```
 
 `Task::thumbprint()` is FNV-1a (64-bit) over uid, list, text, status, priority, due,
-start, scheduled, created, parent. It identifies a base snapshot (§9); it is **not** how
+start, scheduled, created, parent, recurrence. It identifies a base snapshot (§9); it is **not** how
 two versions are compared for syncing — the merge compares fields (§11.3).
 
-The fields the merge manages ("sync fields") are `text`, `status`, `priority`, `due`,
-`start`, `scheduled`.
+The fields the merge manages ("sync fields") are `text`, `status`, `priority`,
+`recurrence`, `due`, `start`, `scheduled`.
+
+### 3.6 `recurrence.rs`
+
+A repeat rule has two spellings: the vault's `🔁 every …` text and iCalendar's `RRULE`.
+
+```rust
+pub struct Recurrence { /* freq, interval, by_day, by_month_day, count, until */ }
+impl Recurrence {
+    pub fn from_text(text: &str) -> Option<(Recurrence, usize)>;  // rule + bytes it occupies
+    pub fn to_text(&self) -> String;                              // canonical vault spelling
+    pub fn from_rrule(value: &str) -> Option<(Recurrence, bool)>; // rule + "understood exactly"
+    pub fn to_rrule(&self) -> String;                             // canonical RRULE value
+    pub fn next_after(&self, anchor: When, done_on: LocalDate) -> Option<When>;
+    pub fn is_last(&self) -> bool;                                // COUNT ≤ 1
+    pub fn consumed(&self) -> Recurrence;                         // COUNT − 1
+}
+```
+
+Vault spelling (case-insensitive; weekday names may be abbreviated to three letters;
+list items are separated by commas and/or `and`):
+
+| Vault | `RRULE` |
+|---|---|
+| `every day`, `every 3 days` | `FREQ=DAILY`, `FREQ=DAILY;INTERVAL=3` |
+| `every week`, `every 2 weeks` | `FREQ=WEEKLY`, `…;INTERVAL=2` |
+| `every week on Monday, Thursday` | `FREQ=WEEKLY;BYDAY=MO,TH` |
+| `every weekday` | `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR` |
+| `every month`, `every month on the 15th` | `FREQ=MONTHLY`, `…;BYMONTHDAY=15` |
+| `every month on the 1st, 15th, last day` | `FREQ=MONTHLY;BYMONTHDAY=1,15,-1` |
+| `every month on the 2nd Tuesday` / `the last Friday` | `FREQ=MONTHLY;BYDAY=2TU` / `-1FR` |
+| `every year`, `every 6 hours`, `every 30 minutes` | `FREQ=YEARLY`, `HOURLY`, `MINUTELY` |
+| `… for 5 times` | `…;COUNT=5` |
+| `… until 2026-12-31` | `…;UNTIL=20261231` |
+
+- `from_text` reads a rule at the **start** of the text and stops where it ends: in
+  `every week on Monday call mom` the rule is `every week on Monday`. Text that does not
+  start with a rule (`every now and then`) yields none.
+- `to_text` is canonical (`every week on mon and thu` → `every week on Monday,
+  Thursday`); lists are sorted and de-duplicated, so equal rules compare equal whichever
+  spelling they came from.
+- **Managed vs. unmanaged.** A rule is *managed* — a field of the task, shown and editable
+  in the vault — only when `from_rrule` understood it exactly: every part known
+  (`FREQ`, `INTERVAL`, `BYDAY`, `BYMONTHDAY`, `COUNT`, `UNTIL`, `WKST=MO`) and expressible
+  in the table above. Any richer rule (`BYSETPOS`, `BYMONTH`, a daily rule with `BYDAY`,
+  …) stays the server's: it travels as an extra (§8.2) and never appears in the vault,
+  but still drives the roll-forward (§11.6), computed from its known parts.
+- `next_after`: the first occurrence after `anchor` that also lies after `done_on`. A
+  month or year lacking the anchor's day has no occurrence; a time of day is kept.
 
 ## §4 Timestamp contract (Markdown ⇄ VTODO)
 

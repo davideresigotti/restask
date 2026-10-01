@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::caldav::{CaldavClient, CaldavPort, Offline};
 use crate::config::{machine_config_path, ConfigError, MachineConfig, VaultConfig};
 use crate::daemon::{self, DaemonConfig};
-use crate::domain::{Clock, Priority, Status, SystemClock, TaskUid, When};
+use crate::domain::{Clock, Priority, Recurrence, Status, SystemClock, TaskUid, When};
 use crate::markdown::{parse, MARKER};
 use crate::setup;
 use crate::store::{cache_read, Index};
@@ -78,6 +78,9 @@ pub enum Command {
         /// Due date or date-time (`YYYY-MM-DD[ HH:MM]`).
         #[arg(long)]
         due: Option<String>,
+        /// Repeat rule in the vault spelling, e.g. `"every week on Monday"`.
+        #[arg(long)]
+        repeat: Option<String>,
     },
     /// Complete a task and move it to the done region.
     Done {
@@ -392,12 +395,14 @@ pub async fn run_with<C: CaldavPort>(
             text,
             priority,
             due,
+            repeat,
         } => {
             let priority = parse_priority(priority)?;
             let due = parse_due(due)?;
+            let repeat = parse_repeat(repeat)?;
             let cfg = load_vault_config(&vault)?;
             let engine = Engine::new(&vault, cfg, machine, caldav, clock);
-            let task = engine.add(&text, priority, due).await?;
+            let task = engine.add(&text, priority, due, repeat).await?;
             println!("{}", task.uid);
             Ok(0)
         }
@@ -948,6 +953,24 @@ fn parse_due(raw: Option<String>) -> Result<Option<When>, RestaskError> {
             field: "due",
             reason: error.to_string(),
         })
+    })
+    .transpose()
+}
+
+/// Parses `--repeat` (§13.3): a whole rule in the vault spelling (§3.6).
+fn parse_repeat(raw: Option<String>) -> Result<Option<Recurrence>, RestaskError> {
+    raw.map(|text| {
+        let text = text.trim();
+        match Recurrence::from_text(text) {
+            Some((rule, len)) if len == text.len() => Ok(rule),
+            _ => Err(RestaskError::Validation {
+                field: "repeat",
+                reason: format!(
+                    "cannot read `{text}` as a repeat rule (e.g. `every day`, `every 2 weeks on \
+                     Monday, Thursday`, `every month on the 15th`, `every year`)"
+                ),
+            }),
+        }
     })
     .transpose()
 }

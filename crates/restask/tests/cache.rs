@@ -40,6 +40,7 @@ fn sample_task() -> Task {
         due: Some(when_dt("2026-10-01 17:30")),
         start: Some(when_date("2026-09-21")),
         scheduled: Some(when_date("2026-09-19")),
+        recurrence: None,
         created: Some(LocalDate::parse("2026-09-01").unwrap()),
         parent: Some(uid(PARENT)),
         source: SourceRef {

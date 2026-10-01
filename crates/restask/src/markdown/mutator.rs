@@ -2,7 +2,7 @@
 //! persist the result through [`crate::fsio`].
 
 use crate::config::VaultConfig;
-use crate::domain::{Clock, LocalDate, Priority, TaskUid, When};
+use crate::domain::{Clock, LocalDate, Priority, Recurrence, TaskUid, When};
 use crate::error::RestaskError;
 use crate::markdown::parser::{parse, parse_line, TaskDraft, TaskLine};
 
@@ -39,8 +39,16 @@ pub enum Mutation {
         /// The fresh UID.
         uid: TaskUid,
     },
-    /// Gives the line carrying `uid` the UID `new_uid` instead (a completed occurrence of
-    /// a recurring task becomes a record of its own; the series keeps `uid`).
+    /// Sets or clears the `🔁` repeat rule.
+    SetRecurrence {
+        /// Target task.
+        uid: TaskUid,
+        /// New rule; `None` removes the token.
+        recurrence: Option<Recurrence>,
+    },
+    /// Turns the line carrying `uid` into a record of one completed occurrence of a
+    /// recurring task: it gets the UID `new_uid` and loses its `🔁` rule (the series
+    /// keeps `uid` and the rule on a line of its own).
     Rekey {
         /// The UID the line carries now.
         uid: TaskUid,
@@ -200,11 +208,14 @@ pub(crate) fn fmt_when(when: When) -> String {
 }
 
 /// Renders a task line: indent + marker + checkbox + text + canonical metadata tail
-/// (`<priority> 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted.
+/// (`<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted.
 pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     let mut tail: Vec<String> = Vec::new();
     if let Some(p) = draft.priority {
         tail.push(p.emoji().to_string());
+    }
+    if let Some(rule) = &draft.recurrence {
+        tail.push(format!("🔁 {}", rule.to_text()));
     }
     if let Some(w) = draft.start {
         tail.push(format!("🛫 {}", fmt_when(w)));
@@ -336,9 +347,20 @@ pub fn apply(
                     None => skipped.push((op.clone(), SkipReason::LineChanged)),
                 }
             }
+            Mutation::SetRecurrence { uid, recurrence } => {
+                let recurrence = recurrence.clone();
+                if with_uid_line(&mut lines, uid, |draft| draft.recurrence = recurrence) {
+                    applied.push(op.clone());
+                } else {
+                    skipped.push((op.clone(), SkipReason::UidNotFound));
+                }
+            }
             Mutation::Rekey { uid, new_uid } => {
                 let new_uid = new_uid.clone();
-                if with_uid_line(&mut lines, uid, |draft| draft.uid = Some(new_uid)) {
+                if with_uid_line(&mut lines, uid, |draft| {
+                    draft.uid = Some(new_uid);
+                    draft.recurrence = None;
+                }) {
                     applied.push(op.clone());
                 } else {
                     skipped.push((op.clone(), SkipReason::UidNotFound));

@@ -80,7 +80,7 @@ class MetadataModal extends SuggestModal<Suggestion> {
 		super(app);
 		this.editor = editor;
 		this.today = today;
-		this.setPlaceholder("high, medium, low, due, start, scheduled, today, tomorrow…");
+		this.setPlaceholder("high, medium, low, due, start, scheduled, repeat, today, tomorrow…");
 	}
 
 	getSuggestions(query: string): Suggestion[] {

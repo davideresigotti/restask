@@ -5,5 +5,4 @@ pub mod recurrence;
 pub mod serialize;
 
 pub use parse::{from_vcalendar, RemoteTask};
-pub use recurrence::Recurrence;
 pub use serialize::{to_vcalendar, to_vcalendar_with};

@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::dates::When;
 use crate::domain::task::{Status, Task};
+use crate::vtodo::recurrence::is_rrule;
 
 /// `PRODID` value emitted in every serialized calendar (§8.1).
 const PRODID: &str = "-//restask//restask 0.1.0//EN";
@@ -22,7 +23,7 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1), terminated by CRLF.
 ///
 /// Managed properties are emitted in the exact §8.1 order; `CREATED`, `PRIORITY`,
-/// `DTSTART`, `DUE`, `COMPLETED`, `RELATED-TO`, and `X-RESTASK-SCHEDULED` are omitted when
+/// `DTSTART`, `DUE`, `COMPLETED`, `RRULE`, `RELATED-TO`, and `X-RESTASK-SCHEDULED` are omitted when
 /// their source value is `None`. `DTSTAMP` and `LAST-MODIFIED` carry `now_utc`.
 ///
 /// `extras` are the unmanaged content lines of the resource being replaced
@@ -65,6 +66,9 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
             &format!("COMPLETED:{}", format_utc_midnight(on.0)),
         );
     }
+    if let Some(rule) = &task.recurrence {
+        push_line(&mut out, &format!("RRULE:{}", rule.to_rrule()));
+    }
     if let Some(parent) = &task.parent {
         push_line(
             &mut out,
@@ -88,7 +92,11 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
             nested += 1;
         } else if upper.starts_with("END:") {
             nested = nested.saturating_sub(1);
-        } else if nested == 0 && task.due.is_some() && property_name(&upper) == "DURATION" {
+        } else if nested == 0
+            && ((task.due.is_some() && property_name(&upper) == "DURATION")
+                || (task.recurrence.is_some() && is_rrule(&upper)))
+        {
+            // One DUE-or-DURATION, one rule: what the task itself carries wins.
             continue;
         }
         push_line(&mut out, extra);

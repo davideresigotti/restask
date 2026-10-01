@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
 	linkParents,
+	recurrenceLength,
 	parse,
 	parseLine,
 	PRIORITY_EMOJI,
@@ -35,6 +36,7 @@ function draft(text: string): TaskDraft {
 		scheduled: undefined,
 		created: undefined,
 		completedOn: undefined,
+		recurrence: undefined,
 	};
 }
 
@@ -372,5 +374,53 @@ describe("§6.2 file-level rules", () => {
 		const line = parseLine("- [ ] old task 🆔 taskres-01jzq4tsvg2c9xkw7n5m8rhdpf");
 		expect(line?.draft.uid).toBe("taskres-01jzq4tsvg2c9xkw7n5m8rhdpf");
 		expect(line?.draft.text).toBe("old task");
+	});
+});
+
+describe("§6.1 recurrence token", () => {
+	it("takes exactly the words of the rule", () => {
+		const line = parseLine("- [ ] water plants 🔁 every 2 weeks on Monday, Thursday 📅 2026-09-21");
+		expect(line?.draft.text).toBe("water plants");
+		expect(line?.draft.recurrence).toBe("every 2 weeks on Monday, Thursday");
+		expect(line?.draft.due).toEqual({ kind: "date", date: "2026-09-21" });
+
+		const leading = parseLine("- [ ] 🔁 every month on the 15th pay the rent");
+		expect(leading?.draft.text).toBe("pay the rent");
+		expect(leading?.draft.recurrence).toBe("every month on the 15th");
+	});
+
+	it("a 🔁 that introduces no rule is just text", () => {
+		expect(parseLine("- [ ] replay 🔁 the song")?.draft.text).toBe("replay 🔁 the song");
+		expect(parseLine("- [ ] replay 🔁 the song")?.draft.recurrence).toBeUndefined();
+		expect(parseLine("- [ ] glued 🔁every day")?.draft.recurrence).toBeUndefined();
+	});
+
+	it("matches the engine's rule boundaries", () => {
+		// The same cases as crates/restask/tests/domain_recurrence.rs.
+		const cases: [string, string | undefined][] = [
+			["every day", "every day"],
+			["every 3 days", "every 3 days"],
+			["every weekday", "every weekday"],
+			["every week on mon and thu", "every week on mon and thu"],
+			["every month on the 1st, 22nd, last day", "every month on the 1st, 22nd, last day"],
+			["every 2 months on the 2nd Tuesday", "every 2 months on the 2nd Tuesday"],
+			["every month on the last Friday", "every month on the last Friday"],
+			["every week for 5 times", "every week for 5 times"],
+			["every month until 2026-12-31", "every month until 2026-12-31"],
+			["every week buy milk", "every week"],
+			["every week on Monday call mom", "every week on Monday"],
+			["every month on the 15th pay rent", "every month on the 15th"],
+			["every day on time", "every day"],
+			["every 2 weeks for good", "every 2 weeks"],
+			["every month until further notice", "every month"],
+			["every", undefined],
+			["every now and then", undefined],
+			["every 0 days", undefined],
+			["daily", undefined],
+		];
+		for (const [text, rule] of cases) {
+			const length = recurrenceLength(text);
+			expect(length === undefined ? undefined : text.slice(0, length), text).toBe(rule);
+		}
 	});
 });

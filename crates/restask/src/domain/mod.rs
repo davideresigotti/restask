@@ -3,10 +3,12 @@
 
 pub mod dates;
 pub mod priority;
+pub mod recurrence;
 pub mod task;
 pub mod uid;
 
 pub use dates::{Clock, DateError, LocalDate, LocalDateTime, SystemClock, When};
 pub use priority::Priority;
+pub use recurrence::Recurrence;
 pub use task::{ListSlug, SourceRef, Status, Task};
 pub use uid::{TaskUid, UidError};

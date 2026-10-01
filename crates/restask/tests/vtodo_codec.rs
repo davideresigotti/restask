@@ -29,6 +29,7 @@ fn golden_task() -> Task {
         due: Some(When::Date(LocalDate::parse("2026-09-25").unwrap())),
         start: None,
         scheduled: Some(When::Date(LocalDate::parse("2026-09-23").unwrap())),
+        recurrence: None,
         created: Some(LocalDate::parse("2026-09-19").unwrap()),
         parent: None,
         source: SourceRef {
@@ -140,6 +141,7 @@ fn property_order_full_task() {
         due: Some(When::parse_date_or_datetime("2026-09-25").unwrap()),
         start: Some(When::parse_date_or_datetime("2026-09-24 08:30").unwrap()),
         scheduled: Some(When::parse_date_or_datetime("2026-09-23 09:15").unwrap()),
+        recurrence: None,
         created: Some(LocalDate::parse("2026-09-19").unwrap()),
         parent: Some(parent),
         source: SourceRef {
@@ -264,6 +266,7 @@ fn round_trip_full_task_with_datetimes() {
         due: Some(When::parse_date_or_datetime("2026-09-25 17:00").unwrap()),
         start: Some(When::parse_date_or_datetime("2026-09-24 08:00").unwrap()),
         scheduled: Some(When::parse_date_or_datetime("2026-09-23 07:30").unwrap()),
+        recurrence: None,
         created: Some(LocalDate::parse("2026-09-19").unwrap()),
         parent: Some(parent),
         source: SourceRef {
@@ -540,7 +543,6 @@ fn unmanaged_content_is_collected_as_extras() {
         vec![
             "DESCRIPTION:IBAN in the lease\\, page 2",
             "CATEGORIES:home,money",
-            "RRULE:FREQ=MONTHLY",
             "X-APPLE-SORT-ORDER:123",
             "BEGIN:VALARM",
             "TRIGGER:-PT15M",
@@ -549,6 +551,40 @@ fn unmanaged_content_is_collected_as_extras() {
             "END:VALARM",
         ]
     );
+}
+
+#[test]
+fn an_expressible_rrule_is_the_tasks_repeat_rule_a_richer_one_is_an_extra() {
+    use restask::domain::Recurrence;
+    let remote = from_vcalendar(FOREIGN, &tz_cet(), &list()).unwrap();
+    assert_eq!(
+        remote.task.recurrence,
+        Some(Recurrence::from_text("every month").unwrap().0)
+    );
+    let rich = FOREIGN.replace(
+        "RRULE:FREQ=MONTHLY",
+        "RRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,FR",
+    );
+    let remote = from_vcalendar(&rich, &tz_cet(), &list()).unwrap();
+    assert_eq!(remote.task.recurrence, None);
+    assert!(remote
+        .extras
+        .contains(&"RRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,FR".to_string()));
+
+    // Written: the task's rule, once — it replaces a rule kept among the extras.
+    let mut task = golden_task();
+    task.recurrence = Some(Recurrence::from_text("every 2 weeks on Monday").unwrap().0);
+    let out = to_vcalendar_with(&task, now(), &remote.extras);
+    assert_eq!(out.matches("RRULE").count(), 1);
+    assert!(out.contains(
+        "PRIORITY:1\r\nDUE;VALUE=DATE:20260925\r\nRRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO\r\n"
+    ));
+    let back = from_vcalendar(&out, &tz_cet(), &list()).unwrap();
+    assert_eq!(back.task.recurrence, task.recurrence);
+    // Without a rule of its own, the task hands the server's rule back untouched.
+    task.recurrence = None;
+    let out = to_vcalendar_with(&task, now(), &remote.extras);
+    assert!(out.contains("RRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,FR\r\n"));
 }
 
 #[test]

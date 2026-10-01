@@ -433,3 +433,28 @@ fn nesting_never_crosses_a_heading_and_done_records_are_flat() {
         ]
     );
 }
+
+#[test]
+fn recurrence_token_takes_exactly_the_words_of_the_rule() {
+    use restask::domain::Recurrence;
+    let rule = |text: &str| Some(Recurrence::from_text(text).unwrap().0);
+
+    let line = parse_line("- [ ] water plants 🔁 every 2 weeks on Monday, Thursday 📅 2026-09-21")
+        .unwrap();
+    assert_eq!(line.draft.text, "water plants");
+    assert_eq!(
+        line.draft.recurrence,
+        rule("every 2 weeks on Monday, Thursday")
+    );
+    assert!(line.draft.due.is_some());
+
+    // Text may follow the rule; a 🔁 that introduces no rule is just text.
+    let line = parse_line("- [ ] 🔁 every month on the 15th pay the rent").unwrap();
+    assert_eq!(line.draft.text, "pay the rent");
+    assert_eq!(line.draft.recurrence, rule("every month on the 15th"));
+    let line = parse_line("- [ ] replay 🔁 the song").unwrap();
+    assert_eq!(line.draft.text, "replay 🔁 the song");
+    assert_eq!(line.draft.recurrence, None);
+    let line = parse_line("- [ ] glued 🔁every day").unwrap();
+    assert_eq!(line.draft.recurrence, None);
+}

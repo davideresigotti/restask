@@ -28,6 +28,7 @@ fn sample_task() -> Task {
         due: Some(When::parse_date_or_datetime("2026-09-19").unwrap()),
         start: None,
         scheduled: None,
+        recurrence: None,
         created: Some(LocalDate::parse("2026-09-01").unwrap()),
         parent: None,
         source: SourceRef {

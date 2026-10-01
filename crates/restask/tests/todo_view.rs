@@ -35,6 +35,7 @@ fn task(uid: &str, text: &str) -> Task {
         due: None,
         start: None,
         scheduled: None,
+        recurrence: None,
         created: None,
         parent: None,
         source: SourceRef {

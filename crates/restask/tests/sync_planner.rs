@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, TimeZone, Utc};
 
 use restask::caldav::RemoteResource;
-use restask::domain::{ListSlug, LocalDate, Priority, SourceRef, Status, Task, TaskUid, When};
+use restask::domain::{
+    ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
+};
 use restask::markdown::mutator::{Mutation, WhenField};
 use restask::store::index::{Index, IndexEntry};
 use restask::sync::{plan, DeferReason, DeleteOp, Plan, Snapshots, DEFER_LIMIT};
@@ -43,6 +45,7 @@ fn task(n: u64, list: &str, text: &str) -> Task {
         due: None,
         start: None,
         scheduled: None,
+        recurrence: None,
         created: Some(date("2026-09-01")),
         parent: None,
         source: SourceRef {
@@ -994,29 +997,28 @@ fn a_task_another_client_stored_under_its_own_name_is_replaced_in_place() {
 
 // ── R8r: recurring tasks ──────────────────────────────────────────────────────────────
 
+fn repeat(text: &str) -> Recurrence {
+    Recurrence::from_text(text).unwrap().0
+}
+
 #[test]
 fn completing_a_recurring_task_rolls_the_series_and_leaves_a_record() {
     let mut base = task(1, "home", "water the plants");
     base.due = Some(When::Date(date("2026-09-21")));
     base.start = Some(When::Date(date("2026-09-20")));
+    base.recurrence = Some(repeat("every week for 5 times"));
     let mut local = base.clone();
     local.status = Status::Completed {
         on: date("2026-09-21"),
     };
     let world = World::new().local(&local).settled(&base, "\"e1\"").remote(
-        resource_with(
-            &base,
-            T0,
-            "\"e1\"",
-            &["RRULE:FREQ=WEEKLY;COUNT=5", "DESCRIPTION:d"],
-        ),
+        resource_with(&base, T0, "\"e1\"", &["DESCRIPTION:d"]),
         "home",
     );
     let p = world.plan();
 
     assert_eq!(p.puts.len(), 2);
-    let series = &p.puts[0];
-    assert_eq!(series.task.uid, uid(1));
+    let series = p.puts.iter().find(|put| put.task.uid == uid(1)).unwrap();
     assert_eq!(series.task.status, Status::Active);
     assert_eq!(series.task.due, Some(When::Date(date("2026-09-28"))));
     assert_eq!(
@@ -1024,16 +1026,17 @@ fn completing_a_recurring_task_rolls_the_series_and_leaves_a_record() {
         Some(When::Date(date("2026-09-27"))),
         "the other dates move with the due date"
     );
-    assert_eq!(series.if_match.as_deref(), Some("\"e1\""));
     assert_eq!(
-        series.extras,
-        vec!["RRULE:FREQ=WEEKLY;COUNT=4", "DESCRIPTION:d"]
+        series.task.recurrence,
+        Some(repeat("every week for 4 times"))
     );
+    assert_eq!(series.if_match.as_deref(), Some("\"e1\""));
+    assert_eq!(series.extras, vec!["DESCRIPTION:d"]);
 
-    let record = &p.puts[1];
-    assert_ne!(record.task.uid, uid(1));
+    let record = p.puts.iter().find(|put| put.task.uid != uid(1)).unwrap();
     assert_eq!(record.task.status, local.status);
     assert_eq!(record.task.due, base.due);
+    assert_eq!(record.task.recurrence, None, "a record does not repeat");
     assert!(record.extras.is_empty() && record.if_match.is_none());
     assert_eq!(record.name, record.task.uid.as_str());
 
@@ -1043,6 +1046,7 @@ fn completing_a_recurring_task_rolls_the_series_and_leaves_a_record() {
             assert_eq!(draft.uid, Some(uid(1)));
             assert!(!draft.checked);
             assert_eq!(draft.due, Some(When::Date(date("2026-09-28"))));
+            assert_eq!(draft.recurrence, Some(repeat("every week for 4 times")));
         }
         other => panic!("expected rekey + insert, got {other:?}"),
     }
@@ -1051,10 +1055,35 @@ fn completing_a_recurring_task_rolls_the_series_and_leaves_a_record() {
 }
 
 #[test]
+fn a_rule_only_the_server_can_express_rolls_too_and_is_handed_back() {
+    let mut base = task(1, "home", "month-end report");
+    base.due = Some(When::Date(date("2026-09-30")));
+    let mut local = base.clone();
+    local.status = Status::Completed {
+        on: date("2026-09-30"),
+    };
+    let rule = "RRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,TU,WE,TH,FR;COUNT=3";
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource_with(&base, T0, "\"e1\"", &[rule]), "home")
+        .plan();
+    let series = p.puts.iter().find(|put| put.task.uid == uid(1)).unwrap();
+    assert_eq!(series.task.status, Status::Active);
+    assert_eq!(series.task.recurrence, None, "not a vault rule");
+    assert_ne!(series.task.due, base.due);
+    assert_eq!(
+        series.extras,
+        vec!["RRULE:FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,TU,WE,TH,FR;COUNT=2"]
+    );
+}
+
+#[test]
 fn a_recurring_task_is_not_rolled_when_the_server_side_completed_it() {
     // Another client marked the whole task completed: that is its decision.
     let mut base = task(1, "home", "water the plants");
     base.due = Some(When::Date(date("2026-09-21")));
+    base.recurrence = Some(repeat("every week"));
     let mut theirs = base.clone();
     theirs.status = Status::Completed {
         on: date("2026-09-21"),
@@ -1062,10 +1091,7 @@ fn a_recurring_task_is_not_rolled_when_the_server_side_completed_it() {
     let p = World::new()
         .local(&base)
         .settled(&base, "\"e1\"")
-        .remote(
-            resource_with(&theirs, T0 + 5, "\"e2\"", &["RRULE:FREQ=WEEKLY"]),
-            "home",
-        )
+        .remote(resource(&theirs, T0 + 5, "\"e2\""), "home")
         .plan();
     assert!(p.puts.is_empty());
     assert_eq!(
@@ -1079,6 +1105,37 @@ fn a_recurring_task_is_not_rolled_when_the_server_side_completed_it() {
             Mutation::MoveToDone { uid: uid(1) },
         ]
     );
+}
+
+#[test]
+fn the_repeat_rule_is_a_field_like_any_other() {
+    let base = task(1, "home", "water the plants");
+    // Set in another client → written into the vault line.
+    let mut theirs = base.clone();
+    theirs.recurrence = Some(repeat("every 2 days"));
+    let p = World::new()
+        .local(&base)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&theirs, T0 + 5, "\"e2\""), "home")
+        .plan();
+    assert!(p.puts.is_empty());
+    assert_eq!(
+        mutations_for(&p, "notes/home.md"),
+        [Mutation::SetRecurrence {
+            uid: uid(1),
+            recurrence: Some(repeat("every 2 days")),
+        }]
+    );
+    // Set in the vault → pushed; a rule the server kept as an extra is replaced by it.
+    let mut local = base.clone();
+    local.recurrence = Some(repeat("every month on the 15th"));
+    let p = World::new()
+        .local(&local)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&base, T0, "\"e1\""), "home")
+        .plan();
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.puts[0].task.recurrence, local.recurrence);
 }
 
 // ── R1: a vault file that file sync has not caught up yet ─────────────────────────────

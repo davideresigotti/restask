@@ -14,6 +14,7 @@ use chrono_tz::Tz;
 
 use crate::domain::dates::{LocalDate, LocalDateTime, When};
 use crate::domain::priority::Priority;
+use crate::domain::recurrence::Recurrence;
 use crate::domain::task::{ListSlug, SourceRef, Status, Task};
 use crate::domain::uid::TaskUid;
 use crate::RestaskError;
@@ -90,6 +91,7 @@ pub fn from_vcalendar<Z: TimeZone>(
     let mut scheduled: Option<When> = None;
     let mut parent_raw: Option<String> = None;
     let mut source_path: Option<String> = None;
+    let mut recurrence: Option<Recurrence> = None;
     let mut extras: Vec<String> = Vec::new();
 
     let mut nested = 0usize;
@@ -135,6 +137,12 @@ pub fn from_vcalendar<Z: TimeZone>(
                     parent_raw = Some(prop.value.trim().to_string());
                 }
             }
+            // A rule the vault can spell exactly is managed; a richer one is the
+            // server's own and travels as an extra.
+            "RRULE" if recurrence.is_none() => match Recurrence::from_rrule(&prop.value) {
+                Some((rule, true)) => recurrence = Some(rule),
+                _ => extras.push(line),
+            },
             name if MANAGED.contains(&name) => {}
             _ => extras.push(line),
         }
@@ -159,6 +167,7 @@ pub fn from_vcalendar<Z: TimeZone>(
         due,
         start,
         scheduled,
+        recurrence,
         created: created_at.map(|at| LocalDate(at.date_naive())),
         parent: parent_raw
             .as_deref()

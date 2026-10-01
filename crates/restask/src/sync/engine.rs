@@ -19,7 +19,9 @@ use chrono::{DateTime, Duration, Utc};
 
 use crate::caldav::{CaldavPort, RemoteResource};
 use crate::config::{MachineConfig, VaultConfig};
-use crate::domain::{Clock, ListSlug, Priority, SourceRef, Status, Task, TaskUid, When};
+use crate::domain::{
+    Clock, ListSlug, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
+};
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::todo_view;
@@ -209,6 +211,7 @@ impl<C: CaldavPort> Engine<C> {
         text: &str,
         priority: Option<Priority>,
         due: Option<When>,
+        recurrence: Option<Recurrence>,
     ) -> Result<Task, RestaskError> {
         let _lock = self.lock().await?;
         let now = self.clock.now_utc();
@@ -229,6 +232,7 @@ impl<C: CaldavPort> Engine<C> {
             due,
             start: None,
             scheduled: None,
+            recurrence,
             created: Some(self.clock.today_local()),
             parent: None,
             source: SourceRef {

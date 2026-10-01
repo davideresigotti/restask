@@ -77,6 +77,11 @@ pub fn merge(
         &local.priority,
         &remote.task.priority,
     );
+    task.recurrence = pick.field(
+        base.map(|b| &b.recurrence),
+        &local.recurrence,
+        &remote.task.recurrence,
+    );
     task.due = pick.field(base.map(|b| &b.due), &local.due, &remote.task.due);
     task.start = pick.field(base.map(|b| &b.start), &local.start, &remote.task.start);
     task.scheduled = pick.field(
@@ -105,11 +110,12 @@ pub fn merge(
 }
 
 /// `true` when two versions differ in a field the merge manages (text, status, priority,
-/// due, start, scheduled).
+/// recurrence, due, start, scheduled).
 pub fn fields_differ(a: &Task, b: &Task) -> bool {
     a.text != b.text
         || a.status != b.status
         || a.priority != b.priority
+        || a.recurrence != b.recurrence
         || a.due != b.due
         || a.start != b.start
         || a.scheduled != b.scheduled
@@ -184,6 +190,12 @@ pub fn mutations_between(from: &Task, to: &Task) -> Vec<Mutation> {
         ops.push(Mutation::SetPriority {
             uid: uid.clone(),
             priority: to.priority,
+        });
+    }
+    if from.recurrence != to.recurrence {
+        ops.push(Mutation::SetRecurrence {
+            uid: uid.clone(),
+            recurrence: to.recurrence.clone(),
         });
     }
     for (field, before, after) in [

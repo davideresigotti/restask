@@ -950,7 +950,7 @@ async fn add_and_complete_round_trip() {
     let engine = engine(&dir, &mock);
 
     let task = engine
-        .add("hello\nworld", Some(Priority::Medium), None)
+        .add("hello\nworld", Some(Priority::Medium), None, None)
         .await
         .unwrap();
     assert_eq!(task.text, "hello world", "one Markdown line");
@@ -977,7 +977,10 @@ async fn add_and_complete_round_trip() {
 async fn commands_work_without_a_server_and_sync_later() {
     let dir = temp_vault();
     let offline = engine_with(&dir, Offline, true);
-    let task = offline.add("captured offline", None, None).await.unwrap();
+    let task = offline
+        .add("captured offline", None, None, None)
+        .await
+        .unwrap();
     offline.set_done(&task.uid, true).await.unwrap();
     assert!(read(&dir, "TODO.md").contains("## Done\n- [x] captured offline"));
 
@@ -1029,8 +1032,11 @@ async fn a_pass_waits_for_another_process_holding_the_vault() {
 
 // ── recurring tasks ───────────────────────────────────────────────────────────────────
 
-/// Makes a server task recurring the way Tasks.org does: an `RRULE` (plus a description,
-/// to prove unmanaged content rides along).
+const REPEAT: &str = "\u{1F501}";
+const DUE: &str = "\u{1F4C5}";
+
+/// Adds an `RRULE` (plus a description, to prove unmanaged content rides along) to a
+/// server task, the way another client would.
 fn make_recurring(mock: &MockCaldav, list: &str, name: &str, rrule: &str) {
     let rrule = rrule.to_string();
     edit_remote(mock, list, name, Duration::minutes(5), move |line| {
@@ -1059,19 +1065,82 @@ fn ical_day(offset: i64) -> String {
 }
 
 #[tokio::test]
+async fn a_repeat_rule_written_in_the_vault_reaches_the_server_and_back() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] water the plants {REPEAT} every week on mon and thu {ID} {UID}\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    assert!(body(&mock, "home", UID).contains("RRULE:FREQ=WEEKLY;BYDAY=MO,TH\r\n"));
+    assert!(body(&mock, "home", UID).contains("SUMMARY:water the plants\r\n"));
+
+    // Changed in another client: the vault line follows, in canonical spelling.
+    edit_remote(&mock, "home", UID, Duration::minutes(1), |line| {
+        if line.starts_with("RRULE") {
+            vec!["RRULE:FREQ=MONTHLY;INTERVAL=1;BYMONTHDAY=15".to_string()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    engine.reconcile().await.unwrap();
+    assert!(read(&dir, "notes/home.md").contains(&format!(
+        "- [ ] water the plants {REPEAT} every month on the 15th {ID} {UID}\n"
+    )));
+
+    // Removed in the vault: the rule leaves the server too.
+    home_note(&dir, &format!("- [ ] water the plants {ID} {UID}\n"));
+    engine.reconcile().await.unwrap();
+    assert!(!body(&mock, "home", UID).contains("RRULE"));
+}
+
+#[tokio::test]
+async fn a_rule_set_in_another_client_shows_up_in_the_vault() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] water the plants \u{23EB} {ID} {UID}\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    make_recurring(&mock, "home", UID, "FREQ=DAILY;INTERVAL=2");
+    engine.reconcile().await.unwrap();
+
+    assert!(read(&dir, "notes/home.md").contains(&format!(
+        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days {ID} {UID}\n"
+    )));
+    // …and in the TODO.md view of the task.
+    assert!(read(&dir, "TODO.md").contains(&format!(
+        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days [[home#Home|home]] {ID} {UID}"
+    )));
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.markdown_mutations), (0, 0));
+}
+
+#[tokio::test]
 async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
     let dir = temp_vault();
     home_note(
         &dir,
         &format!(
-            "- [ ] water the plants \u{1F4C5} {} {ID} {UID}\n- [ ] other\n",
+            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {UID}\n- [ ] other\n",
             day(0)
         ),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
-    make_recurring(&mock, "home", UID, "FREQ=DAILY;INTERVAL=2");
+    // Another client stores a note on the task.
+    edit_remote(&mock, "home", UID, Duration::minutes(5), |line| {
+        if line.starts_with("END:VTODO") {
+            vec!["DESCRIPTION:two cups".to_string(), line.to_string()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
     engine.reconcile().await.unwrap();
 
     // Check the box by hand.
@@ -1088,23 +1157,26 @@ async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
     assert!(series.contains("RRULE:FREQ=DAILY;INTERVAL=2\r\n"));
     assert!(series.contains("DESCRIPTION:two cups\r\n"));
 
-    // In the note: the series line is active with the new date; the occurrence that was
-    // done is a record under Done with a UID of its own.
+    // In the note: the series line is active with the new date and its rule; the
+    // occurrence that was done is a plain record under Done with a UID of its own.
     let note = read(&dir, "notes/home.md");
     assert!(
         note.contains(&format!(
-            "- [ ] water the plants \u{1F4C5} {} {ID} {UID}\n",
+            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {UID}\n",
             day(2)
         )),
         "{note}"
     );
     let record = uid_of(&dir, "notes/home.md", "- [x] water the plants");
     assert_ne!(record, UID);
-    assert!(note.contains(&format!(
-        "### Done\n- [x] water the plants \u{1F4C5} {} \u{2705} {} {ID} {record}\n",
-        day(0),
-        today()
-    )));
+    assert!(
+        note.contains(&format!(
+            "### Done\n- [x] water the plants {DUE} {} \u{2705} {} {ID} {record}\n",
+            day(0),
+            today()
+        )),
+        "{note}"
+    );
 
     // The record is an ordinary completed task on the server: no rule, no description.
     let done = body(&mock, "home", &record);
@@ -1123,16 +1195,45 @@ async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
 }
 
 #[tokio::test]
-async fn the_last_occurrence_of_a_counted_rule_completes_the_task() {
+async fn a_rule_the_vault_cannot_spell_stays_on_the_server_and_still_rolls() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] two more times \u{1F4C5} {} {ID} {UID}\n", day(0)),
+        &format!("- [ ] month-end report {DUE} 2026-09-30 {ID} {UID}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
-    make_recurring(&mock, "home", UID, "FREQ=DAILY;COUNT=2");
+    // "Last working day of the month" has no vault spelling.
+    let rrule = "FREQ=MONTHLY;BYSETPOS=-1;BYDAY=MO,TU,WE,TH,FR";
+    make_recurring(&mock, "home", UID, rrule);
+    engine.reconcile().await.unwrap();
+    assert!(!read(&dir, "notes/home.md").contains(REPEAT));
+
+    engine.set_done(&uid(UID), true).await.unwrap();
+    let series = body(&mock, "home", UID);
+    assert!(series.contains("STATUS:NEEDS-ACTION"), "{series}");
+    assert!(
+        series.contains(&format!("RRULE:{rrule}\r\n")),
+        "kept as written"
+    );
+    assert!(!series.contains("DUE;VALUE=DATE:20260930"), "moved on");
+    let note = read(&dir, "notes/home.md");
+    assert!(note.contains("- [ ] month-end report") && note.contains("- [x] month-end report"));
+}
+
+#[tokio::test]
+async fn the_last_occurrence_of_a_counted_rule_completes_the_task() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!(
+            "- [ ] two more times {REPEAT} every day for 2 times {DUE} {} {ID} {UID}\n",
+            day(0)
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
 
     engine.set_done(&uid(UID), true).await.unwrap();
@@ -1140,6 +1241,10 @@ async fn the_last_occurrence_of_a_counted_rule_completes_the_task() {
     assert!(series.contains("STATUS:NEEDS-ACTION"));
     assert!(series.contains("RRULE:FREQ=DAILY;COUNT=1\r\n"), "{series}");
     assert!(series.contains(&format!("DUE;VALUE=DATE:{}\r\n", ical_day(1))));
+    assert!(read(&dir, "notes/home.md").contains(&format!(
+        "- [ ] two more times {REPEAT} every day for 1 time {DUE} {}",
+        day(1)
+    )));
 
     // The second completion is the last occurrence: now the task itself is done.
     engine.set_done(&uid(UID), true).await.unwrap();
@@ -1154,23 +1259,59 @@ async fn a_recurring_inbox_task_rolls_forward_inside_todo_md() {
     let dir = temp_vault();
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
-    let task = engine.add("take vitamins", None, None).await.unwrap();
-    make_recurring(&mock, "inbox", task.uid.as_str(), "FREQ=DAILY");
-    engine.reconcile().await.unwrap();
+    let rule = restask::domain::Recurrence::from_text("every day")
+        .unwrap()
+        .0;
+    let task = engine
+        .add("take vitamins", None, None, Some(rule))
+        .await
+        .unwrap();
+    assert!(body(&mock, "inbox", task.uid.as_str()).contains("RRULE:FREQ=DAILY\r\n"));
 
     engine.set_done(&task.uid, true).await.unwrap();
     let todo = read(&dir, "TODO.md");
     // No date before: the next occurrence becomes the due date.
     assert!(
         todo.contains(&format!(
-            "## Inbox\n- [ ] take vitamins \u{1F4C5} {} \u{2795} {} {ID} {}\n",
+            "## Inbox\n- [ ] take vitamins {REPEAT} every day {DUE} {} \u{2795} {} {ID} {}\n",
             day(1),
             today(),
             task.uid
         )),
         "{todo}"
     );
-    assert!(todo.contains("## Done\n- [x] take vitamins \u{2705}"));
+    assert!(
+        todo.contains("## Done\n- [x] take vitamins \u{2705}"),
+        "{todo}"
+    );
     let series = body(&mock, "inbox", task.uid.as_str());
     assert!(series.contains("STATUS:NEEDS-ACTION") && series.contains("RRULE:FREQ=DAILY"));
+}
+
+#[tokio::test]
+async fn a_recurring_line_first_seen_already_checked_rolls_before_its_first_push() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [x] stretch {REPEAT} every week {DUE} {}\n", day(0)),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let note = read(&dir, "notes/home.md");
+    let series = uid_of(&dir, "notes/home.md", "- [ ] stretch");
+    assert!(
+        note.contains(&format!(
+            "- [ ] stretch {REPEAT} every week {DUE} {}",
+            day(7)
+        )),
+        "{note}"
+    );
+    assert!(note.contains("- [x] stretch"));
+    let remote = body(&mock, "home", &series);
+    assert!(remote.contains("STATUS:NEEDS-ACTION") && remote.contains("RRULE:FREQ=WEEKLY"));
+    assert_eq!(mock.resource_names("home").len(), 2);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.inserts), (0, 0));
 }

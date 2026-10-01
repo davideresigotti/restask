@@ -101,7 +101,7 @@ collection), `--non-interactive`.
 | `restask setup […]` | §13.2 | required |
 | `restask daemon [--once]` | §13.1 | required |
 | `restask sync` | one pass; prints the report | required |
-| `restask add "<text>" [--priority P] [--due D]` | new inbox task, then a pass | optional |
+| `restask add "<text>" [--priority P] [--due D] [--repeat "every …"]` | new inbox task, then a pass | optional |
 | `restask done \| undone (--uid ID \| --file F --line N)` | complete / reopen in the source file, then a pass | optional |
 | `restask status [--json]` | active per list / priority, done today, pending sync, last sync | none |
 | `restask lists` | routed lists: slug, active count, home note, collection URL | none |

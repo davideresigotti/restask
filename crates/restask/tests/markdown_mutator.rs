@@ -767,3 +767,54 @@ fn rekey_swaps_the_uid_of_the_line_carrying_it() {
     );
     assert_eq!(missing.skipped.len(), 1);
 }
+
+#[test]
+fn recurrence_sits_after_the_priority_and_a_record_loses_it() {
+    use restask::domain::Recurrence;
+    let rule = Recurrence::from_text("every week on Monday").unwrap().0;
+    let out = run(
+        "- [ ] A ⏫ 📅 2026-09-21 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::SetRecurrence {
+            uid: uid(UID1),
+            recurrence: Some(rule),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [ ] A ⏫ 🔁 every week on Monday 📅 2026-09-21 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+    // Written by hand in another spelling: any rewrite makes it canonical.
+    let out = run(
+        "- [ ] A 🔁 every week on mon and thu 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n",
+        &[Mutation::SetPriority {
+            uid: uid(UID1),
+            priority: Some(Priority::Low),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [ ] A 🔽 🔁 every week on Monday, Thursday 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+    let record = run(
+        &out.contents,
+        &[Mutation::Rekey {
+            uid: uid(UID1),
+            new_uid: uid(UID2),
+        }],
+    );
+    assert_eq!(
+        record.contents,
+        "- [ ] A 🔽 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc\n"
+    );
+    let cleared = run(
+        &out.contents,
+        &[Mutation::SetRecurrence {
+            uid: uid(UID1),
+            recurrence: None,
+        }],
+    );
+    assert_eq!(
+        cleared.contents,
+        "- [ ] A 🔽 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+}

@@ -7,6 +7,7 @@ use fnv::FnvHasher;
 
 use crate::domain::dates::{LocalDate, When};
 use crate::domain::priority::Priority;
+use crate::domain::recurrence::Recurrence;
 use crate::domain::uid::TaskUid;
 use crate::RestaskError;
 
@@ -109,6 +110,8 @@ pub struct Task {
     pub start: Option<When>,
     /// Optional scheduled value.
     pub scheduled: Option<When>,
+    /// Optional repeat rule (`🔁 every …` ⇄ `RRULE`); only rules both spellings express.
+    pub recurrence: Option<Recurrence>,
     /// Optional creation date.
     pub created: Option<LocalDate>,
     /// Nearest ancestor checkbox (indentation-based), if any.
@@ -125,7 +128,8 @@ pub struct Task {
 
 impl Task {
     /// FNV-1a (64-bit) over a canonical serialization of:
-    /// uid, list, text, status, priority, due, start, scheduled, created, parent.
+    /// uid, list, text, status, priority, due, start, scheduled, created, parent,
+    /// recurrence.
     /// Excludes: source line number, source_heading, mtimes.
     ///
     /// Fields are length-prefixed and options carry an explicit presence marker, so the
@@ -148,6 +152,13 @@ impl Task {
         put_opt_str(&mut h, self.scheduled.map(When::to_ical).as_deref());
         put_opt_str(&mut h, self.created.map(LocalDate::format).as_deref());
         put_opt_str(&mut h, self.parent.as_ref().map(TaskUid::as_str));
+        put_opt_str(
+            &mut h,
+            self.recurrence
+                .as_ref()
+                .map(Recurrence::to_rrule)
+                .as_deref(),
+        );
         h.finish()
     }
 }

@@ -19,6 +19,7 @@ Metadata tokens may appear anywhere in `body`, in any order:
 | Token | Regex | Field |
 |---|---|---|
 | Priority | one of 🔺 ⏫ 🔼 🔽 ⏬ as a standalone word | `priority` |
+| Repeat | `🔁`, whitespace, a rule in the vault spelling (§3.6) — exactly the words that form the rule | `recurrence` |
 | Due | `📅[ \t]+(\d{4}-\d{2}-\d{2}(?:[ \t]+\d{2}:\d{2})?)` | `due` |
 | Start | `🛫[ \t]+(…same…)` | `start` |
 | Scheduled | `⏳[ \t]+(…same…)` | `scheduled` |
@@ -30,7 +31,10 @@ Metadata tokens may appear anywhere in `body`, in any order:
 `checked` = `[x]`/`[X]`. A token whose value is well-shaped but invalid (impossible date,
 non-ULID body) leaves its field empty; the first occurrence of a repeated token wins.
 
-**Canonical tail order** (what the mutator writes): `<priority> 🛫 ⏳ 📅 ✅ ➕ 🆔`.
+A `🔁` not followed by a rule is ordinary text. A rule is written back in its canonical
+spelling whenever its line is rewritten.
+
+**Canonical tail order** (what the mutator writes): `<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`.
 
 ### 6.2 File-level rules
 
@@ -46,7 +50,7 @@ non-ULID body) leaves its field empty; the first occurrence of a repeated token 
   region have no parent — completed records are a flat log.
 
 ```rust
-pub struct TaskDraft { uid, text, checked, priority, due, start, scheduled, created, completed_on }
+pub struct TaskDraft { uid, text, checked, priority, due, start, scheduled, created, completed_on, recurrence }
 pub struct ParsedTask { line_no, indent_chars, raw, draft, in_done_region, heading }
 pub struct ParsedFile { tasks: Vec<ParsedTask>, done_heading_line: Option<usize> }
 pub fn parse(contents: &str, cfg: &VaultConfig) -> ParsedFile;        // never fails
@@ -59,7 +63,8 @@ pub fn link_parents(tasks: &[ParsedTask]) -> Vec<Option<TaskUid>>;
 pub enum Mutation {
     Register { line_no, uid, created },        // append ➕ + 🆔 to an unregistered line
     Reassign { line_no, uid },                 // give a duplicated line its own UID
-    Rekey { uid, new_uid },                    // the line carrying uid gets new_uid (§11.6)
+    SetRecurrence { uid, recurrence },
+    Rekey { uid, new_uid },                    // the line becomes a record: new UID, no 🔁 (§11.6)
     SetStatus { uid, checked, completed_on },
     SetPriority { uid, priority },
     SetWhen { uid, field: WhenField, value },
@@ -117,7 +122,7 @@ kinds of lines.
 - **Inbox lines** — tasks whose source *is* this file (quick captures, tasks created in
   the inbox calendar): full canonical lines.
 - **Mirror lines** — views of prioritized tasks that live in notes:
-  `- [ ] <text> <priority> <🛫?><⏳?><📅?> [[<stem>#<heading>|<stem>]] 🆔 <uid>`
+  `- [ ] <text> <priority> <🔁?><🛫?><⏳?><📅?> [[<stem>#<heading>|<stem>]] 🆔 <uid>`
   (`#<heading>` omitted when the task has none; a stem containing `[`, `]`, `|` or `#` is
   written as plain text instead of a wikilink).
 
@@ -164,7 +169,7 @@ pass it compares the live file against it (`mirror_edits`):
 
 - a mirror line equal to the remembered render was not touched (it may be stale; the next
   render fixes that);
-- a field the user changed — checkbox, text, priority, due/start/scheduled — is applied to
+- a field the user changed — checkbox, text, priority, repeat rule, due/start/scheduled — is applied to
   the source note as mutations (a checked box becomes `SetStatus` + `MoveToDone`, with
   the line's own `✅` date if it has one), **provided the note still shows the rendered
   value**. If the note changed that field too, the note wins.

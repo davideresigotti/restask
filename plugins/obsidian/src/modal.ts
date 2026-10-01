@@ -27,6 +27,7 @@ const DATE_FIELD_SUGGESTIONS: readonly Suggestion[] = [
 	{ keyword: "due", insert: "📅 " },
 	{ keyword: "start", insert: "🛫 " },
 	{ keyword: "scheduled", insert: "⏳ " },
+	{ keyword: "repeat", insert: "🔁 every " },
 ];
 
 /** Suggestion threshold: nothing matches until ≥ 2 letters are typed (§15.2). */

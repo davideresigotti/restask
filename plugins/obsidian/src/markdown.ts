@@ -26,7 +26,7 @@ const PRIORITY_BY_EMOJI: ReadonlyMap<string, Priority> = new Map(
 );
 
 /** Canonical metadata tail order (§6.1): `<priority>` (first of the five present), then these. */
-export const CANONICAL_TAIL_ORDER: readonly string[] = ["🛫", "⏳", "📅", "✅", "➕", "🆔"];
+export const CANONICAL_TAIL_ORDER: readonly string[] = ["🔁", "🛫", "⏳", "📅", "✅", "➕", "🆔"];
 
 /** Default `done_heading` (§6.2, vault config default). */
 export const DEFAULT_DONE_HEADING = "Done";
@@ -45,6 +45,8 @@ export interface TaskDraft {
 	scheduled: When | undefined;
 	created: string | undefined;
 	completedOn: string | undefined;
+	/** `🔁` rule in the vault spelling, as written (e.g. `every 2 weeks on Monday`). */
+	recurrence: string | undefined;
 }
 
 /** A single line matched by the §6.1 grammar. */
@@ -170,7 +172,81 @@ function emptyDraft(): TaskDraft {
 		scheduled: undefined,
 		created: undefined,
 		completedOn: undefined,
+		recurrence: undefined,
 	};
+}
+
+const UNIT_RE = /^(?:minutes?|hours?|days?|weeks?|months?|years?)$/;
+const WEEKDAY_RE = /^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)$/;
+const ORDINAL_RE = /^(?:[1-9]|[12][0-9]|3[01])(?:st|nd|rd|th)?$/;
+
+/**
+ * Length of the repeat rule at the start of `text` in the vault spelling (§3.6), or
+ * undefined when `text` does not start with one. Mirrors `Recurrence::from_text`:
+ * `every [N] <unit>` | `every weekday`, then optional `on …` (weekdays for weeks; days of
+ * the month or `<nth|last> <weekday>` for months), `for N times`, `until YYYY-MM-DD`.
+ */
+export function recurrenceLength(text: string): number | undefined {
+	const words: { text: string; end: number }[] = [];
+	const re = /[^ \t]+/g;
+	for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+		const word = m[0].replace(/,+$/, "");
+		if (word !== "") words.push({ text: word.toLowerCase(), end: m.index + word.length });
+	}
+	const w = (i: number): string | undefined => words[i]?.text;
+	if (w(0) !== "every") return undefined;
+	let at = 1;
+	if (w(at) === "weekday" || w(at) === "weekdays") {
+		at += 1;
+	} else {
+		if (/^[0-9]+$/.test(w(at) ?? "")) {
+			if (Number(w(at)) === 0) return undefined;
+			at += 1;
+		}
+		const unit = w(at);
+		if (unit === undefined || !UNIT_RE.test(unit)) return undefined;
+		at += 1;
+		const weekly = unit.startsWith("week");
+		const monthly = unit.startsWith("month");
+		if (w(at) === "on" && (weekly || monthly)) {
+			let next = at + 1;
+			for (;;) {
+				while (w(next) === "the" || w(next) === "and") next += 1;
+				const first = w(next);
+				if (first === undefined) break;
+				const second = w(next + 1);
+				if (weekly) {
+					if (!WEEKDAY_RE.test(first)) break;
+					next += 1;
+				} else {
+					const ordinal = first === "last" || ORDINAL_RE.test(first);
+					if (!ordinal) break;
+					if (second !== undefined && WEEKDAY_RE.test(second)) next += 2;
+					else if (first === "last" && second === "day") next += 2;
+					else if (first !== "last") next += 1;
+					else break;
+				}
+				at = next;
+			}
+		}
+	}
+	if (w(at) === "for" && /^[0-9]+$/.test(w(at + 1) ?? "") && /^times?$/.test(w(at + 2) ?? "")) at += 3;
+	if (w(at) === "until" && validDate(w(at + 1) ?? "")) at += 2;
+	return words[at - 1].end;
+}
+
+/** The `🔁` token (§6.1): the emoji, whitespace, and exactly the words of the rule. */
+function collectRecurrence(body: string): { value: string | undefined; spans: Span[] } {
+	const at = body.indexOf("🔁");
+	if (at < 0) return { value: undefined, spans: [] };
+	const after = body.slice(at + "🔁".length);
+	const rule = after.replace(/^[ \t]+/, "");
+	const gap = after.length - rule.length;
+	if (gap === 0) return { value: undefined, spans: [] };
+	const length = recurrenceLength(rule);
+	if (length === undefined) return { value: undefined, spans: [] };
+	const start = at + "🔁".length + gap;
+	return { value: rule.slice(0, length), spans: [{ start: at, end: start + length }] };
 }
 
 /** Parses one line against the §6.1 grammar; non-task lines (including `1. [ ]`, `-[ ]`) → undefined. */
@@ -187,6 +263,7 @@ export function parseLine(line: string): TaskLine | undefined {
 	const created = collect(body, CREATED_RE, 1);
 	const uid = collect(body, UID_RE, 1);
 	const priority = collect(body, PRIORITY_RE, 2);
+	const recurrence = collectRecurrence(body);
 
 	const dueValue = due.value !== undefined ? parseWhenValue(due.value) : undefined;
 	const startValue = start.value !== undefined ? parseWhenValue(start.value) : undefined;
@@ -219,6 +296,7 @@ export function parseLine(line: string): TaskLine | undefined {
 					...created.spans,
 					...uid.spans,
 					...priority.spans,
+					...recurrence.spans,
 				]),
 			),
 			checked: m.groups["check"] === "x" || m.groups["check"] === "X",
@@ -228,6 +306,7 @@ export function parseLine(line: string): TaskLine | undefined {
 			scheduled: scheduledValue,
 			created: createdValue,
 			completedOn: completedValue,
+			recurrence: recurrence.value,
 		},
 	};
 }

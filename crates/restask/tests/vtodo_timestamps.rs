@@ -56,6 +56,7 @@ fn base_task() -> Task {
         due: None,
         start: None,
         scheduled: None,
+        recurrence: None,
         created: None,
         parent: None,
         source: SourceRef {

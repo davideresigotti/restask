@@ -484,6 +484,7 @@ fn collect(
         due: task.draft.due,
         start: task.draft.start,
         scheduled: task.draft.scheduled,
+        recurrence: task.draft.recurrence.clone(),
         created: task.draft.created,
         parent,
         source: SourceRef {
