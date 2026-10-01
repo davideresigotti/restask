@@ -70,6 +70,17 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
 1. **Vault**: `--vault`, else `RESTASK_VAULT`, else an upward search for `restask.toml` /
    `.restask/`, else the working directory (confirmed interactively; non-interactive
    requires a `TODO.md` there). Writes `restask.toml` if missing; creates `.restask/`.
+   Then installs the **Obsidian plugin** (`install_obsidian_plugin`): the bundle compiled
+   into the binary (App. C) is written to `.obsidian/plugins/restask/` (`main.js`,
+   `manifest.json`, `styles.css`) and `"restask"` is added to
+   `.obsidian/community-plugins.json`. A re-run refreshes those three files and nothing
+   else: other entries of the list keep their place, an existing `data.json` (the user's
+   plugin settings) is never written, unchanged files are not rewritten. `data.json` is
+   created only when it is missing and `done_heading` is not the default, holding
+   `doneHeading` (§15.4). A plugin folder or file that is a symlink is a hand-managed
+   development install and is left alone. A `community-plugins.json` that is not a JSON
+   list is left untouched and the summary asks to enable the plugin by hand. Any failure
+   here is a warning — never a failed setup.
 2. **TODO.md** (every run): an existing inbox file is **renamed** to
    `<stem>.pre-restask-YYYYMMDD-HHMMSS.md` and a fresh §7 scaffold is written. Its lines
    are not migrated: unsynced captures stay in the backup. So that the vanished lines are

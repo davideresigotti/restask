@@ -1,7 +1,8 @@
-//! Setup wizard (§13.2): composes the vault scaffold, the fresh TODO.md creation (any
-//! pre-existing file is renamed to the timestamped backup), machine-config records, the
-//! typed inbox binding, the first full reconcile, and the systemd user-unit install that
-//! keeps the daemon running on this vault. [`run_setup`] carries the tested behavior;
+//! Setup wizard (§13.2): composes the vault scaffold (with the Obsidian plugin installed
+//! and enabled in it), the fresh TODO.md creation (any pre-existing file is renamed to the
+//! timestamped backup), machine-config records, the typed inbox binding, the first full
+//! reconcile, and the systemd user-unit install that keeps the daemon running on this
+//! vault. [`run_setup`] carries the tested behavior;
 //! [`run_interactive`] is a thin TTY shell over it.
 
 use std::collections::BTreeMap;
@@ -104,14 +105,17 @@ pub struct SetupSummary {
     pub backup: Option<String>,
     /// Collections ensured (created or verified) before the first sync.
     pub collections: Vec<String>,
+    /// Human note about the Obsidian plugin install (§13.2 step 1); `None` when it failed
+    /// (a warning was logged).
+    pub plugin: Option<String>,
     /// Human note about the daemon unit install (§13.2 step 6), when one was enabled.
     pub daemon: Option<String>,
     /// The first full reconcile's report.
     pub report: ReconcileReport,
 }
 
-/// Executes the non-interactive setup plan (§13.2): scaffold the vault, recreate TODO.md
-/// (renaming any existing file to the backup), record the machine config, ensure the
+/// Executes the non-interactive setup plan (§13.2): scaffold the vault and install the
+/// Obsidian plugin in it, recreate TODO.md (renaming any existing file to the backup), record the machine config, ensure the
 /// inbox collection exists, run the first full reconcile, and install the daemon unit
 /// via `installer` (pass `None` to skip — hermetic tests).
 pub async fn run_setup<C: CaldavPort>(
@@ -223,8 +227,8 @@ pub fn match_collection<'a>(
         .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
 }
 
-/// Shared setup body: vault scaffold, fresh TODO.md, machine config, collection
-/// creation, first reconcile, daemon-unit install.
+/// Shared setup body: vault scaffold, Obsidian plugin, fresh TODO.md, machine config,
+/// collection creation, first reconcile, daemon-unit install.
 async fn prepare_and_sync<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
@@ -254,6 +258,16 @@ async fn prepare_and_sync<C: CaldavPort>(
         }
     }
     std::fs::create_dir_all(vault.join(".restask"))?;
+
+    // The vault is set: put the Obsidian plugin in it. Best-effort like the daemon unit —
+    // the plugin is a convenience (§15) and a vault nobody opens in Obsidian loses nothing.
+    let plugin = match install_obsidian_plugin(&vault, &cfg) {
+        Ok(note) => Some(note),
+        Err(error) => {
+            tracing::warn!(%error, "obsidian plugin install failed; see INSTALL.md to add it by hand");
+            None
+        }
+    };
 
     // Step 2 — TODO.md: a fresh engine-owned file in every scenario. A pre-existing file
     // is renamed to the timestamped backup; its tasks are NOT migrated (0.1.0 — the user
@@ -326,6 +340,7 @@ async fn prepare_and_sync<C: CaldavPort>(
         config_path: args.config_path,
         backup,
         collections,
+        plugin,
         daemon,
         report,
     })
@@ -352,6 +367,101 @@ fn forget_inbox_tasks(vault: &Path, cfg: &VaultConfig) -> Result<(), RestaskErro
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Id of the Obsidian plugin: its folder under `.obsidian/plugins/` and its entry in
+/// `community-plugins.json` (`manifest.json` `id`, App. C).
+pub const OBSIDIAN_PLUGIN_ID: &str = "restask";
+
+/// The plugin as `plugins/obsidian` builds it, compiled into the binary so setup needs
+/// neither the repository nor Node (`npm run build` refreshes these copies, App. C).
+const OBSIDIAN_PLUGIN_FILES: [(&str, &str); 3] = [
+    ("main.js", include_str!("../assets/obsidian/main.js")),
+    (
+        "manifest.json",
+        include_str!("../assets/obsidian/manifest.json"),
+    ),
+    ("styles.css", include_str!("../assets/obsidian/styles.css")),
+];
+
+/// Installs the Obsidian plugin into `<vault>/.obsidian/plugins/restask/` and lists it in
+/// `.obsidian/community-plugins.json` (§13.2 step 1), so the vault opens in Obsidian with
+/// the plugin ready — on every device the vault is synced to. Returns the summary note.
+///
+/// Re-running refreshes the three plugin files and nothing else: the user's plugin
+/// settings and every other enabled plugin are kept, and a file that already has the
+/// right content is not rewritten. A plugin folder or file that is a symlink is managed
+/// by hand (a development checkout) and left alone. A `community-plugins.json` that is
+/// not a JSON list is never overwritten; the note then asks to enable the plugin by hand.
+pub fn install_obsidian_plugin(vault: &Path, cfg: &VaultConfig) -> Result<String, RestaskError> {
+    let obsidian = vault.join(".obsidian");
+    let plugin_dir = obsidian.join("plugins").join(OBSIDIAN_PLUGIN_ID);
+    if !is_symlink(&plugin_dir) {
+        std::fs::create_dir_all(&plugin_dir)?;
+        for (name, contents) in OBSIDIAN_PLUGIN_FILES {
+            let path = plugin_dir.join(name);
+            if !is_symlink(&path) {
+                fsio::write_if_changed(&path, contents)?;
+            }
+        }
+        // The plugin moves completed lines under its own `doneHeading` setting, which
+        // must name the vault's heading (§15.4). Seed it where no settings exist yet;
+        // settings the user already has are theirs.
+        let settings = plugin_dir.join("data.json");
+        if cfg.done_heading != VaultConfig::default().done_heading
+            && std::fs::symlink_metadata(&settings).is_err()
+        {
+            let seed = serde_json::json!({ "doneHeading": cfg.done_heading });
+            fsio::write_atomic(&settings, &format!("{seed:#}"))?;
+        }
+    }
+
+    let location = format!(".obsidian/plugins/{OBSIDIAN_PLUGIN_ID}");
+    Ok(if enable_obsidian_plugin(&obsidian)? {
+        format!(
+            "obsidian plugin: installed in {location} and enabled (reload Obsidian if this \
+             vault is open)"
+        )
+    } else {
+        format!(
+            "obsidian plugin: installed in {location}; .obsidian/community-plugins.json is \
+             not a list, so enable \"{OBSIDIAN_PLUGIN_ID}\" under Community plugins by hand"
+        )
+    })
+}
+
+/// Adds the plugin id to `.obsidian/community-plugins.json`, keeping every other entry in
+/// place. `Ok(false)` means the file holds something other than a JSON list and was left
+/// untouched; a file that already lists the plugin is not rewritten.
+fn enable_obsidian_plugin(obsidian: &Path) -> Result<bool, RestaskError> {
+    let path = obsidian.join("community-plugins.json");
+    let current = match std::fs::read_to_string(&path) {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let mut enabled = if current.trim().is_empty() {
+        Vec::new()
+    } else {
+        match serde_json::from_str::<Vec<serde_json::Value>>(&current) {
+            Ok(enabled) => enabled,
+            Err(_) => return Ok(false),
+        }
+    };
+    if enabled
+        .iter()
+        .any(|id| id.as_str() == Some(OBSIDIAN_PLUGIN_ID))
+    {
+        return Ok(true);
+    }
+    enabled.push(serde_json::Value::from(OBSIDIAN_PLUGIN_ID));
+    fsio::write_atomic(&path, &format!("{:#}", serde_json::Value::Array(enabled)))?;
+    Ok(true)
+}
+
+/// Whether `path` itself is a symbolic link (not followed).
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Installs the machine-local systemd user unit (§13.2 step 6) that keeps
@@ -498,6 +608,9 @@ pub fn print_summary(summary: &SetupSummary) {
         "first sync: scanned {} registered {} pushed {}",
         summary.report.scanned_files, summary.report.registered, summary.report.pushes
     );
+    if let Some(note) = &summary.plugin {
+        println!("{note}");
+    }
     if let Some(note) = &summary.daemon {
         println!("{note}");
     }

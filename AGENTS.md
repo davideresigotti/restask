@@ -44,6 +44,9 @@ When `plugins/obsidian` changed (workdir `plugins/obsidian`; `npm ci` once):
 npm run lint && npm test && npm run build
 ```
 
+The build also refreshes `crates/restask/assets/obsidian/`, the copy of the plugin the
+binary embeds for `restask setup`. Commit it with the change; CI fails when it is stale.
+
 When `neovim/` changed:
 
 ```

@@ -1,6 +1,6 @@
 target/
 node_modules/
 .restask/
-main.js
+/plugins/obsidian/main.js
 *.restask-tmp
 *.pre-restask-*.md

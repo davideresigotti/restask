@@ -49,6 +49,7 @@ immediately instead of at the next pass.
 │   ├── restask.service        systemd user unit (App. E)
 │   └── docker/{Dockerfile,docker-compose.yml}
 ├── crates/restask/
+│   ├── assets/obsidian/       built plugin bundle embedded in the binary (App. C)
 │   ├── src/
 │   │   ├── lib.rs  main.rs  error.rs  logging.rs
 │   │   ├── domain/      uid  priority  dates  task                 (pure, §3–4)

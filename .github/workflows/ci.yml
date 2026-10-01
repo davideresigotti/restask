@@ -32,6 +32,8 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: Embedded bundle is current
+        run: git diff --exit-code -- ../../crates/restask/assets/obsidian
 
   lua:
     runs-on: ubuntu-latest

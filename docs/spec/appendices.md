@@ -48,7 +48,12 @@ application). Adding or changing a dependency is a recorded decision (`AGENTS.md
 `vitest 2.1`; lockfile committed. `manifest.json`: `id: "restask"`, `name: "restask"`,
 `minAppVersion: "1.5.0"`, `isDesktopOnly: false`. `tsconfig.json`: `strict: true`,
 ES2022, bundler resolution. `esbuild.config.mjs` bundles `src/main.ts` → `main.js` (cjs,
-minified, `obsidian` external); `main.js` is git-ignored and built at install time.
+minified, `obsidian` external) and then copies `main.js`, `manifest.json` and `styles.css`
+to `crates/restask/assets/obsidian/`. `plugins/obsidian/main.js` is git-ignored; the
+copies under `assets/` are **committed** — the crate embeds them with `include_str!` so
+`restask setup` can install the plugin (§13.2 step 1) from a binary built without Node
+(`cargo install`, the Docker image). A plugin change is committed together with its
+rebuilt copies; CI fails when they differ from a fresh build.
 
 ## Appendix D — CI (`.github/workflows/ci.yml`)
 
@@ -58,7 +63,8 @@ On push and pull request, three jobs on `ubuntu-latest`:
   `cargo clippy --workspace --all-targets -- -D warnings`;
   `cargo test --workspace --locked`.
 - **plugin** (`plugins/obsidian`, Node 22): `npm ci`, `npm run lint`, `npm test`,
-  `npm run build`.
+  `npm run build`, then `git diff --exit-code` on `crates/restask/assets/obsidian` (the
+  embedded bundle must be the one the sources build).
 - **lua**: `luac5.4 -p neovim/lua/restask/*.lua`; `lua5.4 neovim/test/toggle_test.lua`.
 
 `tests/e2e_server.rs` is `#[ignore]`d and never runs in CI.

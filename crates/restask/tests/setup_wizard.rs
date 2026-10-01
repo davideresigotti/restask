@@ -1,6 +1,6 @@
 //! Setup wizard tests (§13.2): the fresh TODO.md creation with rename-to-backup, the
-//! typed inbox binding, and the non-interactive full setup against the in-memory CalDAV
-//! mock.
+//! typed inbox binding, the Obsidian plugin install, and the non-interactive full setup
+//! against the in-memory CalDAV mock.
 
 mod common;
 
@@ -15,7 +15,8 @@ use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::markdown::MARKER;
 use restask::setup::{
-    daemon_unit_content, match_collection, parse_collections, run_setup, DaemonInstaller, SetupArgs,
+    daemon_unit_content, install_obsidian_plugin, match_collection, parse_collections, run_setup,
+    DaemonInstaller, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -419,4 +420,205 @@ async fn rerunning_setup_never_deletes_inbox_tasks_from_the_server() {
         "and back in the fresh TODO.md:\n{todo}"
     );
     assert_eq!(summary.report.deletes, 0);
+}
+
+/// The plugin bundle the binary embeds (kept current by `npm run build`, App. C).
+fn embedded_plugin_file(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/obsidian")
+        .join(name);
+    std::fs::read_to_string(path).unwrap()
+}
+
+fn plugin_dir(vault: &Path) -> PathBuf {
+    vault.join(".obsidian/plugins/restask")
+}
+
+#[tokio::test]
+async fn setup_installs_and_enables_the_obsidian_plugin() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+
+    let summary = run_setup(args(&vault), mock.clone(), clock(), None)
+        .await
+        .unwrap();
+
+    // The three files Obsidian loads a plugin from, byte-identical to the built bundle.
+    for name in ["main.js", "manifest.json", "styles.css"] {
+        assert_eq!(
+            std::fs::read_to_string(plugin_dir(vault.path()).join(name)).unwrap(),
+            embedded_plugin_file(name),
+            "{name}"
+        );
+    }
+    assert!(embedded_plugin_file("manifest.json").contains("\"id\": \"restask\""));
+    // Enabled; the default done heading needs no settings file.
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join(".obsidian/community-plugins.json")).unwrap(),
+        "[\n  \"restask\"\n]"
+    );
+    assert!(!plugin_dir(vault.path()).join("data.json").exists());
+    assert!(summary.plugin.as_deref().unwrap().contains("enabled"));
+}
+
+#[test]
+fn plugin_install_keeps_other_plugins_and_the_users_settings() {
+    let vault = tempfile::tempdir().unwrap();
+    let obsidian = vault.path().join(".obsidian");
+    std::fs::create_dir_all(plugin_dir(vault.path())).unwrap();
+    let enabled = obsidian.join("community-plugins.json");
+    std::fs::write(&enabled, "[\"dataview\", \"obsidian-git\"]").unwrap();
+    std::fs::write(
+        plugin_dir(vault.path()).join("main.js"),
+        "// an older build",
+    )
+    .unwrap();
+    let settings = plugin_dir(vault.path()).join("data.json");
+    std::fs::write(&settings, "{\"suggestWhileTyping\":false}").unwrap();
+    let cfg = VaultConfig {
+        done_heading: "Fatto".to_string(),
+        ..VaultConfig::default()
+    };
+
+    install_obsidian_plugin(vault.path(), &cfg).unwrap();
+
+    // restask joins the list, the others stay in order; the old build is replaced; the
+    // existing settings are the user's, even though the vault's heading is not the default.
+    assert_eq!(
+        std::fs::read_to_string(&enabled).unwrap(),
+        "[\n  \"dataview\",\n  \"obsidian-git\",\n  \"restask\"\n]"
+    );
+    assert_eq!(
+        std::fs::read_to_string(plugin_dir(vault.path()).join("main.js")).unwrap(),
+        embedded_plugin_file("main.js")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        "{\"suggestWhileTyping\":false}"
+    );
+}
+
+#[test]
+fn plugin_install_is_a_no_op_on_an_installed_vault() {
+    let vault = tempfile::tempdir().unwrap();
+    let cfg = VaultConfig::default();
+    install_obsidian_plugin(vault.path(), &cfg).unwrap();
+    // Obsidian (or the user) may keep the list in another layout: already listing the
+    // plugin, it is not reformatted.
+    let enabled = vault.path().join(".obsidian/community-plugins.json");
+    std::fs::write(&enabled, "[\"restask\"]\n").unwrap();
+    let tracked: Vec<PathBuf> = ["main.js", "manifest.json", "styles.css"]
+        .iter()
+        .map(|name| plugin_dir(vault.path()).join(name))
+        .chain([enabled.clone()])
+        .collect();
+    let modified = |paths: &[PathBuf]| -> Vec<std::time::SystemTime> {
+        paths
+            .iter()
+            .map(|path| std::fs::metadata(path).unwrap().modified().unwrap())
+            .collect()
+    };
+    let before = modified(&tracked);
+
+    let note = install_obsidian_plugin(vault.path(), &cfg).unwrap();
+
+    assert!(note.contains("enabled"), "{note}");
+    assert_eq!(
+        modified(&tracked),
+        before,
+        "nothing rewritten (no Syncthing churn)"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&enabled).unwrap(),
+        "[\"restask\"]\n"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(plugin_dir(vault.path()))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with("restask-tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn plugin_install_never_overwrites_a_plugin_list_it_cannot_read() {
+    // Unknown is not empty: a list restask cannot parse may still name the user's other
+    // plugins, so it is left byte-for-byte and the user enables the plugin by hand.
+    let vault = tempfile::tempdir().unwrap();
+    let obsidian = vault.path().join(".obsidian");
+    std::fs::create_dir_all(&obsidian).unwrap();
+    let enabled = obsidian.join("community-plugins.json");
+    for unreadable in ["[\"dataview\", ", "{\"dataview\": true}"] {
+        std::fs::write(&enabled, unreadable).unwrap();
+
+        let note = install_obsidian_plugin(vault.path(), &VaultConfig::default()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&enabled).unwrap(), unreadable);
+        assert!(note.contains("by hand"), "{note}");
+        assert!(plugin_dir(vault.path()).join("main.js").is_file());
+    }
+}
+
+#[test]
+fn plugin_install_seeds_a_non_default_done_heading() {
+    let vault = tempfile::tempdir().unwrap();
+    let cfg = VaultConfig {
+        done_heading: "Fatto".to_string(),
+        ..VaultConfig::default()
+    };
+
+    install_obsidian_plugin(vault.path(), &cfg).unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plugin_dir(vault.path()).join("data.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings, serde_json::json!({ "doneHeading": "Fatto" }));
+}
+
+#[cfg(unix)]
+#[test]
+fn plugin_install_leaves_a_symlinked_development_install_alone() {
+    // A checkout linked into the vault (per file, or the whole folder) is managed by
+    // hand: setup must not replace the links with copies, nor write through them.
+    let checkout = tempfile::tempdir().unwrap();
+    for name in ["main.js", "manifest.json", "styles.css"] {
+        std::fs::write(checkout.path().join(name), "work in progress").unwrap();
+    }
+    let cfg = VaultConfig::default();
+
+    let per_file = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(plugin_dir(per_file.path())).unwrap();
+    for name in ["main.js", "manifest.json", "styles.css"] {
+        std::os::unix::fs::symlink(
+            checkout.path().join(name),
+            plugin_dir(per_file.path()).join(name),
+        )
+        .unwrap();
+    }
+    install_obsidian_plugin(per_file.path(), &cfg).unwrap();
+
+    let whole_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(whole_dir.path().join(".obsidian/plugins")).unwrap();
+    std::os::unix::fs::symlink(checkout.path(), plugin_dir(whole_dir.path())).unwrap();
+    install_obsidian_plugin(whole_dir.path(), &cfg).unwrap();
+
+    for name in ["main.js", "manifest.json", "styles.css"] {
+        let link = plugin_dir(per_file.path()).join(name);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join(name)).unwrap(),
+            "work in progress"
+        );
+    }
+    // Still enabled in both vaults.
+    for vault in [per_file.path(), whole_dir.path()] {
+        assert_eq!(
+            std::fs::read_to_string(vault.join(".obsidian/community-plugins.json")).unwrap(),
+            "[\n  \"restask\"\n]"
+        );
+    }
 }

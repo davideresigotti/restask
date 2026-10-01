@@ -7,8 +7,9 @@ whole contract (§1.2), and the daemon repairs hand edits (§6.4).
 
 ## §15 Obsidian plugin (`plugins/obsidian/`, TypeScript, zero runtime dependencies)
 
-Runs on desktop and mobile. It **edits Markdown and nothing else**: no state files, no
-network. (It used to mirror tasks into `.restask/tasks/`; those files are now the
+Runs on desktop and mobile. `restask setup` installs and enables it in the vault (§13.2
+step 1); `.obsidian/` riding the file sync carries it to the other devices. It **edits
+Markdown and nothing else**: no state files, no network. (It used to mirror tasks into `.restask/tasks/`; those files are now the
 engine's base snapshots and no other program may write them.)
 
 ### 15.1 `markdown.ts` — grammar port
@@ -53,7 +54,8 @@ note (§7.1).
 - Commands: `Toggle task done` (cursor line), `Add metadata` (the suggestions as a
   modal).
 - An `EditorSuggest` for §15.2's while-typing behaviour.
-- Settings: `doneHeading` (must equal `done_heading` in `restask.toml`),
+- Settings: `doneHeading` (must equal `done_heading` in `restask.toml`; setup seeds it
+  for a non-default heading when the plugin has no settings yet),
   `suggestWhileTyping` (default on).
 
 ## §16 Neovim (`neovim/lua/restask/`)

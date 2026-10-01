@@ -29,7 +29,7 @@ restask setup
 
 The wizard will:
 
-1. Create `restask.toml` (vault defaults) and the `.restask/` state directory.
+1. Create `restask.toml` (vault defaults) and the `.restask/` state directory, and install the Obsidian plugin into `.obsidian/plugins/restask/`, enabled in `.obsidian/community-plugins.json` (your other plugins and the plugin's settings are kept).
 2. Create a fresh `TODO.md` — an existing one is renamed to `TODO.pre-restask-<timestamp>.md`. Its lines are not migrated: tasks already on the bound calendar come back with the first sync, anything else stays in the backup for you to move.
 3. Ask for your Radicale URL and credentials (the password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
 4. Show the server's calendars and ask which one `TODO.md` binds to — type its name (e.g. `inbox`). A wrong name re-prompts; a server with no calendars aborts setup.
@@ -102,7 +102,7 @@ All clients use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>
 
 - **Tasks.org** (Android): Settings → Synchronization → Add account → CalDAV; enter the server URL, username, password. Tasks appear under each list name. Notes, reminders, tags and recurrence you set there are kept.
 - **Thunderbird**: Calendar → New calendar → On the Network → CalDAV; paste the URL, check "offline support".
-- **Obsidian**: copy `plugins/obsidian` into `<vault>/.obsidian/plugins/restask/`, run `npm install && npm run build` there, enable "restask" in Community Plugins. It adds metadata suggestions while typing (`hi` → high/highest) and a *Toggle task done* command (bind a hotkey). The plugin is optional: checking a box by hand works too, the daemon tidies it up.
+- **Obsidian**: nothing to install — `restask setup` put the plugin in the vault and enabled it, and it reaches your other devices with the vault if `.obsidian/` is synced. Reload Obsidian if the vault was open during setup; a vault that has community plugins turned off (restricted mode) asks you to turn them on once. Re-run `restask setup` after updating restask to refresh the plugin (or copy `crates/restask/assets/obsidian/*` into `<vault>/.obsidian/plugins/restask/` by hand). It adds metadata suggestions while typing (`hi` → high/highest) and a *Toggle task done* command (bind a hotkey). The plugin is optional: checking a box by hand works too, the daemon tidies it up.
 - **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()`; `<leader>td` toggles the task under the cursor, `<leader>ta` adds one (requires `restask` on PATH).
 
 ## 6. Verify
