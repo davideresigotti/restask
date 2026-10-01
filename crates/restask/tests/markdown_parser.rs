@@ -9,9 +9,9 @@ use restask::markdown::parser::{
 
 const UID: &str = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpf";
 
-const HOME_LAB: &str = include_str!("../../../test-vault/Home Lab Test.md");
-const PROJECT_ALPHA: &str = include_str!("../../../test-vault/Project Alpha Test.md");
-const TODO: &str = include_str!("../../../test-vault/TODO.md");
+const HOME_LAB: &str = include_str!("fixtures/Home Lab Test.md");
+const PROJECT_ALPHA: &str = include_str!("fixtures/Project Alpha Test.md");
+const TODO: &str = include_str!("fixtures/TODO.md");
 
 fn draft(text: &str) -> TaskDraft {
     TaskDraft {
