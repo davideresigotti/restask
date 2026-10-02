@@ -680,8 +680,12 @@ fn node_error(node: &NodeTarget, error: &RestaskError) -> RestaskError {
     }
 }
 
-/// Writes the machine config (0600).
+/// Writes the machine config (0600), creating its directory: on a machine restask was
+/// never set up on there is none, and only the sync node's password file made one.
 fn save_machine(machine: &MachineConfig, path: &Path) -> Result<(), RestaskError> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| config_error(path, error))?;
+    }
     machine
         .save(path)
         .map_err(|error| config_error(path, &error))

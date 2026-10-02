@@ -139,7 +139,9 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    With `Node` and `Elsewhere` this is an *editing machine* (§1.1): its machine config
    gets a `[node]` section and no credentials (§14.2), written only once the daemon is
    in place, so a run that failed is repeated — a plain `restask setup` then joins —
-   and not taken for done. The installer is an injectable port (`DaemonInstaller`:
+   and not taken for done. Whichever machine this is, setup creates the directory of
+   the machine config when it is missing (a computer restask was never set up on has
+   none). The installer is an injectable port (`DaemonInstaller`:
    `install`, `prepare_node`, `install_node`; the real one is `SystemInstaller`); tests
    record instead.
 7. **Summary.**

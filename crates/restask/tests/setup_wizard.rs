@@ -799,6 +799,52 @@ async fn setup_puts_the_daemon_on_the_node_with_the_credentials_typed_here() {
 }
 
 #[tokio::test]
+async fn the_machine_config_is_written_on_a_machine_that_has_no_config_directory_yet() {
+    // A computer restask was never set up on has no `~/.config/restask/`. Only the sync
+    // node's password file used to create it, so the wizard's run with the daemon on a
+    // server installed the daemon there and then failed on its last write, here.
+    let home = TempDir::new().unwrap();
+    let config = home.path().join(".config/restask/config.toml");
+    let hosts = [
+        DaemonHost::Node(node()),
+        DaemonHost::Elsewhere,
+        DaemonHost::Here,
+    ];
+    for daemon in hosts {
+        let vault = legacy_vault();
+        let installer = RecordingInstaller::default();
+        let editing = daemon != DaemonHost::Here;
+        let fresh = SetupArgs {
+            config_path: config.clone(),
+            daemon,
+            ..node_args(&vault)
+        };
+        run_setup(fresh, MockCaldav::new(), clock(), Some(&installer))
+            .await
+            .unwrap();
+        let machine = MachineConfig::load(&config).unwrap();
+        assert_eq!(machine.node.is_some(), editing);
+        assert_eq!(machine.vault.path.as_deref(), Some(vault.path()));
+        std::fs::remove_dir_all(home.path().join(".config")).unwrap();
+    }
+
+    // The same for a join: the run that finishes a setup whose last step failed.
+    let (vault, mock) = set_up_vault().await;
+    let installer = RecordingInstaller::default();
+    let join = SetupArgs {
+        config_path: config.clone(),
+        join: true,
+        collections: Vec::new(),
+        ..node_args(&vault)
+    };
+    run_setup(join, mock, later_clock(), Some(&installer))
+        .await
+        .unwrap();
+    let machine = MachineConfig::load(&config).unwrap();
+    assert_eq!(machine.node.unwrap().host.as_deref(), Some("homeserver"));
+}
+
+#[tokio::test]
 async fn a_node_that_cannot_run_the_daemon_leaves_the_vault_untouched() {
     // No Docker there, the vault not shared with it, ssh refused: the wizard stops
     // before it replaces TODO.md or contacts the task server.
