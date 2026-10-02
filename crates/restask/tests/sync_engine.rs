@@ -398,6 +398,168 @@ async fn sync_conflict_copies_are_not_scanned() {
     );
 }
 
+/// The copies a file sync's version archive holds of a list's root note, of a note below
+/// it and of the view — the owner's vault on the sync node (T82), under `archive`.
+fn archived_copies(dir: &TempDir, archive: &str) -> Vec<(String, String)> {
+    let copies = vec![
+        (
+            format!("{archive}/Areas/Home Lab/Home Lab~20261002-195517.md"),
+            format!(
+                "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] backup the phone \u{1F53C}\n- [ ] keep \u{23EB} {ID} {UID}\n"
+            ),
+        ),
+        (
+            format!("{archive}/Areas/Home Lab/Services/Frigate~20261002-201357.md"),
+            "# To Do\n- [ ] add the cameras \u{1F53D}\n".to_string(),
+        ),
+        (
+            format!("{archive}/TODO~20261002-201807.md"),
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{1F53C} Medium Priority\n- [ ] an earlier line of the view \u{1F53C}\n\n## Done\n".to_string(),
+        ),
+    ];
+    for (path, contents) in &copies {
+        write_vault_file(dir, path, contents);
+    }
+    copies
+}
+
+#[tokio::test]
+async fn a_file_syncs_version_archive_is_not_part_of_the_vault() {
+    let dir = temp_vault();
+    write_vault_file(
+        &dir,
+        "Areas/Home Lab/Home Lab.md",
+        &format!(
+            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n"
+        ),
+    );
+    write_vault_file(
+        &dir,
+        "Areas/Home Lab/Services/Frigate.md",
+        "# To Do\n- [ ] add the cameras \u{1F53D}\n",
+    );
+    let copies = archived_copies(&dir, ".stversions");
+    // Hidden at any depth, and a hidden file as well.
+    write_vault_file(
+        &dir,
+        "Areas/Home Lab/.old/Notes.md",
+        "# To Do\n- [ ] in a hidden folder \u{1F53C}\n",
+    );
+    write_vault_file(
+        &dir,
+        "Areas/Home Lab/.Draft.md",
+        "# To Do\n- [ ] in a hidden file \u{1F53C}\n",
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+
+    let report = engine.reconcile().await.unwrap();
+    // The two notes and the view; one line to register, the note's own.
+    assert_eq!(report.scanned_files, 3);
+    assert_eq!(report.registered, 1);
+    assert_eq!(mock.resource_names("home-lab").len(), 2);
+    assert!(mock.resource_names("inbox").is_empty());
+    for (path, contents) in &copies {
+        assert_eq!(&read(&dir, path), contents, "{path}");
+    }
+    assert!(!read(&dir, "Areas/Home Lab/.old/Notes.md").contains(ID));
+    assert!(!read(&dir, "Areas/Home Lab/.Draft.md").contains(ID));
+    // The task both the note and its archived copy hold is the note's: one mirror line,
+    // linked to the note.
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {UID}\n"
+        )),
+        "{todo}"
+    );
+    assert!(todo.contains("[[Frigate#To Do|Frigate]]"), "{todo}");
+    assert!(!todo.contains("~2026"), "{todo}");
+    assert!(!todo.contains("backup the phone"), "{todo}");
+    assert!(!todo.contains("hidden"), "{todo}");
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        report,
+        ReconcileReport {
+            scanned_files: 3,
+            ..ReconcileReport::default()
+        }
+    );
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+    assert_eq!(snapshot(&dir), files);
+}
+
+#[tokio::test]
+async fn tasks_an_earlier_engine_took_from_the_version_archive_leave_with_it() {
+    // What an engine that walked into the archive left behind: the copies registered,
+    // pushed and mirrored. Made here with the archive in a folder the scan does read.
+    let dir = temp_vault();
+    write_vault_file(
+        &dir,
+        "Areas/Home Lab/Home Lab.md",
+        &format!(
+            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    archived_copies(&dir, "0-archive");
+    engine.reconcile().await.unwrap();
+    // `keep`, and from the copies: its duplicate, `backup the phone`, `add the cameras`.
+    assert_eq!(mock.resource_names("home-lab").len(), 4);
+    assert_eq!(mock.resource_names("inbox").len(), 1);
+    assert!(read(&dir, "TODO.md").contains("Home Lab~20261002-195517"));
+
+    // The archive is where the file sync keeps it: hidden.
+    std::fs::rename(dir.path().join("0-archive"), dir.path().join(".stversions")).unwrap();
+    let archived = snapshot(&dir)
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(".stversions"))
+        .collect::<Vec<_>>();
+    assert_eq!(archived.len(), 3);
+
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.deletes, 4);
+    assert_eq!(mock.resource_names("home-lab"), vec![UID]);
+    assert!(mock.resource_names("inbox").is_empty());
+    let todo = read(&dir, "TODO.md");
+    assert_eq!(
+        todo,
+        sealed(&format!(
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{23EB} High Priority\n- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {UID}\n\n## Done\n"
+        ))
+    );
+    assert_eq!(
+        read(&dir, "Areas/Home Lab/Home Lab.md"),
+        format!("---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n")
+    );
+    // The copies are left as the earlier engine wrote them.
+    let after = snapshot(&dir)
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(".stversions"))
+        .collect::<Vec<_>>();
+    assert_eq!(after, archived);
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        report,
+        ReconcileReport {
+            scanned_files: 2,
+            ..ReconcileReport::default()
+        }
+    );
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+    assert_eq!(snapshot(&dir), files);
+}
+
 // ── the server side reaches the vault ─────────────────────────────────────────────────
 
 #[tokio::test]

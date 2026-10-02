@@ -48,8 +48,8 @@ poll timer (caldav.poll_secs, 300) ──┘
 - A burst of file events — an editor saving, file sync delivering a batch — coalesces
   into **one** pass; whatever happened, one pass covers it.
 - Only events that can change a scan wake the loop: tracked notes and directories.
-  Events under `.restask/`, on ignored paths, on temp files, on setup backups and on
-  conflict copies do not — so the engine's own state writes never re-trigger it, and its
+  Events on hidden paths (§5.1: `.restask/`, a file sync's version archive), on ignored
+  paths, on temp files, on setup backups and on conflict copies do not — so the engine's own state writes never re-trigger it, and its
   note writes cause at most one follow-up pass, which is a no-op.
 - **Server watch.** The server sends no events, so the daemon asks: every
   `caldav.watch_secs` one `PROPFIND` (the collection listing of §10.2) returns the change

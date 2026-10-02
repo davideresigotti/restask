@@ -16,7 +16,9 @@ ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```
 
 `ignore` wins over `track`. Paths are vault-relative, `/`-separated; `*` does not cross
-`/`, `**` does. `.restask/` is never scanned regardless of these.
+`/`, `**` does. Hidden files and folders (§5.1) — `.restask/`, a file sync's
+`.stversions/` — are never scanned regardless of these: `track` cannot bring them in,
+and they need no `ignore` entry.
 
 ### 14.2 Machine config — `$XDG_CONFIG_HOME/restask/config.toml` (0600; never synced)
 

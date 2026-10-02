@@ -150,6 +150,7 @@ On the computer, `doctor` says which machine runs the daemon and how to read its
 
 - **Offline**: everything you do to the notes works offline, on every device; the server catches up when the file sync and the daemon meet again.
 - **Latency**: a change made in Tasks.org reaches a note in three steps — Tasks.org uploads it (through DAVx⁵ that is Android's sync scheduler: never sooner than 30 s after the edit, and some phones hold it for minutes; a CalDAV account added in Tasks.org itself uploads at once), the daemon notices within 2 s and writes the vault on the server, and the file sync delivers the files. With Syncthing the last step is the longest: a folder's watcher waits `fsWatcherDelayS` (10 s by default) before it looks at a changed file. Set it to `1` for the vault's folder on the server (`syncthing cli config folders <id> fswatcher-delays set 1`; in the web UI under *Actions* → *Advanced* → *Folders* → *Fs Watcher Delay S*), and on your editing devices for the other direction.
+- **File versioning**: Syncthing's file versioning can stay on. Its archive (`.stversions/` in the vault's folder) is hidden, and restask reads nothing hidden: the old versions of your notes there are not tasks.
 - **Conflict copies**: if Syncthing leaves a `*.sync-conflict-*` file, restask ignores it and `doctor` reports it — merge what you need by hand and delete it.
 - **Starting over**: `restask rebuild`, on the machine that runs the daemon, drops the sync bookkeeping (not your notes, not the server); the next sync re-derives it.
 

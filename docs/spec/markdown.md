@@ -137,7 +137,8 @@ next pass):
   render's job (§7). A line registered there under a priority section's heading also
   takes that priority (§7.4).
 - Syncthing conflict copies (`*.sync-conflict-*`) and setup backups (`*.pre-restask-*`)
-  are never scanned; `restask doctor` reports the former.
+  are never scanned; `restask doctor` reports the former. Neither is anything hidden
+  (§5.1) — a file sync's version archive among it.
 
 ## §7 The TODO.md view (`markdown::todo_view`)
 

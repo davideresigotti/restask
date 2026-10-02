@@ -23,6 +23,16 @@ restask-list-root: Home Lab     # list "Home Lab" for THIS folder, recursively;
 A note may carry both: `restask-list` wins for the note; `restask-list-root` still
 declares the folder.
 
+**Hidden files and folders are not part of the vault.** A file or directory whose name
+starts with `.` is never walked, at any depth and whatever `track` says: no frontmatter
+is read there, no folder is declared from there, no line is registered there. Such
+places hold other tools' copies of notes, markers and all — a file sync's version archive
+(Syncthing's `.stversions/`, with `Home Lab~20261002-195517.md` next to an archived
+`TODO~….md`), `.trash/`, `.git/` — and a copy of a routed note is not a note: scanned, an
+archived root note routes its archived folder, every archived task becomes a second task
+on the server and a mirror line that links to the copy. Obsidian does not show such
+files either, so the plugin never sees them.
+
 ### 5.2 Resolution
 
 For a note at vault-relative path `p` (other than the inbox file):

@@ -22,7 +22,7 @@ use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::store::index::Index;
 use crate::RestaskError;
 
-/// Name of the per-vault state directory; never scanned, whatever `ignore` says.
+/// Name of the per-vault state directory; hidden, so never scanned (§5.1).
 pub const STATE_DIR: &str = ".restask";
 
 /// Longest frontmatter block the router looks at (lines). A note whose block is longer is
@@ -571,7 +571,16 @@ pub fn is_conflict_copy(name: &str) -> bool {
     name.contains(".sync-conflict-")
 }
 
-/// Recursively collects tracked note paths (vault-relative, `/`-separated).
+/// `true` for a file or directory name the vault does not consist of (§5.1): a hidden
+/// one. The state directory is one; so are the places other tools keep copies of notes
+/// in — a file sync's version archive (`.stversions`), `.trash`, `.git` — and a copy of
+/// a routed note is not a note: scanned, each would be registered as tasks of its own.
+fn is_hidden(name: &str) -> bool {
+    name.starts_with('.')
+}
+
+/// Recursively collects tracked note paths (vault-relative, `/`-separated). Hidden files
+/// and directories are skipped at every depth, whatever `track` says.
 fn walk(
     dir: &Path,
     relative: &str,
@@ -587,11 +596,11 @@ fn walk(
         } else {
             format!("{relative}/{name}")
         };
+        if is_hidden(&name) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            if relative.is_empty() && name == STATE_DIR {
-                continue;
-            }
             walk(&entry.path(), &child, matchers, out, conflicts)?;
         } else if matchers.is_tracked(&child) {
             if is_conflict_copy(&name) {
@@ -605,15 +614,13 @@ fn walk(
 }
 
 /// Whether a file event on a vault-relative path can change what a scan sees: a note the
-/// scan would read, or a directory (renames move notes). Events under the state
-/// directory, on ignored paths, on artifacts and on atomic-write temp files never do —
-/// in particular the engine's own state writes do not wake the daemon.
+/// scan would read, or a directory (renames move notes). Events on hidden paths (the
+/// state directory, a file sync's version archive), on ignored paths, on artifacts and on
+/// atomic-write temp files never do — in particular the engine's own state writes do not
+/// wake the daemon.
 pub fn is_relevant_event(relative: &str, matchers: &VaultMatchers) -> bool {
-    let in_state_dir = relative == STATE_DIR
-        || relative
-            .strip_prefix(STATE_DIR)
-            .is_some_and(|rest| rest.starts_with('/'));
-    if relative.is_empty() || in_state_dir || matchers.is_ignored(relative) {
+    let hidden = relative.split('/').any(is_hidden);
+    if relative.is_empty() || hidden || matchers.is_ignored(relative) {
         return false;
     }
     let name = relative.rsplit('/').next().unwrap_or(relative);
