@@ -5,4 +5,4 @@ pub mod parser;
 pub mod todo_view;
 
 pub use parser::{parse, parse_line, ParsedFile, ParsedTask, TaskDraft};
-pub use todo_view::{inbox_line, mirror_edits, mirror_line, render, MARKER};
+pub use todo_view::{inbox_line, is_sealed, is_view, mirror_edits, mirror_line, render};

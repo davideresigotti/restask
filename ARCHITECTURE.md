@@ -14,9 +14,21 @@ Thunderbird.
 
 - **The vault is the source of truth.** It is a folder of Markdown files, carried between
   devices by a file-sync tool (Syncthing). Editing a note is all a device ever has to do.
-- **The daemon is the only bridge.** `restask daemon` runs on an always-on device, watches
-  the vault and reconciles it with the server. Phones run no daemon: Obsidian edits
-  Markdown, Tasks.org talks CalDAV, and the daemon makes both agree.
+- **Every device is complete on its own.** Whatever restask does to the vault that needs
+  no server — registering a task, filing it, completing it, keeping TODO.md current —
+  happens on the device the edit is made on, at once and offline, in Obsidian and in
+  Neovim alike. No device waits for the daemon, or for the file sync, to see the result
+  of its own edit (*Local first*, below; invariant 12).
+- **The daemon is the only bridge to the server — and nothing more.** `restask daemon`
+  runs on one always-on device (the sync node), watches the vault and reconciles it with
+  the server. No other device runs one, computers included, and none holds the server's
+  credentials: Obsidian and Neovim edit Markdown, Tasks.org talks CalDAV, and the daemon
+  makes both agree. It is one because a vault reaches another machine twice — through
+  the file sync and through the server — and a second bridge writes into notes the file
+  sync has not delivered yet (§1.1 *Why not two*). `restask setup` puts it in place: on
+  the server, over ssh, from the computer it is run on (§13.2). It has no local
+  behaviour of its own: on the vault it does what the integrations do, for the edits
+  that reached it without one.
 - **The server is a peer, not a mirror.** Changes made there (complete, reword, re-date,
   create, delete) flow back into the notes.
 
@@ -40,7 +52,7 @@ Thunderbird.
 | Machine config | `$XDG_CONFIG_HOME/restask/config.toml` (never synced) |
 | Environment prefix | `RESTASK_*` |
 | Task UID | `restask-<ULID>` |
-| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED` |
+| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID` |
 | Systemd unit / container | `restask.service` / `restask` |
 
 The project was called *Taskres* in its first weeks. That name survives only as read-side
@@ -78,6 +90,46 @@ Rules:
 - All vault and state writes go through `fsio` (temp file + fsync + rename; nothing is
   written when the content is unchanged).
 
+## Local first: one behaviour, on every device
+
+The work of a pass (§11.1) is of two kinds, and only one of them is the daemon's.
+
+- **Local work** — everything that is decided from the vault alone: registering a new
+  line (`🆔`), separating a copied line, repairing hand edits, the checkbox as the status
+  (stamp, move under the done heading, and back), the creation date a line asks for, the
+  priority of the TODO.md section a task is typed in or moved to, an edit on a TODO.md
+  mirror line carried to its note, and the TODO.md view itself — mirror lines, sections,
+  order, seal (§6.4, §7).
+- **Server work** — everything that needs the CalDAV server: the three-way merge, pushes
+  and pulls, adoption, the roll-forward of a recurring series, and the state under
+  `.restask/` that records what both sides agreed on.
+
+Local work belongs to the device the edit is made on. It is done there, immediately, with
+no network, no server and no daemon — neither on that device nor reachable from it:
+
+| Where the edit is made | Who does the local work | When |
+|---|---|---|
+| Obsidian, desktop and mobile | the plugin — a port of the engine's rules (§15.6) | when the edit of a line is finished (the cursor leaves it); a checkbox at once |
+| Neovim | the engine itself, through the CLI (`restask settle`) — no rules in Lua (§16) | when the buffer is written; a toggle at once |
+| Any other editor; a file that arrives through the file sync | the daemon's local phase (§11.1) | at its next pass |
+
+The last row is the fallback for the first two, on a computer as on a phone: an edit
+that no integration settled is settled by the sync node, by the same local phase, and
+is only later. The sync node needs nothing else for it — it runs the one daemon, and
+`restask settle` is that daemon's phase 1 and render as a command, without the server.
+
+Three places, **one behaviour**. The engine's pure modules are the reference; the plugin
+is a port of them, and Neovim calls them. For the same edit all three leave the same
+bytes in the same files — the note *and* TODO.md — so it makes no difference to the user
+which of them got there first, and the daemon's pass over a vault an integration has
+settled writes no file (invariant 8). A difference between them is a bug, in whichever
+side departs from the spec. A local rule therefore never exists in one place only: it is
+specified once (§6–§7) and implemented in the engine and in the plugin in the same task.
+
+What a device cannot do alone is server work, and only that may wait for the sync node.
+"It appears once the sync has gone there and back" is acceptable for a change made *on
+the server* and for nothing else.
+
 ## The model the sync is built on
 
 Three versions of every task meet in each pass:
@@ -110,7 +162,9 @@ re-planned from fresh snapshots in the next pass.
    read, a collection that lost everything at once — none of these prove a deletion.
 3. **UIDs are eternal.** Assigned once, never regenerated, preserved across edits and list
    moves. A copied line gets its own UID; a foreign task is adopted under a UID derived
-   from its own, so adopting it twice yields the same task.
+   from its own, so adopting it twice yields the same task. That holds for the server
+   too: a task another client created stays that client's resource — its name, its
+   `UID` — and is linked to its line, never replaced by a copy.
 4. **Local-only by default.** A note takes part only when routed by frontmatter
    (`restask-list`, `restask-list-root`). Of an unrouted note only the frontmatter block
    is ever read; it is never parsed, modified or synced.
@@ -130,6 +184,11 @@ re-planned from fresh snapshots in the next pass.
     (0600) or the environment — never in synced files, configs or logs.
 11. **Timestamps follow §4.** Markdown dates are device-local; date-only values map to
     midnight UTC and back by UTC calendar date; timed dues are floating local time.
+12. **Local work is local, and the same everywhere.** Nothing that can be decided from
+    the vault alone waits for the daemon, the file sync or the server: the Obsidian
+    plugin and the Neovim integration do it on the device, at once and offline, and
+    leave what the daemon's local phase would leave — byte for byte, in the note and in
+    TODO.md. The daemon is required for server work only.
 
 ## Specification index
 

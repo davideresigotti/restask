@@ -14,6 +14,7 @@ pub struct TaskUid(String);   // "restask-" + 26-char lowercase Crockford base32
 impl TaskUid {
     pub fn generate() -> Self;                         // monotonic within a process
     pub fn derived(foreign_uid: &str, created_at: Option<DateTime<Utc>>) -> Self;
+    pub fn adopts(&self, foreign_uid: &str) -> bool;   // some derived(foreign_uid, _)
     pub fn parse(raw: &str) -> Result<Self, UidError>; // trims, lowercases, validates
     pub fn as_str(&self) -> &str;
 }
@@ -25,7 +26,9 @@ impl TaskUid {
   `generate` and `derived` only produce `restask-`.
 - `derived` is the adoption UID (§11 R5): a pure function of a foreign task's `UID` and
   `CREATED`. The ULID timestamp is `created_at` (epoch when unknown), so adopted tasks
-  sort by creation; the 80 random bits are a hash of the foreign UID.
+  sort by creation; the 80 random bits are a hash of the foreign UID. `adopts` compares
+  those bits: it tells whether a UID can be the adoption UID of a given foreign `UID`,
+  whatever the creation instant.
 
 ### 3.2 `priority.rs`
 
@@ -158,7 +161,7 @@ Markdown dates are **device-local**. VTODO instants (`CREATED`, `COMPLETED`,
 | Markdown | VTODO | Rule |
 |---|---|---|
 | `➕ 2026-09-19` | `CREATED:20260919T000000Z` | date-only → midnight UTC |
-| (no `➕`) | (no `CREATED`) | never synthesized: an invented date would differ from the vault forever |
+| (no `➕`) | `CREATED` of the server copy, kept as it is; on the first push the day the UID was minted (UTC date of its ULID timestamp, `TaskUid::created_on`) | the line does not have to show the date (§6.4); the merge keeps the server's value when the vault has none (§11.3), so the two do not disagree |
 | `✅ 2026-09-19` | `COMPLETED:20260919T000000Z` | date-only → midnight UTC |
 | `📅 2026-09-19` | `DUE;VALUE=DATE:20260919` | all-day |
 | `📅 2026-09-19 17:00` | `DUE:20260919T170000` | **floating** local time — no `Z`, no `TZID` |

@@ -98,3 +98,53 @@ fn derived_uids_are_deterministic_valid_and_time_ordered() {
     assert_eq!(TaskUid::derived("x", None), TaskUid::derived("x", None));
     assert!(TaskUid::derived("x", None) < a);
 }
+
+#[test]
+fn a_uid_tells_the_day_it_was_minted() {
+    use chrono::TimeZone;
+    // A generated UID: today, by the UTC calendar.
+    assert_eq!(
+        TaskUid::generate().created_on().map(|day| day.0),
+        Some(chrono::Utc::now().date_naive())
+    );
+    // An adopted task: the foreign task's own creation instant, late in the UTC day.
+    let at = chrono::Utc
+        .with_ymd_and_hms(2026, 9, 21, 23, 59, 59)
+        .unwrap();
+    assert_eq!(
+        TaskUid::derived("5417861935824551742", Some(at))
+            .created_on()
+            .map(|day| day.format()),
+        Some("2026-09-21".to_string())
+    );
+    // Legacy prefix reads the same; an unknown creation carries no day.
+    assert_eq!(
+        TaskUid::parse("taskres-01jzq4tsvg2c9xkw7n5m8rhdpb")
+            .unwrap()
+            .created_on(),
+        TaskUid::parse("restask-01jzq4tsvg2c9xkw7n5m8rhdpb")
+            .unwrap()
+            .created_on()
+    );
+    assert_eq!(TaskUid::derived("no-date", None).created_on(), None);
+}
+
+#[test]
+fn a_uid_tells_which_foreign_uid_it_was_derived_from() {
+    use chrono::{TimeZone, Utc};
+    let at = Utc.with_ymd_and_hms(2026, 9, 21, 8, 12, 33).unwrap();
+    // Whatever the creation instant: the link holds when a client rewrites `CREATED`.
+    for uid in [
+        TaskUid::derived("5417861935824551742", Some(at)),
+        TaskUid::derived("5417861935824551742", None),
+    ] {
+        assert!(uid.adopts("5417861935824551742"));
+        assert!(!uid.adopts("5417861935824551743"));
+        assert!(!uid.adopts(""));
+    }
+    // A UID minted for a line of the vault adopts nothing.
+    assert!(!TaskUid::generate().adopts("5417861935824551742"));
+    assert!(!TaskUid::parse("taskres-01jzetq1v2h3k4m5n6p7r8t9w0")
+        .unwrap()
+        .adopts("5417861935824551742"));
+}

@@ -35,6 +35,7 @@ function draft(text: string): TaskDraft {
 		start: undefined,
 		scheduled: undefined,
 		created: undefined,
+		wantsCreated: false,
 		completedOn: undefined,
 		recurrence: undefined,
 	};
@@ -149,6 +150,23 @@ describe("§6.1 line grammar", () => {
 		const t = mustParse("- [ ] Buy milk📅 2026-01-01");
 		expect(t.draft.due).toEqual({ kind: "date", date: "2026-01-01" });
 		expect(t.draft.text).toBe("Buy milk");
+	});
+
+	it("a bare ➕ asks for the creation date; a dated or glued one does not", () => {
+		const asked = mustParse("- [ ] ➕ Buy milk 🔺");
+		expect(asked.draft.wantsCreated).toBe(true);
+		expect(asked.draft.created).toBeUndefined();
+		expect(asked.draft.text).toBe("Buy milk");
+		expect(mustParse("- [ ] Buy milk ➕").draft.wantsCreated).toBe(true);
+
+		const dated = mustParse("- [ ] Buy milk ➕ 2026-09-22");
+		expect(dated.draft.wantsCreated).toBe(false);
+		expect(dated.draft.created).toBe("2026-09-22");
+		expect(mustParse("- [ ] Buy milk ➕ 2026-13-45").draft.wantsCreated).toBe(false);
+
+		const glued = mustParse("- [ ] 2➕2 and a➕");
+		expect(glued.draft.wantsCreated).toBe(false);
+		expect(glued.draft.text).toBe("2➕2 and a➕");
 	});
 
 	it("invalid token values tolerated", () => {

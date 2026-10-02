@@ -2,41 +2,64 @@
 
 restask links every checkbox in the routed notes of your Markdown vault to an RFC 5545 VTODO on your own [Radicale](https://radicale.org/) server — so [Obsidian](https://obsidian.md), Neovim, Tasks.org and Thunderbird stay in sync, offline-first.
 
-## 1. Requirements
-
-- **Rust 1.98+** (engine): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- A **Markdown vault** (any folder; ideally synced across devices with Syncthing)
-- A **Radicale** server (self-hosted CalDAV) with at least one calendar for the inbox
-
-## 2. Install the engine
-
-From a clone of this repository:
+## 1. Install: three commands, on your computer
 
 ```bash
 git clone <repo-url> restask && cd restask
-cargo install --path crates/restask --locked
-restask --version
+cargo install --path crates/restask --locked     # needs Rust 1.98+ (https://rustup.rs)
+cd /path/to/your/vault && restask setup
 ```
 
-## 3. First-time setup (one command)
+`restask setup` is the whole installation — for the computer, the server and the phone. It asks, once:
 
-Run the wizard **inside your vault**:
+1. **The Radicale URL, username and password.** Use the address the server has on your network (`http://192.168.1.10:5232`), not `localhost`.
+2. **Which calendar `TODO.md` binds to** — it lists the server's calendars; type one (e.g. `inbox`).
+3. **The ssh host of your always-on server**, if one holds a copy of the vault. Press Enter if there is none: this computer then keeps the vault in sync itself.
+4. **The vault's folder on that server** (only when you named one).
 
-```bash
-cd /path/to/your/vault
-restask setup
+Then it does the rest by itself:
+
+| Where | What setup puts there |
+|---|---|
+| The vault | `restask.toml`, the `.restask/` state folder, a fresh `TODO.md` (an existing one is renamed to `TODO.pre-restask-<timestamp>.md`), and the Obsidian plugin in `.obsidian/plugins/restask/`, enabled |
+| This computer | the `restask` command (what Neovim calls); a first sync, so your tasks are there when it ends. With a server: nothing else — no daemon, no password kept |
+| The server | the restask daemon as a Docker container, built there from this clone, given the credentials you just typed, started, and its first log lines shown |
+| The phone | nothing to do: the plugin arrives with the vault |
+
+Without a server the daemon is installed on this computer instead (a systemd user unit, started now and at login) and the password is stored in `~/.config/restask/radicale.passwd` (mode `0600`).
+
+### What the server needs
+
+- `ssh <host>` works from this computer (a host from `~/.ssh/config`, or `user@address`).
+- Docker with the compose plugin.
+- A copy of the vault, kept by your file sync (Syncthing: share the vault's folder with the server and let it finish). `.restask/` must be part of the share.
+
+Setup checks all three before it changes anything. It then waits until the file sync has delivered the vault to the server exactly as it is here, and only then starts the daemon there. The first build on the server compiles restask and takes a few minutes; later updates take seconds.
+
+### What the phone needs
+
+Obsidian, with the vault from the same file sync (`.obsidian/` included). The plugin is already in it. A vault that has community plugins turned off asks you to turn them on once; reload Obsidian if the vault was open during setup.
+
+## 2. What runs where, and why only one daemon
+
+```
+ phone / computer                       always-on machine
+ edit the notes        file sync        restask daemon          CalDAV
+ Obsidian plugin,   ◀──────────────▶    on its vault copy   ◀───────────▶   Radicale
+ Neovim, any editor
 ```
 
-The wizard will:
+| Machine | What runs there | Who does restask's work on the notes |
+|---|---|---|
+| Computer with Obsidian and Neovim | the `restask` command, the plugin, the Neovim integration | in Obsidian the plugin; in Neovim `restask settle`, on every save — at once and offline |
+| Phone | Obsidian with the plugin | the plugin, at once and offline |
+| Always-on machine (the *sync node*) | `restask daemon` | the daemon: it is the only thing that talks to Radicale |
 
-1. Create `restask.toml` (vault defaults) and the `.restask/` state directory, and install the Obsidian plugin into `.obsidian/plugins/restask/`, enabled in `.obsidian/community-plugins.json` (your other plugins and the plugin's settings are kept).
-2. Create a fresh `TODO.md` — an existing one is renamed to `TODO.pre-restask-<timestamp>.md`. Its lines are not migrated: tasks already on the bound calendar come back with the first sync, anything else stays in the backup for you to move.
-3. Ask for your Radicale URL and credentials (the password is stored only in `~/.config/restask/radicale.passwd`, mode `0600`).
-4. Show the server's calendars and ask which one `TODO.md` binds to — type its name (e.g. `inbox`). A wrong name re-prompts; a server with no calendars aborts setup.
-5. Run the first sync.
-6. Install and enable the systemd user unit (`~/.config/systemd/user/restask.service`) pointing at this vault — the daemon starts immediately and at boot (Linux with systemd; other environments skip this and say so). Re-running setup refreshes the unit.
+**One daemon per vault, never two.** A daemon on the computer *and* one on the server would both carry changes between the vault and Radicale, each on its own copy of the files. Whenever one of them is faster than the file sync — which is nearly always — it writes into a note the file sync is about to replace, and you get `sync-conflict` copies of your notes. So restask runs the daemon in one place and makes everything else immediate without it: the plugin and `restask settle` give a task its ID, move a checked task under the done heading and keep `TODO.md` current on the spot. The daemon then carries the result to Radicale and brings back what changed there.
 
-### How tasks are routed
+An edit made on the computer with something else — another editor, a script — is not lost: the daemon does the same work when the file reaches it, and the result comes back with the file sync. Run `restask settle` in the vault to have it at once.
+
+## 3. How tasks are routed
 
 Add frontmatter to a note to route **that note**:
 
@@ -54,81 +77,97 @@ restask-list-root: Home Lab
 ---
 ```
 
-Unmarked notes are left completely untouched (local-only). Quick tasks live in `TODO.md` → the inbox list. Prioritized tasks from routed notes are mirrored into `TODO.md` automatically, and you can check them off there. Each list syncs with the collection of the same name (`Home Lab` → `home-lab`), created on first sync.
+Unmarked notes are left completely untouched (local-only). Quick tasks live in `TODO.md` → the inbox list. Prioritized tasks from routed notes are mirrored into `TODO.md` automatically, and you can check them off there. Each list syncs with the calendar of the same name (`Home Lab` → `home-lab`), created on first sync.
 
 ```bash
-restask lists     # every list the vault routes, with its note and collection URL
+restask lists     # every list the vault routes, with its note and the URL other apps connect to
 ```
 
-## 4. Keep it running (sync node)
+## 4. Connect your other apps
 
-On any machine with a systemd user session, `restask setup` already installed and enabled the daemon (step 6): it starts immediately, restarts on failure, and survives logout (`loginctl enable-linger`). The always-on server daemon is the anchor: it keeps vault ⇄ Radicale converging even when every other device is off.
+All of them use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>/` (`restask lists` prints them).
 
-Your PC and the server may each run a daemon on their own copy of the vault. The daemon and CLI commands on one machine take turns automatically (a lock under `.restask/`).
-
-**Adding the server daemon (no `setup` re-run):** Syncthing already carries the whole vault — `restask.toml` and `.restask/` included — so the vault itself needs nothing. Only the machine-local pieces must exist on the server, because secrets never ride the vault:
-
-```bash
-# 1. the binary (a clone + cargo install, or copy the built binary)
-cargo install --path /path/to/restask/crates/restask --locked
-
-# 2. the machine config, once, from the PC (endpoint + password, modes preserved)
-rsync -a ~/.config/restask/ server:'.config/restask/'
-
-# 3. the user unit, pointed at the server's vault copy
-scp contrib/restask.service server:'.config/systemd/user/restask.service'
-ssh server
-  $EDITOR ~/.config/systemd/user/restask.service   # fix the --vault path
-  systemctl --user daemon-reload && systemctl --user enable --now restask
-  loginctl enable-linger $USER
-```
-
-The unit's `--vault` path decides which vault the daemon serves. Verify from the server's vault copy with `restask doctor`.
-
-**Docker** (matches an `/opt/docker` style server — see `contrib/docker/docker-compose.yml`):
-
-```bash
-cd contrib/docker
-# edit docker-compose.yml: vault path, and set TZ to your timezone
-mkdir -p data    # put config.toml and radicale.passwd (chmod 600) here
-docker compose up -d --build
-```
-
-Set `TZ`: completion dates are stamped in local time, and timed due dates created in other apps are shown in local time.
-
-## 5. Connect your clients
-
-All clients use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>/` (`restask lists` prints them).
-
-- **Tasks.org** (Android): Settings → Synchronization → Add account → CalDAV; enter the server URL, username, password. Tasks appear under each list name. Notes, reminders, tags and recurrence you set there are kept.
+- **Tasks.org** (Android): Settings → Synchronization → Add account → CalDAV; server URL, username, password. Notes, reminders, tags and recurrence you set there are kept.
 - **Thunderbird**: Calendar → New calendar → On the Network → CalDAV; paste the URL, check "offline support".
-- **Obsidian**: nothing to install — `restask setup` put the plugin in the vault and enabled it, and it reaches your other devices with the vault if `.obsidian/` is synced. Reload Obsidian if the vault was open during setup; a vault that has community plugins turned off (restricted mode) asks you to turn them on once. Re-run `restask setup` after updating restask to refresh the plugin (or copy `crates/restask/assets/obsidian/*` into `<vault>/.obsidian/plugins/restask/` by hand). It adds metadata suggestions while typing (`hi` → high/highest) and a *Toggle task done* command (bind a hotkey), and it hides the `🆔 restask-…` token of every task line, in the editor and in reading view (the token stays in the file; *Settings → restask → Hide task IDs* shows it again). The plugin is optional: checking a box by hand works too, the daemon tidies it up.
-- **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()`; `<leader>td` toggles the task under the cursor, `<leader>ta` adds one (requires `restask` on PATH). In vault notes the `🆔 restask-…` tokens are concealed; the line you are typing in shows its token while in insert mode (`setup({ conceal = false })` turns concealing off, `setup({ keymaps = false })` the keymaps).
+- **Obsidian**: installed by setup. What the plugin does:
+  - a new task gets its ID when you leave the line, a task you check off moves under the done heading (and back), `TODO.md` and the notes follow each other — offline, on the phone as on the computer;
+  - the `🆔 restask-…` token of a task line is hidden in the editor and in reading view (it stays in the file; *Settings → restask → Hide task IDs* shows it);
+  - suggestions while typing (`hi` → high/highest, `du` → due, `created` → a creation date), a *Toggle task done* command to bind a hotkey to, and a new line under a `TODO` heading starts with `- [ ] `.
+  - Leave *Settings → restask → Apply task changes on the device* on *every device*.
+- **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()` (needs `restask` on `PATH`).
+  - Saving a vault note does restask's work at once and offline, and reloads the buffer with the result (`setup({ settle = false })` leaves it to the daemon).
+  - `<leader>td` toggles the task under the cursor, `<leader>ta` adds one (`keymaps = false` turns them off).
+  - The `🆔` tokens are concealed (`conceal = false`), a line opened under a `TODO` heading starts with `- [ ] ` (`start_tasks = false`), and with [blink.cmp](https://github.com/Saghen/blink.cmp) the same suggestions appear while typing (`suggest = false`).
 
-## 6. Verify
+## 5. Verify
 
 ```bash
-restask doctor        # config, routing, vault scan, Radicale reachability and auth
+restask doctor        # config, routing, vault scan; on the sync node also the server and its auth
 restask status        # active tasks per list and priority, pending sync, last sync
-restask sync          # one pass now; prints what it did
+restask settle        # the local work now, no server: IDs, Done, TODO.md; prints what it did
 ```
+
+On the computer, `doctor` says which machine runs the daemon and how to read its log. To see the whole chain: type `- [ ] try it 🔺` under a routed note's `TODO` heading and leave the line (Obsidian) or save (Neovim). The line is in `TODO.md` at once, with the network off too, and in Tasks.org a few seconds after the file sync has carried the note to the server.
 
 > ⚠ `doctor` warns hard if your CalDAV server accepts requests **without authentication** — fix that before exposing the server beyond your LAN.
 
+## 6. Other setups
+
+- **A second computer.** Install the `restask` command (the two commands of section 1) if you use Neovim there; nothing else. The vault brings the plugin, the server does the syncing, and no setup is run.
+- **No always-on server.** Press Enter at the server question. The computer runs the daemon; the phone's edits reach Radicale whenever the computer is on.
+- **A server without Docker.** Install by hand there, then tell the computer that the daemon lives elsewhere:
+
+  ```bash
+  # on the server (Rust and a systemd user session):
+  git clone <repo-url> restask && cd restask && cargo install --path crates/restask --locked
+  # on the computer, in the vault:
+  restask setup --no-daemon
+  # on the server, in its copy of the vault, once the file sync has delivered it:
+  restask setup --join
+  ```
+
+  `setup --join` asks for the URL, username and password again, changes nothing in the vault, and installs the daemon as a user unit.
+- **The server step failed** (ssh, Docker, the file sync not finished). The vault is set up; setup says what went wrong and prints the command that finishes the job. It is always this one, and it changes nothing in the vault:
+
+  ```bash
+  restask setup --join --node <ssh-host> --node-vault <vault folder on the server>
+  ```
+
+- **Where things go on the server.** `~/restask` of the ssh user: `docker-compose.yml`, `.env` (vault folder, user, time zone), `src/` (the sources), `data/` (the daemon's config and password, mode `0600`). `--node-dir <dir>` picks another directory. The container runs as the owner of the vault's files, in this computer's time zone.
+- **Without questions.** Every answer has a flag:
+
+  ```bash
+  RESTASK_CALDAV_PASSWORD=… restask setup --non-interactive \
+      --url http://192.168.1.10:5232 --username me --password-env RESTASK_CALDAV_PASSWORD \
+      --collection inbox=inbox --node myserver --node-vault /srv/sync/vault
+  ```
+
+- **Coming from an earlier install.** If the computer ran the daemon, or kept the server's password, run the command of *The server step failed* above: it installs the daemon on the server, rewrites this computer's config without credentials and removes its password file. Then stop the old unit: `systemctl --user disable --now restask`.
+
 ## 7. Day-to-day notes
 
-- **Offline**: `restask add`, `done` and `undone` always save to the vault; the server catches up at the next sync. A phone needs nothing but the notes.
+- **Offline**: everything you do to the notes works offline, on every device; the server catches up when the file sync and the daemon meet again.
+- **Latency**: a change made in Tasks.org reaches a note in three steps — Tasks.org uploads it (through DAVx⁵ that is Android's sync scheduler: never sooner than 30 s after the edit, and some phones hold it for minutes; a CalDAV account added in Tasks.org itself uploads at once), the daemon notices within 2 s and writes the vault on the server, and the file sync delivers the files. With Syncthing the last step is the longest: a folder's watcher waits `fsWatcherDelayS` (10 s by default) before it looks at a changed file. Set it to `1` for the vault's folder on the server (`syncthing cli config folders <id> fswatcher-delays set 1`; in the web UI under *Actions* → *Advanced* → *Folders* → *Fs Watcher Delay S*), and on your editing devices for the other direction.
 - **Conflict copies**: if Syncthing leaves a `*.sync-conflict-*` file, restask ignores it and `doctor` reports it — merge what you need by hand and delete it.
-- **Starting over**: `restask rebuild` drops the sync bookkeeping (not your notes, not the server); the next sync re-derives it.
+- **Starting over**: `restask rebuild`, on the machine that runs the daemon, drops the sync bookkeeping (not your notes, not the server); the next sync re-derives it.
 
 ## Updating / uninstalling
 
+From the clone on your computer, one command updates everything that runs restask:
+
 ```bash
-git pull && cargo install --path crates/restask --locked --force   # update (the unit keeps working)
-systemctl --user restart restask                                    # run the new binary
-systemctl --user disable --now restask                              # stop the daemon
-rm ~/.config/systemd/user/restask.service                           # remove the unit setup wrote
-cargo uninstall restask                                             # remove the binary
+git pull && contrib/update.sh
 ```
 
-State lives entirely in `<vault>/.restask/` and `~/.config/restask/` — delete those to fully reset.
+It reinstalls the `restask` command here, restarts this computer's daemon if it has one, refreshes the Obsidian plugin in the vault (reload Obsidian to load it), then sends the sources to the server setup installed on, rebuilds the image and restarts the daemon there, and shows its first log lines. It fails if a daemon does not come up. (`contrib/update.sh <ssh-host> [<dir>]` names the server explicitly.)
+
+Uninstalling:
+
+```bash
+ssh <host> 'cd restask && docker compose down --rmi local'   # the daemon on the server
+systemctl --user disable --now restask                       # a daemon on this computer
+rm ~/.config/systemd/user/restask.service                    # … and its unit
+cargo uninstall restask                                      # the command
+```
+
+State lives entirely in `<vault>/.restask/` and the machine config (`~/.config/restask/` on a computer, the stack's `data/` on the server) — delete those to fully reset.

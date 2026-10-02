@@ -9,7 +9,7 @@ use std::future::Future;
 use chrono::{DateTime, Utc};
 
 use crate::domain::{ListSlug, Task};
-use crate::vtodo::RemoteTask;
+use crate::vtodo::{RemoteTask, WireNames};
 use crate::RestaskError;
 
 /// One `VTODO` resource as the server currently holds it.
@@ -59,6 +59,8 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
     /// replaced resource's unmanaged content) and `now` as `DTSTAMP`/`LAST-MODIFIED`.
     /// `name` is the resource to write — the UID for a new resource, the listed name
     /// when replacing one (another client may have stored the task under its own name).
+    /// `wire` holds the `UID`s to write where they are not restask's own (a task another
+    /// client created keeps its `UID`).
     /// `if_match: Some(etag)` replaces exactly that version; `None` creates
     /// (`If-None-Match: *`). Returns the new etag (empty when the server sends none). A
     /// failed precondition surfaces as `CaldavErrorKind::Conflict` (§10.4).
@@ -67,6 +69,7 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
         task: &Task,
         name: &str,
         extras: &[String],
+        wire: &WireNames,
         if_match: Option<&str>,
         now: DateTime<Utc>,
     ) -> impl Future<Output = Result<String, RestaskError>> + Send;

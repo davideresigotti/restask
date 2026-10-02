@@ -1,5 +1,5 @@
-//! Daemon (§13.1): a `notify` watcher plus a poll timer mark the vault dirty; a single
-//! reconciler loop owns every mutation. `SIGTERM`/`SIGINT` arrive as a
+//! Daemon (§13.1): a `notify` watcher, a look at the server's change tags and a poll
+//! timer mark the vault dirty; a single reconciler loop owns every mutation. `SIGTERM`/`SIGINT` arrive as a
 //! `tokio::sync::watch` signal; an in-flight reconcile finishes (its state writes are the
 //! last thing it does), then the loop exits.
 
@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use notify::Watcher as _;
 
 use crate::caldav::client::CaldavClient;
-use crate::caldav::CaldavPort;
+use crate::caldav::{CaldavPort, CollectionInfo};
 use crate::config::{MachineConfig, VaultConfig, VaultMatchers};
 use crate::domain::{Clock, SystemClock};
 use crate::sync::engine::{Engine, ReconcileReport};
@@ -25,8 +25,13 @@ use crate::{CaldavErrorKind, RestaskError};
 pub struct DaemonConfig {
     /// A burst of file events coalesces for this long before one reconcile fires.
     pub debounce_ms: u64,
-    /// Poll interval in seconds: picks up server-side changes (and missed file events).
+    /// Poll interval in seconds: a pass whether or not anything was seen to change — the
+    /// net under the watcher and the server watch.
     pub poll_secs: u64,
+    /// How often the daemon asks the server whether another client wrote there, in
+    /// milliseconds ([`server_tags`]); a changed answer starts a pass. `0` never asks:
+    /// server-side changes then wait for the poll.
+    pub watch_ms: u64,
     /// Perform a single reconcile and exit (`restask daemon --once`).
     pub once: bool,
 }
@@ -36,6 +41,7 @@ impl Default for DaemonConfig {
         Self {
             debounce_ms: 300,
             poll_secs: 300,
+            watch_ms: 2_000,
             once: false,
         }
     }
@@ -90,6 +96,7 @@ pub async fn run_with<C: CaldavPort>(
         path: vault.join("restask.toml").display().to_string(),
         reason: error.to_string(),
     })?;
+    let server = caldav.clone();
     let engine = Engine::new(&vault, cfg, machine, caldav, clock);
 
     if dc.once {
@@ -98,7 +105,24 @@ pub async fn run_with<C: CaldavPort>(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<()>();
-    let _watcher = spawn_watcher(&vault, matchers, tx)?;
+    let _watcher = spawn_watcher(&vault, matchers, tx.clone())?;
+    let server_watch = if dc.watch_ms > 0 {
+        // The first look is taken before the first pass: whatever another client writes
+        // from here on differs from it, also while that pass is running.
+        let seen = server
+            .list_collections()
+            .await
+            .ok()
+            .map(|collections| server_tags(&collections));
+        Some(spawn_server_watch(
+            server,
+            Duration::from_millis(dc.watch_ms),
+            seen,
+            tx,
+        ))
+    } else {
+        None
+    };
     let mut poll = tokio::time::interval(Duration::from_secs(dc.poll_secs.max(1)));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let debounce = Duration::from_millis(dc.debounce_ms);
@@ -135,8 +159,60 @@ pub async fn run_with<C: CaldavPort>(
             _ = shutdown.changed() => {},
         }
     }
+    if let Some(server_watch) = server_watch {
+        server_watch.abort();
+    }
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+/// What the server says about its own state (§13.1): the change tag of every task
+/// collection, by slug. Two equal answers mean that no client wrote to a task list in
+/// between; a server that reports no tags always answers the same, and its changes are
+/// left to the poll.
+pub fn server_tags(collections: &[CollectionInfo]) -> Vec<(String, String)> {
+    let mut tags: Vec<(String, String)> = collections
+        .iter()
+        .filter(|collection| collection.supports_vtodo)
+        .filter_map(|collection| Some((collection.slug.clone(), collection.ctag.clone()?)))
+        .collect();
+    tags.sort();
+    tags
+}
+
+/// Spawns the server watch (§13.1): every `every`, one `PROPFIND` for the collections'
+/// change tags; an answer that differs from the last one (`seen`, `None` while no look
+/// has succeeded) wakes the reconciler like a file event does. It only ever starts a
+/// pass — what changed is the pass's to find out — and it keeps no state the pass
+/// relies on. The daemon's own pushes change the tags too: the pass that follows them
+/// finds nothing to do.
+fn spawn_server_watch<C: CaldavPort>(
+    server: C,
+    every: Duration,
+    mut seen: Option<Vec<(String, String)>>,
+    tx: mpsc::UnboundedSender<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval_at(Instant::now() + every, every);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            // A look that fails says nothing about the server's tasks; a server that is
+            // down is reported by the poll's pass.
+            let Ok(collections) = server.list_collections().await else {
+                continue;
+            };
+            let tags = server_tags(&collections);
+            if seen.as_ref() == Some(&tags) {
+                continue;
+            }
+            seen = Some(tags);
+            tracing::info!("server_changed");
+            if tx.send(()).is_err() {
+                return;
+            }
+        }
+    })
 }
 
 /// Sleeps until `deadline`, or forever when there is none.

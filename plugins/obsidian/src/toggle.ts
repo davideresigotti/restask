@@ -22,16 +22,21 @@ export interface ToggleResult {
 	completed: boolean;
 }
 
-/** Flips the checkbox of a §6.1 task line, preserving everything else byte-for-byte. */
-function flipCheck(raw: string, checked: boolean): string {
+/** Sets the checkbox of a §6.1 task line, preserving everything else byte-for-byte. */
+export function flipCheck(raw: string, checked: boolean): string {
 	return raw.replace(/^([ \t]*[-*+][ \t]+\[)([ xX])(\])/, (_m, pre: string, _c: string, post: string) =>
 		`${pre}${checked ? "x" : " "}${post}`,
 	);
 }
 
+/** `true` when the line carries a `✅ <date>` token. */
+export function isStamped(raw: string): boolean {
+	return /✅[ \t]+\d{4}-\d{2}-\d{2}/u.test(raw);
+}
+
 /** Inserts `✅ <today>` in canonical tail position: before ➕/🆔 when present (§6.1). */
-function withCompletedToken(raw: string, today: string): string {
-	if (/✅[ \t]+\d{4}-\d{2}-\d{2}/u.test(raw)) return raw;
+export function withCompletedToken(raw: string, today: string): string {
+	if (isStamped(raw)) return raw;
 	const insertion = `✅ ${today}`;
 	const plus = raw.search(/➕[ \t]+\d{4}-\d{2}-\d{2}/u);
 	const anchor = plus >= 0 ? plus : raw.search(/🆔[ \t]+(?:restask|taskres)-/u);
@@ -42,7 +47,7 @@ function withCompletedToken(raw: string, today: string): string {
 }
 
 /** Removes the `✅ <date>` token. */
-function withoutCompletedToken(raw: string): string {
+export function withoutCompletedToken(raw: string): string {
 	return raw.replace(/[ \t]*✅[ \t]+\d{4}-\d{2}-\d{2}/u, "").replace(/[ \t]+$/, "");
 }
 

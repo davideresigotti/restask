@@ -1,15 +1,23 @@
--- restask conceal (§16): keeps the `🆔 restask-…` token of task lines off the screen.
--- The token stays in the file — it links the line to its task on the server; only the
--- display changes, through a window match and the window's conceal options.
+-- restask conceal (§16): keeps the `🆔 restask-…` token of task lines off the screen and
+-- out of reach. The token stays in the file — it links the line to its task on the
+-- server. A window match conceals it in every mode, the cursor is kept off it, and an
+-- edit that would damage it is repaired at once (the rules are in `guard.lua`).
 local M = {}
 
---- The token of §6.1 with the blanks before it, as a Vim pattern.
-M.PATTERN = [[\s*🆔\s\+\%(restask\|taskres\)-[0-9a-z]\{26}]]
+local guard = require("restask.guard")
+
+--- The token of §6.1 on a task line, with the one blank before it, as a Vim pattern.
+M.PATTERN = [[^[ \t]*[-*+][ \t]\+\[[ xX]\][ \t]\+.\{-}\zs[ \t]\=🆔[ \t]\+\%(restask\|taskres\)-[0-9a-hjkmnp-tv-z]\{26}]]
 
 --- Modes in which the cursor line is concealed too; they are added to the window's
--- 'concealcursor'. Insert mode is left out on purpose: the line being typed in shows its
--- token, so it is not overwritten blindly.
-M.concealcursor = "nc"
+-- 'concealcursor'. All of them: the token is never shown, the guard protects it instead.
+M.concealcursor = "nvic"
+
+--- Whether edits that would damage a token are repaired and the cursor is kept off it.
+M.guard = true
+
+--- Buffer contents as of the last look, per guarded buffer: what an edit is compared to.
+local shadows = {}
 
 --- `current` with the modes of `wanted` it lacks appended.
 ---@param current string
@@ -36,6 +44,16 @@ function M.in_vault(file)
 	return #found > 0
 end
 
+--- True when `buf` is a Markdown file of a vault.
+local function is_note(buf)
+	return vim.bo[buf].filetype == "markdown" and M.in_vault(vim.api.nvim_buf_get_name(buf))
+end
+
+--- Remembers what `buf` holds now; later edits are judged against it.
+local function remember(buf)
+	shadows[buf] = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+end
+
 --- Conceals the tokens in the current window when it shows a Markdown file of a vault,
 -- and undoes that when it shows anything else. 'conceallevel' is raised to 2 and
 -- 'concealcursor' gains the modes above; both get their previous value back, unless
@@ -44,7 +62,7 @@ end
 -- every render), which is why this also runs on `OptionSet`.
 function M.refresh()
 	local buf = vim.api.nvim_get_current_buf()
-	local wanted = vim.bo[buf].filetype == "markdown" and M.in_vault(vim.api.nvim_buf_get_name(buf))
+	local wanted = is_note(buf)
 	local state = vim.w.restask_conceal
 	if wanted then
 		state = state
@@ -62,6 +80,9 @@ function M.refresh()
 			vim.wo.concealcursor = state.set_cursor
 		end
 		vim.w.restask_conceal = state
+		if M.guard and not shadows[buf] then
+			remember(buf)
+		end
 	elseif state then
 		pcall(vim.fn.matchdelete, state.match)
 		if vim.wo.conceallevel == state.set_level then
@@ -74,11 +95,98 @@ function M.refresh()
 	end
 end
 
+--- Keeps the cursor of the current window off the hidden token: in insert mode it never
+-- rests inside or behind it, in normal mode never on it. Visual mode is left alone — a
+-- selection may span the token, and what is then done to it goes through `M.protect`.
+function M.settle()
+	local buf = vim.api.nvim_get_current_buf()
+	if not shadows[buf] then
+		return
+	end
+	local mode = vim.api.nvim_get_mode().mode
+	local kind = mode:sub(1, 1)
+	if kind ~= "n" and kind ~= "i" and kind ~= "R" then
+		return
+	end
+	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+	local last = vim.w.restask_cursor
+	local prev = last and last[1] == row and last[2] or nil
+	local target = guard.settle(vim.api.nvim_get_current_line(), col, prev, kind ~= "n")
+	if target then
+		col = target
+		vim.api.nvim_win_set_cursor(0, { row, col })
+	end
+	vim.w.restask_cursor = { row, col }
+end
+
+--- The line ranges in which `old` and `new` differ: a list of
+-- `{ first old line, old count, first new line, new count }`, 1-based.
+local function hunks(old, new)
+	local diff = (vim.text and vim.text.diff) or vim.diff
+	return diff(table.concat(old, "\n") .. "\n", table.concat(new, "\n") .. "\n", { result_type = "indices" })
+end
+
+--- Looks at what changed in `buf` since the last look and repairs every change that
+-- damaged a token (`guard.repair`). Undo and redo are not judged: they restore text that
+-- was valid before. The repair joins the undo step of the edit it corrects.
+---@param buf integer
+function M.protect(buf)
+	local old = shadows[buf]
+	if not old then
+		return
+	end
+	local new = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	local tree = vim.fn.undotree(buf)
+	if tree.seq_cur ~= tree.seq_last or not vim.bo[buf].modifiable then
+		shadows[buf] = new
+		return
+	end
+	local current = buf == vim.api.nvim_get_current_buf()
+	--- Repairs new lines `first`..`first + count - 1`, which were `before` (text).
+	local function mend(before, first, count, keep)
+		local fixed, caret = guard.repair(before, table.concat(new, "\n", first, first + count - 1), keep)
+		if not fixed then
+			return
+		end
+		pcall(vim.cmd, "undojoin")
+		vim.api.nvim_buf_set_lines(buf, first - 1, first - 1 + count, false, vim.split(fixed, "\n", { plain = true }))
+		if current and caret then
+			local head = fixed:sub(1, caret)
+			local _, breaks = head:gsub("\n", "")
+			pcall(vim.api.nvim_win_set_cursor, 0, { first + breaks, #(head:match("[^\n]*$")) })
+		end
+	end
+	local changed = hunks(old, new)
+	-- Bottom-up, so the line numbers of the hunks above stay valid.
+	for i = #changed, 1, -1 do
+		local old_start, old_count, new_start, new_count = unpack(changed[i])
+		if old_count == new_count then
+			-- As many lines as before: each line is still there, so each keeps its token.
+			for k = old_count - 1, 0, -1 do
+				mend(old[old_start + k], new_start + k, 1, true)
+			end
+		elseif old_count > 0 and new_count > 0 then
+			-- Lines were split or joined. (Lines that were only added or only removed
+			-- cannot have damaged a token: a line takes its token with it.)
+			mend(table.concat(old, "\n", old_start, old_start + old_count - 1), new_start, new_count, false)
+		end
+	end
+	remember(buf)
+	if current then
+		M.settle()
+	end
+end
+
 --- Registers the autocommands that keep every window up to date.
----@param concealcursor string|nil modes to add to 'concealcursor' (default "nc"; "" adds none)
-function M.register(concealcursor)
-	if concealcursor ~= nil then
-		M.concealcursor = concealcursor
+---@param opts table|nil `concealcursor` (modes to add to 'concealcursor'; default
+--- "nvic", "" adds none) and `guard` (default true; false leaves edits and cursor alone)
+function M.register(opts)
+	opts = opts or {}
+	if opts.concealcursor ~= nil then
+		M.concealcursor = opts.concealcursor
+	end
+	if opts.guard ~= nil then
+		M.guard = opts.guard
 	end
 	local group = vim.api.nvim_create_augroup("restask_conceal", { clear = true })
 	vim.api.nvim_create_autocmd({ "BufWinEnter", "WinEnter", "FileType" }, {
@@ -90,6 +198,37 @@ function M.register(concealcursor)
 		pattern = { "conceallevel", "concealcursor" },
 		callback = M.refresh,
 	})
+	if M.guard then
+		vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+			group = group,
+			callback = function(event)
+				M.protect(event.buf)
+			end,
+		})
+		vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "InsertEnter" }, {
+			group = group,
+			callback = function()
+				-- `A` moves the cursor only after InsertEnter.
+				vim.schedule(M.settle)
+			end,
+		})
+		-- What comes from disk (a reload after the daemon or the CLI rewrote the note)
+		-- is the new truth, not an edit.
+		vim.api.nvim_create_autocmd({ "BufReadPost", "FileChangedShellPost" }, {
+			group = group,
+			callback = function(event)
+				if shadows[event.buf] then
+					remember(event.buf)
+				end
+			end,
+		})
+		vim.api.nvim_create_autocmd({ "BufUnload", "BufWipeout" }, {
+			group = group,
+			callback = function(event)
+				shadows[event.buf] = nil
+			end,
+		})
+	end
 	M.refresh()
 end
 

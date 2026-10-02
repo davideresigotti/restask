@@ -1,6 +1,6 @@
 //! Daemon conformance (§13.1): `run_once` end-to-end against the mock port, the pure
 //! debounce coalescing (explicit instants), event filtering, the live loop reacting to a
-//! vault edit, and clean shutdown/once modes.
+//! vault edit and to another client's writes on the server, and clean shutdown/once modes.
 
 mod common;
 
@@ -10,8 +10,9 @@ use std::time::Duration;
 use chrono::TimeZone as _;
 
 use common::{temp_vault, write_vault_file, FixedClock, MockCaldav};
+use restask::caldav::CollectionInfo;
 use restask::config::{CaldavConfig, MachineConfig};
-use restask::daemon::{run_once_with, run_with, DaemonConfig, Debounce};
+use restask::daemon::{run_once_with, run_with, server_tags, DaemonConfig, Debounce};
 use restask::domain::TaskUid;
 use restask::sync::ReconcileReport;
 use tokio::time::Instant;
@@ -130,6 +131,7 @@ async fn the_daemon_reconciles_on_start_and_on_vault_events() {
         DaemonConfig {
             debounce_ms: 20,
             poll_secs: 3_600,
+            watch_ms: 0,
             once: false,
         },
         rx,
@@ -156,6 +158,111 @@ async fn the_daemon_reconciles_on_start_and_on_vault_events() {
 
     tx.send(true).unwrap();
     worker.await.unwrap().unwrap();
+}
+
+const TASKS_ORG_BODY: &str =
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:+//IDN tasks.org//android//EN\r\n\
+BEGIN:VTODO\r\nDTSTAMP:20260922T101500Z\r\nUID:5417861935824551742\r\n\
+CREATED:20260921T081233Z\r\nLAST-MODIFIED:20260922T101400Z\r\nSUMMARY:Made in Tasks.org\r\n\
+END:VTODO\r\nEND:VCALENDAR\r\n";
+
+/// The owner's report: a task added, changed or deleted in Tasks.org "doesn't sync with
+/// the vault". It did, at the next poll — five minutes later. The poll is an hour here:
+/// what brings the changes in is the server watch.
+#[tokio::test]
+async fn changes_made_on_the_server_reach_the_vault_without_waiting_for_the_poll() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            watch_ms: 20,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    wait_until(|| mock.resource_names("home").len() == 1).await;
+    let read = |file: &str| std::fs::read_to_string(dir.path().join(file)).unwrap();
+
+    // Added there: adopted, and a line in the inbox file.
+    mock.seed_resource("inbox", "5417861935824551742", TASKS_ORG_BODY);
+    wait_until(|| read("TODO.md").contains("- [ ] Made in Tasks.org ")).await;
+
+    // Changed there: the line in the note follows.
+    let name = mock_name(&dir);
+    let body = mock.resource("home", &name).unwrap().body;
+    assert!(body.contains("SUMMARY:buy milk\r\n"), "{body}");
+    mock.seed_resource(
+        "home",
+        &name,
+        &body.replace("SUMMARY:buy milk\r\n", "SUMMARY:buy oat milk\r\n"),
+    );
+    wait_until(|| read("notes/home.md").contains("- [ ] buy oat milk ")).await;
+
+    // Deleted there: the line goes.
+    mock.remove_resource("home", &name);
+    wait_until(|| !read("notes/home.md").contains("milk")).await;
+
+    // The daemon's own pushes change the tags as well; it still comes to rest.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let counters = mock.counters();
+    let files = (read("TODO.md"), read("notes/home.md"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(mock.counters(), counters, "the daemon went quiet");
+    assert_eq!((read("TODO.md"), read("notes/home.md")), files);
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
+#[test]
+fn the_server_watch_compares_the_change_tags_of_task_collections() {
+    let collection = |slug: &str, supports_vtodo: bool, ctag: Option<&str>| CollectionInfo {
+        href: format!("/me/{slug}/"),
+        slug: slug.to_string(),
+        display_name: None,
+        supports_vtodo,
+        ctag: ctag.map(str::to_string),
+    };
+    let before = [
+        collection("inbox", true, Some("\"a1\"")),
+        collection("home", true, Some("\"b1\"")),
+        collection("events", false, Some("\"c1\"")),
+        collection("me", false, None),
+    ];
+    assert_eq!(
+        server_tags(&before),
+        vec![
+            ("home".to_string(), "\"b1\"".to_string()),
+            ("inbox".to_string(), "\"a1\"".to_string()),
+        ]
+    );
+
+    // The order of the listing and a calendar without tasks say nothing.
+    let same = [
+        collection("events", false, Some("\"c2\"")),
+        collection("home", true, Some("\"b1\"")),
+        collection("inbox", true, Some("\"a1\"")),
+    ];
+    assert_eq!(server_tags(&same), server_tags(&before));
+
+    // A write to a task list, a new list and a list that is gone do.
+    let written = [
+        collection("inbox", true, Some("\"a2\"")),
+        collection("home", true, Some("\"b1\"")),
+    ];
+    assert_ne!(server_tags(&written), server_tags(&before));
+    assert_ne!(server_tags(&before[..1]), server_tags(&before));
+
+    // A server without change tags always answers the same: the poll is what is left.
+    let untagged = [collection("inbox", true, None)];
+    assert_eq!(server_tags(&untagged), Vec::new());
 }
 
 /// Polls `condition` for up to five seconds.

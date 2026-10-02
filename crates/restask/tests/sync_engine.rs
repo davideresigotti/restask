@@ -11,13 +11,14 @@ use std::time::SystemTime;
 use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
 
-use common::{temp_vault, write_vault_file, FixedClock, MockCaldav};
+use common::{sealed, temp_vault, write_vault_file, FixedClock, MockCaldav};
 use restask::caldav::{CaldavPort, CollectionInfo, Offline, RemoteResource};
 use restask::config::{CaldavConfig, MachineConfig, VaultConfig};
 use restask::domain::{ListSlug, Priority, Task, TaskUid};
 use restask::store::index::Index;
 use restask::store::tombstones::Tombstones;
 use restask::sync::{Engine, ReconcileReport};
+use restask::vtodo::WireNames;
 use restask::RestaskError;
 
 const UID: &str = "restask-01jz0000000000000000000001";
@@ -140,6 +141,15 @@ fn complete_remotely(mock: &MockCaldav, list: &str, name: &str, age: Duration) {
     });
 }
 
+/// A view the plugin edited and sealed again (§15.6): the old seal line replaced.
+fn resealed(view: &str) -> String {
+    let unsealed: String = view
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("restask-render: "))
+        .collect();
+    sealed(&unsealed)
+}
+
 fn mtime(dir: &TempDir, path: &str) -> SystemTime {
     std::fs::metadata(dir.path().join(path))
         .unwrap()
@@ -191,7 +201,9 @@ async fn first_sync_registers_pushes_and_renders() {
 
     let note = read(&dir, "notes/home.md");
     assert_eq!(note.matches(ID).count(), 2);
-    assert!(note.contains(&format!("buy milk \u{2795} {}", today())));
+    // Registered with a UID only: the creation date is not written unless asked for.
+    assert!(note.contains(&format!("- [ ] buy milk {ID} ")), "{note}");
+    assert!(!note.contains('\u{2795}'), "{note}");
 
     let index = Index::load(&dir.path().join(".restask")).unwrap();
     assert_eq!(index.entries.len(), 2);
@@ -486,11 +498,15 @@ async fn one_odd_remote_resource_does_not_block_the_sync() {
     );
     mock.seed_resource("home", "junk", "this is not iCalendar");
     let report = engine(&dir, &mock).reconcile().await.unwrap();
-    assert_eq!(report.pushes, 1);
     assert_eq!(
         report.adoptions, 1,
         "the bare VTODO is a task like any other"
     );
+    assert_eq!(
+        report.pushes, 2,
+        "the vault's task, and the link to the bare one"
+    );
+    assert!(body(&mock, "home", "bare").contains("UID:bare\r\n"));
     assert!(mock.resource("home", "junk").is_some(), "never touched");
 }
 
@@ -597,40 +613,174 @@ DESCRIPTION:with a note\r\nPRIORITY:1\r\n\
 BEGIN:VALARM\r\nTRIGGER:-PT15M\r\nACTION:DISPLAY\r\nEND:VALARM\r\n\
 END:VTODO\r\nEND:VCALENDAR\r\n";
 
+const TASKS_ORG_NAME: &str = "5417861935824551742";
+
 #[tokio::test]
-async fn a_foreign_task_is_adopted_with_everything_it_carried() {
+async fn a_foreign_task_is_adopted_where_it_is_with_everything_it_carries() {
     let dir = temp_vault();
     let mock = MockCaldav::new();
-    mock.seed_resource("inbox", "5417861935824551742", TASKS_ORG_BODY);
+    mock.seed_resource("inbox", TASKS_ORG_NAME, TASKS_ORG_BODY);
     let engine = engine(&dir, &mock);
 
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.adoptions, 1);
     assert_eq!(report.inserts, 1);
-    assert!(mock.resource("inbox", "5417861935824551742").is_none());
-    let names = mock.resource_names("inbox");
-    assert_eq!(names.len(), 1);
-    assert!(names[0].starts_with("restask-"));
-    let adopted = body(&mock, "inbox", &names[0]);
-    assert!(adopted.contains("SUMMARY:Made in Tasks.org"));
-    assert!(adopted.contains("DESCRIPTION:with a note\r\n"));
-    assert!(adopted.contains("BEGIN:VALARM\r\nTRIGGER:-PT15M"));
-
+    assert_eq!(report.deletes, 0);
+    let adopted = uid_of(&dir, "TODO.md", "Made in Tasks.org");
     let todo = read(&dir, "TODO.md");
     assert!(
         todo.contains(&format!(
-            "## \u{1F53A} Highest Priority\n- [ ] Made in Tasks.org \u{1F53A} \u{2795} 2026-09-21 {ID} {}",
-            names[0]
+            "## \u{1F53A} Highest Priority\n- [ ] Made in Tasks.org \u{1F53A} {ID} {adopted}"
         )),
         "{todo}"
     );
+
+    // The resource is still the one Tasks.org made — its name, its `UID` — and now says
+    // which task of the vault it is.
+    assert_eq!(mock.resource_names("inbox"), vec![TASKS_ORG_NAME]);
+    let linked = body(&mock, "inbox", TASKS_ORG_NAME);
+    assert!(linked.contains("UID:5417861935824551742\r\n"), "{linked}");
+    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains("X-RESTASK-SOURCE;VALUE=TEXT:TODO.md\r\n"));
+    assert!(linked.contains("SUMMARY:Made in Tasks.org"));
+    assert!(linked.contains("CREATED:20260921T000000Z\r\n"));
+    assert!(linked.contains("DESCRIPTION:with a note\r\n"));
+    assert!(linked.contains("BEGIN:VALARM\r\nTRIGGER:-PT15M"));
+
     let index = Index::load(&dir.path().join(".restask")).unwrap();
-    assert_eq!(index.entries[&uid(&names[0])].source_path, "TODO.md");
+    assert_eq!(index.entries[&uid(&adopted)].source_path, "TODO.md");
 
     // Settled: nothing more to do, and no second adoption.
+    let counters = mock.counters();
     let again = engine.reconcile().await.unwrap();
     assert_eq!((again.adoptions, again.pushes, again.inserts), (0, 0, 0));
-    assert_eq!(mock.resource_names("inbox"), names);
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(read(&dir, "TODO.md"), todo);
+}
+
+/// The owner's report: "Changing a priority on the tasks.org app on my phone doesn't
+/// change the connected task in the vault but create a new one keeping both the old and
+/// new priority." The task had been made in Tasks.org; restask had re-created it under a
+/// UID of its own and deleted the original, so Tasks.org — which still held the original
+/// — wrote its edit to a resource the vault line was no longer tied to.
+#[tokio::test]
+async fn a_priority_changed_in_tasks_org_changes_the_task_in_the_vault() {
+    let dir = temp_vault();
+    home_note(&dir, "");
+    let mock = MockCaldav::new();
+    mock.seed_resource("home", TASKS_ORG_NAME, TASKS_ORG_BODY);
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let adopted = uid_of(&dir, "notes/home.md", "Made in Tasks.org");
+    let one_task = |priority: &str| {
+        let line = format!("- [ ] Made in Tasks.org {priority} {ID} {adopted}\n");
+        let note = read(&dir, "notes/home.md");
+        assert_eq!(note.matches("Made in Tasks.org").count(), 1, "{note}");
+        assert!(note.contains(&line), "{note}");
+        let todo = read(&dir, "TODO.md");
+        assert_eq!(todo.matches("Made in Tasks.org").count(), 1, "{todo}");
+        assert!(todo.contains(&format!("Made in Tasks.org {priority} [[")));
+        assert_eq!(mock.resource_names("home"), vec![TASKS_ORG_NAME]);
+    };
+    one_task("\u{1F53A}");
+
+    // Tasks.org uploads its own copy with a new priority, as it holds it: it has not
+    // read what restask wrote in between.
+    mock.seed_resource(
+        "home",
+        TASKS_ORG_NAME,
+        &TASKS_ORG_BODY.replace("PRIORITY:1\r\n", "PRIORITY:5\r\n"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (report.adoptions, report.inserts, report.deletes),
+        (0, 0, 0)
+    );
+    one_task("\u{1F53C}");
+    let linked = body(&mock, "home", TASKS_ORG_NAME);
+    assert!(linked.contains("PRIORITY:5\r\n"), "{linked}");
+    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+
+    // And once more on the version restask wrote, properties kept.
+    mock.seed_resource(
+        "home",
+        TASKS_ORG_NAME,
+        &linked.replace("PRIORITY:5\r\n", "PRIORITY:9\r\n"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (
+            report.adoptions,
+            report.inserts,
+            report.deletes,
+            report.pushes
+        ),
+        (0, 0, 0, 0)
+    );
+    one_task("\u{23EC}");
+
+    // The other way: a priority set in the note is written to that same resource.
+    let note = read(&dir, "notes/home.md").replace('\u{23EC}', "\u{23EB}");
+    write_vault_file(&dir, "notes/home.md", &note);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.pushes, 1);
+    one_task("\u{23EB}");
+    let pushed = body(&mock, "home", TASKS_ORG_NAME);
+    assert!(pushed.contains("UID:5417861935824551742\r\n"), "{pushed}");
+    assert!(pushed.contains("PRIORITY:3\r\n"));
+    assert!(pushed.contains("DESCRIPTION:with a note\r\n"));
+
+    // Quiet afterwards.
+    let (counters, files) = (
+        mock.counters(),
+        (read(&dir, "notes/home.md"), read(&dir, "TODO.md")),
+    );
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.markdown_mutations), (0, 0));
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!((read(&dir, "notes/home.md"), read(&dir, "TODO.md")), files);
+}
+
+#[tokio::test]
+async fn an_adopted_task_deleted_in_the_vault_or_by_its_client_is_gone_on_both_sides() {
+    let dir = temp_vault();
+    home_note(&dir, "");
+    let mock = MockCaldav::new();
+    mock.seed_resource("home", TASKS_ORG_NAME, TASKS_ORG_BODY);
+    mock.seed_resource(
+        "home",
+        "second",
+        &TASKS_ORG_BODY
+            .replace("UID:5417861935824551742", "UID:second@tasks.org")
+            .replace("Made in Tasks.org", "Second one"),
+    );
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    assert_eq!(mock.resource_names("home").len(), 2);
+
+    // Deleted in Tasks.org: the line goes.
+    mock.remove_resource("home", TASKS_ORG_NAME);
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, "notes/home.md");
+    assert!(!note.contains("Made in Tasks.org"), "{note}");
+    assert!(note.contains("Second one"));
+
+    // Deleted in the note: the resource of the other client goes.
+    let note: String = note
+        .lines()
+        .filter(|line| !line.contains("Second one"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    write_vault_file(&dir, "notes/home.md", &note);
+    engine.reconcile().await.unwrap();
+    assert!(mock.resource_names("home").is_empty());
+    assert!(!read(&dir, "TODO.md").contains("Second one"));
 }
 
 /// A port whose `put` always fails with a non-connection error; everything else works.
@@ -658,6 +808,7 @@ impl CaldavPort for PutRejected {
         _task: &Task,
         _name: &str,
         _extras: &[String],
+        _wire: &WireNames,
         _if_match: Option<&str>,
         _now: DateTime<Utc>,
     ) -> Result<String, RestaskError> {
@@ -682,29 +833,40 @@ impl CaldavPort for PutRejected {
 async fn an_interrupted_adoption_never_duplicates_the_task() {
     let dir = temp_vault();
     let mock = MockCaldav::new();
-    mock.seed_resource("inbox", "5417861935824551742", TASKS_ORG_BODY);
+    mock.seed_resource("inbox", TASKS_ORG_NAME, TASKS_ORG_BODY);
 
     // First pass: the line reaches TODO.md but the server refuses the write.
     let report = engine_with(&dir, PutRejected(mock.clone()), true)
         .reconcile()
         .await
         .unwrap();
-    assert_eq!((report.inserts, report.adoptions, report.failed), (1, 0, 1));
-    assert!(
-        mock.resource("inbox", "5417861935824551742").is_some(),
-        "original kept"
+    assert_eq!((report.inserts, report.pushes, report.failed), (1, 0, 1));
+    assert_eq!(
+        body(&mock, "inbox", TASKS_ORG_NAME),
+        TASKS_ORG_BODY,
+        "untouched"
     );
     let adopted = uid_of(&dir, "TODO.md", "Made in Tasks.org");
 
-    // Second pass, healthy server: the same task is pushed, with its extras.
-    let report = engine(&dir, &mock).reconcile().await.unwrap();
-    assert_eq!((report.inserts, report.adoptions), (0, 1));
-    assert_eq!(mock.resource_names("inbox"), vec![adopted.clone()]);
-    assert!(body(&mock, "inbox", &adopted).contains("DESCRIPTION:with a note"));
-    assert_eq!(
-        read(&dir, "TODO.md").matches("Made in Tasks.org").count(),
-        1
+    // Tasks.org edits the task before the next pass: its change is not overruled by
+    // the line the first pass wrote.
+    mock.seed_resource(
+        "inbox",
+        TASKS_ORG_NAME,
+        &TASKS_ORG_BODY.replace("PRIORITY:1\r\n", "PRIORITY:9\r\n"),
     );
+
+    // Second pass, healthy server: the same task is linked, with its extras.
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!((report.inserts, report.adoptions, report.pushes), (0, 0, 1));
+    assert_eq!(mock.resource_names("inbox"), vec![TASKS_ORG_NAME]);
+    let linked = body(&mock, "inbox", TASKS_ORG_NAME);
+    assert!(linked.contains("DESCRIPTION:with a note"));
+    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains("PRIORITY:9\r\n"), "{linked}");
+    let todo = read(&dir, "TODO.md");
+    assert_eq!(todo.matches("Made in Tasks.org").count(), 1);
+    assert!(todo.contains(&format!("Made in Tasks.org \u{23EC} {ID} {adopted}")));
 }
 
 // ── failures ──────────────────────────────────────────────────────────────────────────
@@ -853,6 +1015,94 @@ async fn checking_a_mirrored_task_in_todo_md_completes_it_in_its_note() {
     assert!(!read(&dir, "TODO.md").contains("important"));
 }
 
+/// §7.1: a mirror line is the task. Deleted in TODO.md (by hand, in any editor), the
+/// task is deleted in its note and on the server; nothing else in the note changes.
+#[tokio::test]
+async fn deleting_a_mirrored_task_in_todo_md_deletes_it_in_its_note() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] important \u{23EB} {ID} {UID}\n- [ ] other \u{23EB} {ID} {UID2}\nprose\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    assert!(mock.resource("home", UID).is_some());
+
+    let todo = read(&dir, "TODO.md");
+    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {UID}\n");
+    assert!(todo.contains(&line), "{todo}");
+    write_vault_file(&dir, "TODO.md", &todo.replace(&line, ""));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.failed, 0);
+
+    let note = read(&dir, "notes/home.md");
+    assert!(!note.contains("important"), "{note}");
+    assert!(
+        note.contains(&format!("- [ ] other \u{23EB} {ID} {UID2}\nprose\n")),
+        "{note}"
+    );
+    assert!(
+        mock.resource("home", UID).is_none(),
+        "deleted on the server"
+    );
+    assert!(mock.resource("home", UID2).is_some());
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        !todo.contains("important") && todo.contains("other"),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo), "the view is a render again");
+
+    // Converged: nothing is written, nothing is sent.
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.failed), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}
+
+/// A mirror line that is merely absent deletes nothing (invariants 1 and 2): a TODO.md
+/// that is missing, cut short, or edited from another render than the engine's last one
+/// is put right by the render, and the note and the server keep the task.
+#[tokio::test]
+async fn a_mirror_line_that_is_merely_absent_deletes_nothing() {
+    let dir = temp_vault();
+    let body_of_note = format!("- [ ] important \u{23EB} {ID} {UID}\n");
+    home_note(&dir, &body_of_note);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    let note = read(&dir, "notes/home.md");
+    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {UID}\n");
+    assert!(todo.contains(&line), "{todo}");
+    let gone = todo.replace(&line, "");
+
+    let cut_short: String = todo.lines().take(4).map(|l| format!("{l}\n")).collect();
+    let stale = gone.replacen("restask-render: ", "restask-render: 0", 1);
+    for broken in [Some(cut_short), Some(stale), Some(String::new()), None] {
+        match &broken {
+            Some(text) => write_vault_file(&dir, "TODO.md", text),
+            None => std::fs::remove_file(dir.path().join("TODO.md")).unwrap(),
+        }
+        let report = engine.reconcile().await.unwrap();
+        assert_eq!(report.failed, 0, "{broken:?}");
+        assert_eq!(read(&dir, "notes/home.md"), note, "{broken:?}");
+        assert!(mock.resource("home", UID).is_some(), "{broken:?}");
+        assert_eq!(read(&dir, "TODO.md"), todo, "{broken:?}");
+    }
+
+    // The note changed the task since the render: the note wins, the line comes back.
+    home_note(&dir, &body_of_note.replace("important", "very important"));
+    write_vault_file(&dir, "TODO.md", &gone);
+    engine.reconcile().await.unwrap();
+    assert!(read(&dir, "notes/home.md").contains("very important"));
+    assert!(read(&dir, "TODO.md").contains("very important"));
+    assert!(body(&mock, "home", UID).contains("SUMMARY:very important"));
+}
+
 #[tokio::test]
 async fn reprioritizing_a_mirrored_task_in_todo_md_reaches_its_note() {
     let dir = temp_vault();
@@ -892,9 +1142,288 @@ async fn an_inbox_task_mentioning_a_note_is_a_task_not_a_mirror() {
     engine.reconcile().await.unwrap();
 
     let todo = read(&dir, "TODO.md");
-    assert!(todo.contains("- [ ] call [[John]] \u{2795}"), "{todo}");
-    assert!(todo.contains("- [ ] plain \u{2795}"));
+    assert!(
+        todo.contains(&format!("- [ ] call [[John]] {ID} ")),
+        "{todo}"
+    );
+    assert!(todo.contains(&format!("- [ ] plain {ID} ")));
     assert_eq!(mock.resource_names("inbox").len(), 2);
+}
+
+/// §7.4: the section a task is typed in is its priority; a priority written on the line
+/// itself wins, and so does one changed later — the section is only where the task starts.
+#[tokio::test]
+async fn a_task_typed_in_a_priority_section_takes_that_priority() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let todo = read(&dir, "TODO.md").replace(
+        "\n## Done\n",
+        "- [ ] typed here\n- [ ] typed low \u{1F53D}\n\n## Done\n- [ ] typed under done\n",
+    );
+    write_vault_file(&dir, "TODO.md", &todo);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.registered, 3);
+
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## \u{23EB} High Priority\n- [ ] typed here \u{23EB} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53D} Low Priority\n- [ ] typed low \u{1F53D} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(
+        todo.contains(&format!("## No Priority\n- [ ] typed under done {ID} ")),
+        "{todo}"
+    );
+    let typed = uid_of(&dir, "TODO.md", "typed here");
+    assert!(body(&mock, "inbox", &typed).contains("PRIORITY:3"));
+    // The mirrored note task is not touched by any of it.
+    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{23EB} {ID} {UID}")));
+
+    // A second pass is quiet.
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.registered, again.pushes), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+
+    // Taking the priority off a registered task moves it out; the section does not
+    // give it back.
+    let todo = read(&dir, "TODO.md").replace("typed here \u{23EB}", "typed here");
+    write_vault_file(&dir, "TODO.md", &todo);
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!("## No Priority\n- [ ] typed here {ID} ")),
+        "{todo}"
+    );
+    assert!(!body(&mock, "inbox", &typed).contains("PRIORITY:"));
+}
+
+/// §6.4: a checkbox without text is a task still to be written — the line an editor opens
+/// under a TODO heading (§15.7), or the one a list continuation leaves behind. It is not
+/// registered, not completed and not pushed until it has text; the plugin leaves it
+/// alone likewise (§15.6).
+#[tokio::test]
+async fn a_checkbox_without_text_is_not_a_task_yet() {
+    let dir = temp_vault();
+    let body = "# TODO\n- [ ] \n- [ ] \u{1F53A}\n\t- [x] \n- [ ] real";
+    home_note(&dir, &format!("{body}\n"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.pushes), (1, 1));
+
+    // The three empty boxes are where they were, as they were; nothing was moved under
+    // a done heading for the checked one.
+    let note = read(&dir, "notes/home.md");
+    assert!(note.contains(&format!("{body} {ID} ")), "{note}");
+    assert_eq!(note.matches(ID).count(), 1, "{note}");
+    assert!(!note.contains("Done"), "{note}");
+    assert_eq!(mock.resource_names("home").len(), 1);
+
+    // In TODO.md an empty box under a section is no task of the view either: the render
+    // drops it like any line that is none (§7), and nothing reaches the inbox list.
+    let todo = read(&dir, "TODO.md").replace("\n## Done\n", "## No Priority\n- [ ] \n\n## Done\n");
+    write_vault_file(&dir, "TODO.md", &todo);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.pushes), (0, 0));
+    assert!(!read(&dir, "TODO.md").contains("- [ ] \n"));
+    assert!(mock.resource_names("inbox").is_empty());
+
+    // A second pass is quiet.
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.registered, again.pushes), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+
+    // Once it has text it is a task like any other.
+    write_vault_file(
+        &dir,
+        "notes/home.md",
+        &read(&dir, "notes/home.md").replace("# TODO\n- [ ] \n", "# TODO\n- [ ] written\n"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.pushes), (1, 1));
+    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] written {ID} ")));
+    assert_eq!(mock.resource_names("home").len(), 2);
+}
+
+/// Cuts the line containing `text` out of `todo` and pastes it as the first line under
+/// `heading`, writing the heading in front of `## Done` when the view does not have it.
+fn move_line(todo: &str, text: &str, heading: &str) -> String {
+    let line = todo
+        .lines()
+        .find(|line| line.contains(text))
+        .unwrap_or_else(|| panic!("no line with `{text}`:\n{todo}"));
+    let without = todo.replacen(&format!("{line}\n"), "", 1);
+    if without.contains(&format!("{heading}\n")) {
+        without.replacen(&format!("{heading}\n"), &format!("{heading}\n{line}\n"), 1)
+    } else {
+        without.replacen("## Done\n", &format!("{heading}\n{line}\n\n## Done\n"), 1)
+    }
+}
+
+/// §7.4: a line moved to another section, its emoji left as it was, takes that section's
+/// priority — the render used to put it back.
+#[tokio::test]
+async fn a_task_moved_to_another_section_of_todo_md_takes_its_priority() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let plain = engine.add("plain", None, None, None).await.unwrap();
+    let urgent = engine
+        .add("urgent", Some(Priority::Highest), None, None)
+        .await
+        .unwrap();
+    assert!(body(&mock, "inbox", urgent.uid.as_str()).contains("PRIORITY:1"));
+
+    // Up into a section that exists, and down into one written by hand.
+    let todo = move_line(
+        &read(&dir, "TODO.md"),
+        "plain",
+        "## \u{1F53A} Highest Priority",
+    );
+    let todo = move_line(&todo, "urgent", "## \u{1F53D} Low Priority");
+    write_vault_file(&dir, "TODO.md", &todo);
+    engine.reconcile().await.unwrap();
+
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53A} Highest Priority\n- [ ] plain \u{1F53A} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53D} Low Priority\n- [ ] urgent \u{1F53D} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(!todo.contains("## No Priority"), "{todo}");
+    assert!(body(&mock, "inbox", plain.uid.as_str()).contains("PRIORITY:1"));
+    assert!(body(&mock, "inbox", urgent.uid.as_str()).contains("PRIORITY:7"));
+
+    // A second pass is quiet: the move was taken once.
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.normalized), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+
+    // Moved under No Priority, the task loses its priority.
+    let todo = move_line(&read(&dir, "TODO.md"), "plain", "## No Priority");
+    write_vault_file(&dir, "TODO.md", &todo);
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!("## No Priority\n- [ ] plain {ID} ")),
+        "{todo}"
+    );
+    assert!(!body(&mock, "inbox", plain.uid.as_str()).contains("PRIORITY:"));
+}
+
+/// §7.4 for a mirror line: the move is a change of priority, made in the note.
+#[tokio::test]
+async fn a_mirror_line_moved_to_another_section_reprioritizes_its_note_task() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let todo = move_line(
+        &read(&dir, "TODO.md"),
+        "important",
+        "## \u{1F53D} Low Priority",
+    );
+    write_vault_file(&dir, "TODO.md", &todo);
+    engine.reconcile().await.unwrap();
+
+    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{1F53D} {ID} {UID}")));
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains("## \u{1F53D} Low Priority\n- [ ] important \u{1F53D} [[home#Home|home]]"),
+        "{todo}"
+    );
+    assert!(!todo.contains("High Priority"), "{todo}");
+    assert!(body(&mock, "home", UID).contains("PRIORITY:7"));
+
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.normalized), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+}
+
+/// §7.2 holds for moves too: a sealed view is another device's render, and a line that
+/// stands elsewhere in it than in this engine's last render is no move of the user's —
+/// the note that explains it may still be on its way.
+#[tokio::test]
+async fn a_sealed_view_with_a_line_elsewhere_is_not_read_as_a_move() {
+    let dir = temp_vault();
+    let note = format!("- [ ] important \u{23EB} {ID} {UID}\n");
+    home_note(&dir, &note);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let rendered = read(&dir, "TODO.md");
+
+    let todo = move_line(&rendered, "important", "## \u{1F53D} Low Priority");
+    write_vault_file(&dir, "TODO.md", &resealed(&todo));
+    let report = engine.reconcile().await.unwrap();
+
+    assert_eq!(report.pushes, 0);
+    assert!(read(&dir, "notes/home.md").ends_with(&note));
+    assert_eq!(read(&dir, "TODO.md"), rendered);
+    assert!(body(&mock, "home", UID).contains("PRIORITY:3"));
+}
+
+/// §7.4: an emoji the user changed is the priority they named; where the line stands
+/// does not overrule it. And a move under Done says nothing about the priority.
+#[tokio::test]
+async fn a_changed_emoji_outranks_the_section_the_line_was_moved_to() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let both = engine
+        .add("both", Some(Priority::Highest), None, None)
+        .await
+        .unwrap();
+    let parked = engine
+        .add("parked", Some(Priority::Highest), None, None)
+        .await
+        .unwrap();
+
+    let todo = move_line(&read(&dir, "TODO.md"), "both", "## \u{1F53D} Low Priority")
+        .replace("both \u{1F53A}", "both \u{1F53C}");
+    let todo = move_line(&todo, "parked", "## Done");
+    write_vault_file(&dir, "TODO.md", &todo);
+    engine.reconcile().await.unwrap();
+
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53C} Medium Priority\n- [ ] both \u{1F53C} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53A} Highest Priority\n- [ ] parked \u{1F53A} {ID} "
+        )),
+        "{todo}"
+    );
+    assert!(body(&mock, "inbox", both.uid.as_str()).contains("PRIORITY:5"));
+    assert!(body(&mock, "inbox", parked.uid.as_str()).contains("PRIORITY:1"));
 }
 
 #[tokio::test]
@@ -955,7 +1484,9 @@ async fn add_and_complete_round_trip() {
         .unwrap();
     assert_eq!(task.text, "hello world", "one Markdown line");
     let todo = read(&dir, "TODO.md");
-    assert!(todo.contains("## \u{1F53C} Medium Priority\n- [ ] hello world \u{1F53C} \u{2795}"));
+    assert!(todo.contains(&format!(
+        "## \u{1F53C} Medium Priority\n- [ ] hello world \u{1F53C} {ID} "
+    )));
     assert!(todo.contains(task.uid.as_str()));
     assert!(body(&mock, "inbox", task.uid.as_str()).contains("SUMMARY:hello world"));
 
@@ -1273,9 +1804,8 @@ async fn a_recurring_inbox_task_rolls_forward_inside_todo_md() {
     // No date before: the next occurrence becomes the due date.
     assert!(
         todo.contains(&format!(
-            "## Inbox\n- [ ] take vitamins {REPEAT} every day {DUE} {} \u{2795} {} {ID} {}\n",
+            "## No Priority\n- [ ] take vitamins {REPEAT} every day {DUE} {} {ID} {}\n",
             day(1),
-            today(),
             task.uid
         )),
         "{todo}"
@@ -1314,4 +1844,548 @@ async fn a_recurring_line_first_seen_already_checked_rolls_before_its_first_push
     assert_eq!(mock.resource_names("home").len(), 2);
     let again = engine.reconcile().await.unwrap();
     assert_eq!((again.pushes, again.inserts), (0, 0));
+}
+
+// ── the creation date (➕) ─────────────────────────────────────────────────────────────
+
+const CREATED: &str = "\u{2795}";
+
+/// The day a UID was minted, as the vault and the server write it.
+fn born(value: &str) -> (String, String) {
+    let day = uid(value).created_on().unwrap().format();
+    let ical = format!("CREATED:{}T000000Z", day.replace('-', ""));
+    (day, ical)
+}
+
+/// §6.4: a line is registered without a creation date. The server still learns when the
+/// task was created — the day its UID was minted — and that never comes back as a token.
+#[tokio::test]
+async fn a_line_gets_no_creation_date_but_the_server_does() {
+    let dir = temp_vault();
+    home_note(&dir, "- [ ] typed today\n");
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let note = read(&dir, "notes/home.md");
+    assert!(!note.contains(CREATED), "{note}");
+    let typed = uid_of(&dir, "notes/home.md", "typed today");
+    assert!(body(&mock, "home", &typed).contains(&born(&typed).1));
+
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.normalized), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+    assert!(!read(&dir, "notes/home.md").contains(CREATED));
+}
+
+/// §6.4: a bare `➕` on a new line is answered with today's date, in a note and in
+/// TODO.md alike, and that date is the task's `CREATED`.
+#[tokio::test]
+async fn a_new_line_that_asks_for_its_creation_date_gets_today() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] dated {CREATED} \u{1F53A}\n"));
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(&dir, "TODO.md", &format!("{todo}- [ ] quick {CREATED}\n"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!(
+            "- [ ] dated \u{1F53A} {CREATED} {} {ID} ",
+            today()
+        )),
+        "{note}"
+    );
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!("- [ ] quick {CREATED} {} {ID} ", today())),
+        "{todo}"
+    );
+    let stamp = format!("CREATED:{}T000000Z", today().replace('-', ""));
+    let dated = uid_of(&dir, "notes/home.md", "dated");
+    assert!(body(&mock, "home", &dated).contains(&stamp));
+    assert!(body(&mock, "home", &dated).contains("SUMMARY:dated\r\n"));
+    let quick = uid_of(&dir, "TODO.md", "quick");
+    assert!(body(&mock, "inbox", &quick).contains(&stamp));
+}
+
+/// §6.4: on a task the server knows, a bare `➕` is answered with the server's creation
+/// date — also when it was made elsewhere and is not the day in the UID — and deleting
+/// the token takes nothing from the server.
+#[tokio::test]
+async fn an_existing_task_that_asks_gets_the_servers_creation_date() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] old one {ID} {UID}\n"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    // Another client knows better when the task was created.
+    let (_, minted) = born(UID);
+    edit_remote(&mock, "home", UID, Duration::minutes(5), |line| {
+        if line.starts_with("CREATED:") {
+            vec!["CREATED:20260901T081233Z".to_string()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    assert!(!body(&mock, "home", UID).contains(&minted));
+    engine.reconcile().await.unwrap();
+    assert!(!read(&dir, "notes/home.md").contains(CREATED));
+
+    home_note(&dir, &format!("- [ ] old one {CREATED} {ID} {UID}\n"));
+    engine.reconcile().await.unwrap();
+    let asked = format!("- [ ] old one {CREATED} 2026-09-01 {ID} {UID}\n");
+    assert!(read(&dir, "notes/home.md").ends_with(&asked));
+
+    let files = snapshot(&dir);
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.normalized), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+
+    // The token goes, the server's date stays.
+    home_note(&dir, &format!("- [ ] old one {ID} {UID}\n"));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.pushes, 0);
+    assert!(body(&mock, "home", UID).contains("CREATED:20260901T"));
+    assert!(!read(&dir, "notes/home.md").contains(CREATED));
+}
+
+/// §6.4: the answer needs no server. A task that was never pushed gets the day its UID
+/// was minted; the bare token never reaches the server as text.
+#[tokio::test]
+async fn the_creation_date_is_answered_offline_and_in_todo_md() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] never pushed {CREATED} {ID} {UID}\n"));
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!("{todo}- [ ] quick {CREATED} {ID} {UID2}\n"),
+    );
+    let offline = engine_with(&dir, Offline, true);
+    assert!(offline.reconcile().await.is_err());
+
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.ends_with(&format!(
+            "- [ ] never pushed {CREATED} {} {ID} {UID}\n",
+            born(UID).0
+        )),
+        "{note}"
+    );
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "- [ ] quick {CREATED} {} {ID} {UID2}\n",
+            born(UID2).0
+        )),
+        "{todo}"
+    );
+
+    let mock = MockCaldav::new();
+    engine(&dir, &mock).reconcile().await.unwrap();
+    assert!(body(&mock, "home", UID).contains("SUMMARY:never pushed\r\n"));
+    assert!(body(&mock, "home", UID).contains(&born(UID).1));
+}
+
+// ── tasks registered on another device ────────────────────────────────────────────────
+
+/// The Obsidian plugin registers a new task where it is typed and files it in TODO.md
+/// (§15.6). What it writes must be what the engine would have written: the first pass
+/// pushes the tasks and rewrites neither file — a rewrite would travel back to the phone
+/// and collide with whatever is being typed there.
+#[tokio::test]
+async fn lines_registered_and_filed_by_the_plugin_are_taken_as_they_are() {
+    let dir = temp_vault();
+    let note = format!("- [ ] buy milk {ID} {UID}\n");
+    home_note(&dir, &note);
+    let todo = sealed(&format!(
+        "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{1F53A} Highest Priority\n\
+         - [ ] call the bank \u{1F53A} {ID} {UID2}\n\n## Done\n"
+    ));
+    write_vault_file(&dir, "TODO.md", &todo);
+    let written = (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+
+    assert_eq!((report.registered, report.pushes, report.failed), (0, 2, 0));
+    assert_eq!(mock.resource_names("home"), vec![UID.to_string()]);
+    assert_eq!(mock.resource_names("inbox"), vec![UID2.to_string()]);
+    assert!(body(&mock, "inbox", UID2).contains("PRIORITY:1"));
+    assert!(read(&dir, "notes/home.md").ends_with(&note));
+    assert_eq!(read(&dir, "TODO.md"), todo);
+    assert_eq!(
+        (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md")),
+        written,
+        "neither file was rewritten"
+    );
+
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.registered), (0, 0));
+}
+
+/// The plugin completes a task where the box is checked (§15.6): in the note the line is
+/// stamped and moved under the done heading, and its mirror line leaves TODO.md. The
+/// pass that sees both files completes the task on the server and rewrites neither.
+#[tokio::test]
+async fn a_completion_made_by_the_plugin_is_taken_as_it_is() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n- [ ] other\n\n## Done\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let mirror = format!(
+        "## \u{1F53A} Highest Priority\n- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {UID}\n\n"
+    );
+    let todo = read(&dir, "TODO.md");
+    assert!(todo.contains(&mirror), "{todo}");
+
+    // What the plugin writes on the phone.
+    let note = read(&dir, "notes/home.md")
+        .replace(&format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n"), "")
+        .replace(
+            "## Done\n",
+            &format!(
+                "## Done\n- [x] call the bank \u{1F53A} \u{2705} {} {ID} {UID}\n",
+                today()
+            ),
+        );
+    write_vault_file(&dir, "notes/home.md", &note);
+    write_vault_file(&dir, "TODO.md", &resealed(&todo.replace(&mirror, "")));
+    let written = (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.pushes, report.failed), (1, 0));
+    assert!(body(&mock, "home", UID).contains("STATUS:COMPLETED"));
+    assert_eq!(read(&dir, "notes/home.md"), note);
+    assert_eq!(
+        (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md")),
+        written,
+        "neither file was rewritten"
+    );
+}
+
+/// The file sync may deliver the plugin's two files one after the other. TODO.md alone —
+/// a mirror line gone, or a mirror line of a task no note has yet — must not make the
+/// engine touch a note, complete or create anything: a note it rewrote here would meet
+/// the phone's version of the same note as a sync conflict.
+#[tokio::test]
+async fn the_plugins_todo_arriving_before_its_note_changes_no_note_and_no_task() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n\n## Done\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    let note_written = mtime(&dir, "notes/home.md");
+    let (puts, deletes, _) = mock.counters();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // The mirror line of the task completed on the phone is gone; the mirror line of a
+    // task typed on the phone is there. Both notes are still on their way.
+    let ahead = todo.replace(
+        &format!("- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {UID}\n"),
+        &format!("- [ ] typed on the phone \u{1F53A} [[home#Home|home]] {ID} {UID2}\n"),
+    );
+    assert_ne!(ahead, todo);
+    // The plugin seals what it leaves (§7.2); unsealed, the missing line would be the
+    // user's deletion (§7.1).
+    write_vault_file(&dir, "TODO.md", &resealed(&ahead));
+    engine.reconcile().await.unwrap();
+
+    assert_eq!(mtime(&dir, "notes/home.md"), note_written);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+    assert!(mock.resource_names("inbox").is_empty());
+    assert!(body(&mock, "home", UID).contains("STATUS:NEEDS-ACTION"));
+    // The view is the engine's: it shows the vault as the engine knows it.
+    assert_eq!(read(&dir, "TODO.md"), todo);
+}
+
+/// A device that settles tasks itself seals the TODO.md it leaves (§7.2). When the note
+/// behind a rewritten mirror line is still in transit, the engine must not read that
+/// line as an edit and write the note itself: its version and the phone's would meet as
+/// a sync conflict. The same line changed by hand — the seal broken — is an edit.
+#[tokio::test]
+async fn a_sealed_view_ahead_of_its_note_is_not_carried_into_the_note() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n\n## Done\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    let note_written = mtime(&dir, "notes/home.md");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let reprioritized = todo
+        .replace("## \u{1F53A} Highest Priority", "## \u{1F53D} Low Priority")
+        .replace("the bank \u{1F53A}", "the bank \u{1F53D}");
+    assert_ne!(reprioritized, todo);
+
+    write_vault_file(&dir, "TODO.md", &resealed(&reprioritized));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.normalized, report.pushes), (0, 0));
+    assert_eq!(mtime(&dir, "notes/home.md"), note_written);
+    assert!(body(&mock, "home", UID).contains("PRIORITY:1"));
+
+    write_vault_file(&dir, "TODO.md", &reprioritized);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.pushes, 1);
+    assert!(read(&dir, "notes/home.md").contains("call the bank \u{1F53D}"));
+    assert!(body(&mock, "home", UID).contains("PRIORITY:7"));
+}
+
+// ── nothing in the body but the view (§7.3) ───────────────────────────────────────────
+
+const OLD_DISCLAIMER: &str = "<!-- AUTOGENERATED BY Restask -->";
+
+/// A TODO.md that is not there is created: frontmatter with the seal, title, sections —
+/// and no comment line.
+#[tokio::test]
+async fn a_view_created_by_the_engine_has_no_comment_line() {
+    let dir = temp_vault();
+    std::fs::remove_file(dir.path().join("TODO.md")).unwrap();
+    let mock = MockCaldav::new();
+    engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        read(&dir, "TODO.md"),
+        sealed("---\nrestask-list: inbox\n---\n# TODO\n\n## Done\n")
+    );
+}
+
+/// A view rendered before the seal moved into the frontmatter — disclaimer and seal as
+/// comment lines in the body — loses both at the next render and keeps its tasks; the
+/// pass after that is a no-op.
+#[tokio::test]
+async fn the_comment_lines_of_an_earlier_view_are_dropped_by_the_next_render() {
+    let dir = temp_vault();
+    home_note(&dir, &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n"));
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!(
+            "---\nrestask-list: inbox\n---\n{OLD_DISCLAIMER}\n<!-- restask-render: 0ed09b30e036d3f7 -->\n\n# TODO\n\n\
+             ## No Priority\n- [ ] buy milk {ID} {UID2}\n\n## Done\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let view = read(&dir, "TODO.md");
+    assert!(!view.contains("<!--"));
+    assert!(view.starts_with("---\nrestask-list: inbox\nrestask-render: "));
+    assert!(restask::markdown::is_sealed(&view));
+    assert!(view.contains("call the bank") && view.contains("buy milk"));
+
+    let written = mtime(&dir, "TODO.md");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (again.pushes, again.registered, again.normalized),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        mtime(&dir, "TODO.md"),
+        written,
+        "a converged view is not rewritten"
+    );
+}
+
+/// The title follows the frontmatter directly (§7). A view rendered when a blank line
+/// stood between the two — sealed, as the daemon or the plugin left it — loses that line
+/// at the next render and nothing else: the tasks stay, in the view and in the note, no
+/// request is sent for it, and the pass after that is a no-op.
+#[tokio::test]
+async fn the_blank_line_above_the_title_of_an_earlier_view_is_dropped_by_the_next_render() {
+    let dir = temp_vault();
+    let line = format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n");
+    home_note(&dir, &line);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, "notes/home.md");
+    let rendered = read(&dir, "TODO.md");
+    assert!(rendered.contains("\n---\n# TODO\n\n## "));
+
+    // The same view in the earlier layout, sealed by whoever rendered it.
+    let (head, body) = rendered.split_once("---\n# TODO\n").unwrap();
+    let list = head.lines().nth(1).unwrap();
+    let earlier = sealed(&format!("---\n{list}\n---\n\n# TODO\n{body}"));
+    assert_ne!(earlier, rendered);
+    write_vault_file(&dir, "TODO.md", &earlier);
+
+    let pass = engine.reconcile().await.unwrap();
+    assert_eq!((pass.pushes, pass.registered, pass.normalized), (0, 0, 0));
+    assert_eq!(read(&dir, "TODO.md"), rendered);
+    assert_eq!(read(&dir, "notes/home.md"), note);
+
+    let written = mtime(&dir, "TODO.md");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    engine.reconcile().await.unwrap();
+    assert_eq!(
+        mtime(&dir, "TODO.md"),
+        written,
+        "a converged view is not rewritten"
+    );
+}
+
+/// The view is the file at the inbox path, and nothing else (§7): a routed note that
+/// carries a line of the view — the old disclaimer, pasted or left over — is a note. Its
+/// tasks are registered where they are and mirrored into TODO.md, and the line is kept.
+#[tokio::test]
+async fn a_note_with_a_line_of_the_view_in_it_is_still_a_note() {
+    let dir = temp_vault();
+    write_vault_file(
+        &dir,
+        "notes/home.md",
+        &format!(
+            "---\nrestask-list: home\n---\n{OLD_DISCLAIMER}\n# Home\n\n- [ ] buy a camera \u{1F53A}\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+
+    assert_eq!(report.registered, 1);
+    let note = read(&dir, "notes/home.md");
+    assert!(note.contains(OLD_DISCLAIMER), "a note's own text is kept");
+    assert!(note.contains(&format!("- [ ] buy a camera \u{1F53A} {ID} restask-")));
+    assert!(
+        !note.contains("## "),
+        "no section of the view is made in a note"
+    );
+    assert!(read(&dir, "TODO.md").contains("buy a camera \u{1F53A} [[home#Home|home]]"));
+}
+
+/// Invariant 12 for an editor without a port of the rules (Neovim): `settle` is the local
+/// phase and the render, with no server and no sync state. What it leaves is what the
+/// daemon's pass would leave — so that pass, when the files reach it, writes no vault
+/// file — and an edit made in the view is carried to its note on the spot.
+#[tokio::test]
+async fn settling_does_the_local_work_without_a_server_and_the_pass_writes_no_vault_file() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        "- [ ] typed in an editor \u{1F53A}\n- [x] ticked by hand\n",
+    );
+    let offline = engine_with(&dir, Offline, true);
+    let report = offline.settle().await.unwrap();
+    assert_eq!(report.registered, 2);
+
+    // Registered, completed and mirrored; the view is sealed like any render.
+    let note = read(&dir, "notes/home.md");
+    assert_eq!(note.matches(ID).count(), 2, "{note}");
+    assert!(note.contains("Done\n- [x] ticked by hand"), "{note}");
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains("- [ ] typed in an editor \u{1F53A} [[home#Home|home]]"),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo));
+    assert!(
+        !dir.path().join(".restask/index.json").exists(),
+        "nothing was agreed with a server, so no state says so"
+    );
+
+    // A second run is quiet.
+    let files = snapshot(&dir);
+    let again = offline.settle().await.unwrap();
+    assert_eq!((again.registered, again.normalized), (0, 0));
+    assert_eq!(snapshot(&dir), files);
+
+    // The daemon's pass pushes the two tasks and finds the vault as it would have left it.
+    let (note_at, todo_at) = (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md"));
+    let mock = MockCaldav::new();
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.pushes),
+        (0, 0, 2)
+    );
+    assert_eq!(mtime(&dir, "notes/home.md"), note_at);
+    assert_eq!(mtime(&dir, "TODO.md"), todo_at);
+
+    // An edit on the mirror line is carried to the note, the view filed again — and the
+    // server has not been asked.
+    let requests = mock.counters();
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &read(&dir, "TODO.md").replace("editor \u{1F53A}", "editor \u{23EB}"),
+    );
+    engine(&dir, &mock).settle().await.unwrap();
+    assert!(read(&dir, "notes/home.md").contains("- [ ] typed in an editor \u{23EB} "));
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains("High Priority\n- [ ] typed in an editor \u{23EB} [[home#Home|home]]"),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo));
+    assert_eq!(mock.counters(), requests);
+}
+
+/// A machine that leaves the syncing to the vault's sync node (`[node]` in its machine
+/// config, §14.2) never passes: `restask add` and `done` change the vault, settle it, and
+/// ask the server nothing — also when a server could be reached. A pass from a second
+/// machine pushes what the file sync is still carrying to the node, and the node then
+/// pulls it into its older copy of the note (§1.1).
+#[tokio::test]
+async fn a_machine_that_is_not_the_sync_node_settles_and_sends_nothing() {
+    let dir = temp_vault();
+    home_note(&dir, "- [ ] typed in an editor\n");
+    let mock = MockCaldav::new();
+    let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+    let editing = MachineConfig {
+        node: Some(restask::config::NodeSection::default()),
+        ..MachineConfig::default()
+    };
+    let engine_here = Engine::new(dir.path(), cfg, editing, mock.clone(), clock());
+
+    let task = engine_here
+        .add("from the command line", None, None, None)
+        .await
+        .unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(todo.contains("- [ ] from the command line"), "{todo}");
+    assert_eq!(todo, resealed(&todo));
+    // The local work of the whole vault was done with it.
+    let registered = uid_of(&dir, "notes/home.md", "typed in an editor");
+
+    engine_here.set_done(&uid(&registered), true).await.unwrap();
+    let note = read(&dir, "notes/home.md");
+    assert!(note.contains("Done\n- [x] typed in an editor"), "{note}");
+
+    assert_eq!(mock.counters(), (0, 0, 0), "no request");
+    assert!(mock.collection_names().is_empty());
+    assert!(
+        !dir.path().join(".restask/index.json").exists(),
+        "nothing was agreed with the server from here"
+    );
+
+    // The sync node's pass over the same files pushes both tasks and writes no vault file.
+    let (note_at, todo_at) = (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md"));
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.pushes),
+        (0, 0, 2)
+    );
+    assert_eq!(mock.resource_names("inbox").len(), 1);
+    assert_eq!(mock.resource_names("home").len(), 1);
+    assert!(read(&dir, "TODO.md").contains(task.uid.as_str()));
+    assert_eq!(mtime(&dir, "notes/home.md"), note_at);
+    assert_eq!(mtime(&dir, "TODO.md"), todo_at);
 }

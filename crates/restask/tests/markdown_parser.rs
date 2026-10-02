@@ -458,3 +458,38 @@ fn recurrence_token_takes_exactly_the_words_of_the_rule() {
     let line = parse_line("- [ ] glued 🔁every day").unwrap();
     assert_eq!(line.draft.recurrence, None);
 }
+
+#[test]
+fn a_bare_created_token_asks_for_the_date() {
+    let t = parse("- [ ] Buy milk ➕");
+    assert_eq!(t.draft.text, "Buy milk");
+    assert!(t.draft.wants_created);
+    assert_eq!(t.draft.created, None);
+
+    // Anywhere on the line, next to other tokens.
+    let t = parse(&format!("- [ ] ➕ Buy milk 🔺 🆔 {UID}"));
+    assert_eq!(t.draft.text, "Buy milk");
+    assert!(t.draft.wants_created);
+    assert_eq!(t.draft.priority, Some(Priority::Highest));
+}
+
+#[test]
+fn a_dated_created_token_is_no_request_and_a_glued_one_is_text() {
+    let t = parse("- [ ] Buy milk ➕ 2026-09-22");
+    assert!(!t.draft.wants_created);
+    assert_eq!(
+        t.draft.created,
+        Some(LocalDate::parse("2026-09-22").unwrap())
+    );
+
+    // A date the calendar does not have is still the token's value, not a request.
+    let t = parse("- [ ] Buy milk ➕ 2026-13-45");
+    assert!(!t.draft.wants_created);
+    assert_eq!(t.draft.created, None);
+
+    let t = parse("- [ ] 2➕2 and a➕");
+    assert!(!t.draft.wants_created);
+    assert_eq!(t.draft.text, "2➕2 and a➕");
+
+    assert!(!parse("- [ ] Buy milk").draft.wants_created);
+}

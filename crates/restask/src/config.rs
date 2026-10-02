@@ -5,7 +5,8 @@
 //! * **Vault config** — `restask.toml` at the vault root (synced, safe to commit): scanning
 //!   knobs such as `track`/`ignore` globs.
 //! * **Machine config** — `$XDG_CONFIG_HOME/restask/config.toml` (chmod 600, never synced):
-//!   CalDAV endpoint and secret sources.
+//!   CalDAV endpoint and secret sources on the sync node; on a machine that only edits,
+//!   where the sync node is.
 //!
 //! Secrets never live in config files (§17): a literal `password` key anywhere in a config
 //! document is rejected at parse time. Passwords resolve at call time from the environment or
@@ -296,8 +297,11 @@ pub struct CaldavConfig {
     pub password_file: Option<PathBuf>,
     /// Environment variable holding the password (alternative to `password_file`).
     pub password_env: Option<String>,
-    /// Daemon poll interval in seconds.
+    /// Daemon poll interval in seconds: a pass whether or not anything changed.
     pub poll_secs: u64,
+    /// How often the daemon asks the server whether another client wrote there, in
+    /// seconds; `0` leaves server-side changes to the poll.
+    pub watch_secs: u64,
     /// Whether the engine may MKCOL missing collections on first push.
     pub allow_create_lists: bool,
 }
@@ -310,9 +314,30 @@ impl Default for CaldavConfig {
             password_file: None,
             password_env: None,
             poll_secs: 300,
+            watch_secs: 2,
             allow_create_lists: true,
         }
     }
+}
+
+/// `[node]` section of the machine config (§14.2): present on a machine that only edits
+/// the vault and leaves the syncing to the vault's sync node (§1.1). Such a machine holds
+/// no server credentials and never contacts the server; the section says where the
+/// daemon is, for the commands that point there (`restask doctor`, `restask lists`,
+/// `contrib/update.sh`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct NodeSection {
+    /// ssh host of the sync node, when setup installed the daemon there.
+    pub host: Option<String>,
+    /// Directory of the daemon's compose stack on that host.
+    pub dir: Option<String>,
+    /// The vault's folder on that host.
+    pub vault: Option<String>,
+    /// CalDAV base URL the node's daemon syncs with — what the other clients connect to.
+    pub url: Option<String>,
+    /// CalDAV user name on that server.
+    pub username: Option<String>,
 }
 
 /// Machine configuration — `$XDG_CONFIG_HOME/restask/config.toml` (§14.2: chmod 600, never synced).
@@ -321,8 +346,11 @@ impl Default for CaldavConfig {
 pub struct MachineConfig {
     /// Optional pinned vault path.
     pub vault: VaultSection,
-    /// CalDAV endpoint and secret sources.
+    /// CalDAV endpoint and secret sources: the sync node's half.
     pub caldav: CaldavConfig,
+    /// Where the vault's daemon runs, on a machine that is not the sync node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeSection>,
 }
 
 impl MachineConfig {

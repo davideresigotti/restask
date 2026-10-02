@@ -89,6 +89,9 @@ pub struct TaskDraft {
     pub scheduled: Option<When>,
     /// `➕` value.
     pub created: Option<LocalDate>,
+    /// `true` when the line asks for its creation date: a `➕` standing alone, without a
+    /// date (§6.1). Whoever settles the line writes the date behind it (§6.4).
+    pub wants_created: bool,
     /// `✅` value.
     pub completed_on: Option<LocalDate>,
     /// `🔁` rule.
@@ -111,6 +114,7 @@ impl From<&crate::domain::Task> for TaskDraft {
             start: task.start,
             scheduled: task.scheduled,
             created: task.created,
+            wants_created: false,
             completed_on,
             recurrence: task.recurrence.clone(),
         }
@@ -175,6 +179,9 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
     let (created_spans, created) = scan_token(&patterns.created, body);
     spans.extend(created_spans);
     let created = created.and_then(|v| LocalDate::parse(&v).ok());
+    let bare_created = standalone_created(body, &spans);
+    let wants_created = !bare_created.is_empty();
+    spans.extend(bare_created);
 
     let (uid_spans, uid) = scan_token(&patterns.uid, body);
     spans.extend(uid_spans);
@@ -198,6 +205,7 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
             start,
             scheduled,
             created,
+            wants_created,
             completed_on,
             recurrence,
         },
@@ -243,6 +251,23 @@ fn standalone_priorities(body: &str) -> Vec<(usize, Priority)> {
     }
     found.sort_by_key(|&(at, _)| at);
     found
+}
+
+/// Spans of every `➕` that stands alone in `body` — bounded by the string start/end or a
+/// space/tab on both sides — and is not the head of a dated created token (`taken`): the
+/// request for the creation date (§6.1).
+fn standalone_created(body: &str, taken: &[Range<usize>]) -> Vec<Range<usize>> {
+    const SYMBOL: &str = "➕";
+    let bytes = body.as_bytes();
+    body.match_indices(SYMBOL)
+        .map(|(at, _)| at..at + SYMBOL.len())
+        .filter(|span| {
+            let bounded_before = span.start == 0 || matches!(bytes[span.start - 1], b' ' | b'\t');
+            let bounded_after = span.end == bytes.len() || matches!(bytes[span.end], b' ' | b'\t');
+            let dated = taken.iter().any(|token| token.contains(&span.start));
+            bounded_before && bounded_after && !dated
+        })
+        .collect()
 }
 
 /// Whole-match spans of `re` in `body`, plus group 1 of the first match.

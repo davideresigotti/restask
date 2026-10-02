@@ -91,6 +91,13 @@ describe("§15.2 typing trigger", () => {
 	});
 });
 
+describe("§15.2 created keyword", () => {
+	it("cr suggests the bare token: the date is written when the line is settled (§6.4)", () => {
+		expect(suggestionsFor("cr", TODAY)).toEqual([{ keyword: "created", insert: "➕" }]);
+		expect(triggerAt("- [ ] buy milk cre", TODAY)).toEqual({ start: 15, query: "cre" });
+	});
+});
+
 describe("§15.2 repeat keyword", () => {
 	it("re suggests the repeat rule opener", () => {
 		expect(suggestionsFor("re", TODAY)).toEqual([{ keyword: "repeat", insert: "🔁 every " }]);

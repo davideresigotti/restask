@@ -3,6 +3,8 @@
 -- resolves the vault and does all parsing. The buffer is refreshed after a mutation.
 local M = {}
 
+local settle = require("restask.settle")
+
 local BIN = "restask"
 
 --- Surfaces an error through `vim.notify` (§16 error surface).
@@ -67,8 +69,10 @@ end
 --- Toggles the task under the cursor (§16): an unchecked `[ ]` line runs
 -- `restask done --file <absolute path> --line <lnum>`, a checked `[x]`/`[X]` line runs
 -- `restask undone …`; other lines are ignored. The buffer is written first (the CLI
--- edits the file on disk) and reloaded on success. The CLI finds the vault from the
--- file's own location, so Neovim's working directory does not matter.
+-- edits the file on disk) and reloaded on success. That write is not settled: the
+-- command does the local work itself, and its `--line` is the line as written. The CLI
+-- finds the vault from the file's own location, so Neovim's working directory does not
+-- matter.
 function M.toggle()
 	local action = M.action_for(vim.fn.getline("."))
 	if not action then
@@ -80,7 +84,9 @@ function M.toggle()
 		return
 	end
 	if vim.bo.modified then
-		vim.cmd("silent write")
+		settle.without(function()
+			vim.cmd("silent write")
+		end)
 	end
 	run({ BIN, action, "--file", file, "--line", tostring(vim.fn.line(".")) }, refresh_buffer)
 end

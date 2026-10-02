@@ -1,17 +1,25 @@
+# The restask sync node as a compose stack (INSTALL.md, spec App. E). `restask setup`
+# puts this file into the stack directory on the server (through `contrib/node.sh`),
+# next to
+#   .env    RESTASK_VAULT_DIR, RESTASK_USER and TZ for this server
+#   src/    the restask sources the image is built from
+#   data/   this machine's config, written by `restask setup --join`; never synced
+# By hand: copy it there, write .env, and see INSTALL.md "A server without the wizard".
+name: restask
 services:
   restask:
     build:
-      # The image is built from the repository root (workspace + lockfile).
-      context: ../..
+      context: ./src
       dockerfile: contrib/docker/Dockerfile
     image: restask
     container_name: restask
     restart: unless-stopped
+    # The owner of the vault's files on this server: the daemon writes notes as that user.
+    user: "${RESTASK_USER:-1000:1000}"
     environment:
+      # Completion dates are stamped, and timed due dates shown, in this zone.
       - TZ=${TZ:-Etc/UTC}
     volumes:
-      - /opt/docker/syncthing/data/obsidian:/vault
+      # The server's copy of the vault, as the file sync keeps it.
+      - ${RESTASK_VAULT_DIR:?set RESTASK_VAULT_DIR in .env to the vault folder on this server}:/vault
       - ./data:/home/restask/.config/restask
-    # Machine config (./data/config.toml + radicale.passwd, mode 0600) must point the
-    # CalDAV endpoint at http://<radicale-host>:5232 — see INSTALL.md. Set TZ to your
-    # zone: timed due dates from other clients are shown in the container's local time.

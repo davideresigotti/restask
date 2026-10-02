@@ -74,15 +74,56 @@ On push and pull request, three jobs on `ubuntu-latest`:
 ## Appendix E — Deployment (`contrib/`)
 
 - `restask.service` (systemd **user** unit, the manual counterpart of what `restask
-  setup` installs): `ExecStart=%h/.cargo/bin/restask daemon --vault %h/Vault`,
+  setup` — and, on a further machine, `restask setup --join`, §13.2 — installs): `ExecStart=%h/.cargo/bin/restask daemon --vault %h/Vault`,
   `Restart=on-failure`, `RestartSec=5`, `WantedBy=default.target`. `systemctl stop` sends
   `SIGTERM`; the daemon finishes its pass and exits 0.
 - `docker/Dockerfile`: built **from the repository root**
-  (`docker build -f contrib/docker/Dockerfile .`); `rust:1.98` build stage with
-  `--locked`, `debian:bookworm-slim` runtime with `tzdata` (the daemon stamps local dates
-  and shows other clients' timed dues in local time, so `TZ` must resolve),
-  `USER 1000:1000`, `HOME=/home/restask`, `RESTASK_VAULT=/vault`,
-  `CMD ["restask", "daemon"]`.
-- `docker/docker-compose.yml`: build context `../..`; mounts the vault at `/vault` and a
-  config directory at `/home/restask/.config/restask` (holding `config.toml` and
-  `radicale.passwd`, 0600); `TZ`; `restart: unless-stopped`.
+  (`docker build -f contrib/docker/Dockerfile .`); `rust:1.98.1` build stage (the tag is
+  the toolchain pin; `rust-toolchain.toml` is not copied in) with `--locked` and BuildKit
+  cache mounts for the cargo registry and `target/`, so a rebuild compiles what changed;
+  `debian:trixie-slim` runtime (the build image's Debian release: the binary links
+  against its glibc) with `tzdata` (the daemon stamps local dates and shows
+  other clients' timed dues in local time, so `TZ` must resolve), `USER 1000:1000`,
+  `HOME=/home/restask`, `RESTASK_VAULT=/vault`, `CMD ["restask", "daemon"]`; the image
+  is labelled `org.opencontainers.image.title=restask`.
+- `docker/docker-compose.yml`: the sync node as a stack. It is copied into a stack
+  directory that holds `.env` (`RESTASK_VAULT_DIR`, the vault's folder on that machine,
+  required; `RESTASK_USER`, `uid:gid` the container runs as, default `1000:1000`; `TZ`),
+  `src/` (the sources; build context) and `data/` (mounted at
+  `/home/restask/.config/restask`: `config.toml` and `radicale.passwd`, 0600, written by
+  `restask setup --join` run in the container); mounts the vault at `/vault`;
+  `restart: unless-stopped`.
+- `node.sh` — the sync node driven over ssh, one connection per run (`ControlMaster`).
+  Remote paths are passed as quoted arguments, never spliced into a command line.
+  - `check <host> <vault> [<dir>]` (setup's `prepare_node`): ssh works; `docker compose
+    version` answers; `<vault>` is a folder; a stack already in `<dir>` mounts that
+    folder (`docker compose config`), else it is refused; a running stack is stopped.
+  - `install <host> <vault> <dir> <local-vault>` (setup's `install_node`; URL, username
+    and password on standard input, one per line): creates `<dir>/data`, owned by the
+    owner of the vault's files; when the stack has no compose file yet, writes `.env`
+    (that owner, this machine's time zone — completion dates are the user's local days,
+    whatever the server's clock says) and the compose file; replaces `src/` with the
+    files the image is built from (tracked and new ones under `Cargo.toml`,
+    `Cargo.lock`, `crates/`, the Dockerfile; without git, those paths minus `target/`);
+    builds. Then the **barrier**: the SHA-256 of every `*.md`, of `restask.toml` and of
+    `.restask/**` (not `lock`, conflict copies, temp files, other dot-directories) is
+    compared between `<local-vault>` and the node's copy every 3 s, for up to
+    `RESTASK_NODE_WAIT` (300) seconds; on a timeout the script fails and lists the files
+    that differ. Only an equal copy is joined (`docker compose run --rm -T restask
+    restask setup --join --non-interactive --url … --username … --password-stdin`),
+    after which `up -d`, the log's last lines, and a failure unless the container runs.
+    A pass over files still on their way would be the second writer of §1.1.
+  - `update <host> [<dir>]`: `src/`, build, `up -d`, log, running check, and the images
+    the build replaced are pruned by label.
+  It never rewrites an existing compose file or `.env`. `<dir>` defaults to `restask`
+  in the ssh user's home directory.
+- `update.sh [<ssh-host> [<stack-dir>]]`: brings what runs restask up to the working
+  tree. In order: `cargo install` when a `restask` is on `PATH`; restart of the user unit
+  when it is enabled (the script fails if it is not `active` afterwards); the three
+  plugin files into `<vault>/.obsidian/plugins/restask/` when they differ — vault from
+  `RESTASK_VAULT`, else the unit's `--vault`, else the machine config; never over
+  symlinks, never `data.json`; then `node.sh update` for the sync node — host and stack
+  from the arguments, else `RESTASK_SERVER` / `RESTASK_SERVER_DIR`, else `[node]` of
+  the machine config (§14.2); a host with no stack named anywhere means
+  `/opt/docker/restask`; no host, no node step. It never writes `data/` or the stack's
+  compose file, and never runs `restask setup`.

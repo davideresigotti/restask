@@ -678,12 +678,14 @@ fn r4_a_server_task_goes_back_to_the_note_it_names() {
         [Mutation::Insert { draft, under: None }] => {
             assert_eq!(draft.text, "from another device");
             assert_eq!(draft.uid, Some(uid(1)));
-            assert_eq!(draft.created, Some(date("2026-09-01")));
+            // The line does not show the creation date; the settled task keeps it.
+            assert_eq!(draft.created, None);
         }
         other => panic!("expected one insert, got {other:?}"),
     }
     assert_eq!(p.settled.len(), 1);
     assert_eq!(p.settled[0].task.source.path, "notes/home.md");
+    assert_eq!(p.settled[0].task.created, Some(date("2026-09-01")));
     assert!(p.puts.is_empty() && p.inbox_inserts.is_empty());
 }
 
@@ -745,6 +747,8 @@ fn r4_a_child_whose_parent_is_elsewhere_becomes_a_root_line() {
 
 // ── R5: adoption of foreign tasks ─────────────────────────────────────────────────────
 
+const TASKS_ORG_UID: &str = "5417861935824551742";
+
 const TASKS_ORG: [&str; 6] = [
     "UID:5417861935824551742",
     "CREATED:20260921T081233Z",
@@ -754,81 +758,242 @@ const TASKS_ORG: [&str; 6] = [
     "PRIORITY:1",
 ];
 
+/// The UID the Tasks.org task is adopted under.
+fn tasks_org_uid() -> TaskUid {
+    TaskUid::derived(
+        TASKS_ORG_UID,
+        Some(Utc.with_ymd_and_hms(2026, 9, 21, 8, 12, 33).unwrap()),
+    )
+}
+
+/// The Tasks.org resource once restask linked it to its line in TODO.md.
+fn linked(changes: &[&str]) -> RemoteResource {
+    let link = format!("X-RESTASK-UID:{}", tasks_org_uid().as_str());
+    let mut lines: Vec<&str> = TASKS_ORG.to_vec();
+    lines.extend(["X-RESTASK-SOURCE;VALUE=TEXT:TODO.md", link.as_str()]);
+    for change in changes {
+        let name = change.split(':').next().unwrap();
+        lines.retain(|line| !line.starts_with(name));
+        lines.push(change);
+    }
+    foreign("inbox", "5417", &lines)
+}
+
+/// The adopted task as vault and server agreed on it when it was adopted.
+fn adopted_base() -> Task {
+    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.plan().settled[0].task.clone()
+}
+
+/// Its line in TODO.md (no creation date shown), in a file last written at `T0`.
+fn adopted_line() -> Task {
+    let mut line = adopted_base();
+    line.created = None;
+    line.source_mtime = at(T0);
+    line.last_modified = at(T0);
+    line
+}
+
+/// A world where the adopted task is settled and its line is in the vault.
+fn adopted_world(line: &Task) -> World {
+    World::new()
+        .local(line)
+        .settled(&adopted_base(), "\"5417\"")
+}
+
 #[test]
-fn r5_a_foreign_task_is_adopted_under_a_uid_derived_from_its_own() {
+fn r5_a_foreign_task_is_adopted_where_it_is() {
     let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
     let p = world.plan();
-    assert_eq!(p.adoptions.len(), 1);
-    let adoption = &p.adoptions[0];
-    let adopted = &adoption.put.task;
-    assert_eq!(
-        adopted.uid,
-        TaskUid::derived(
-            "5417861935824551742",
-            Some(Utc.with_ymd_and_hms(2026, 9, 21, 8, 12, 33).unwrap())
-        )
-    );
+    assert_eq!(p.adopted, vec![tasks_org_uid()]);
+
+    // The resource stays the other client's: same name, same `UID`, replaced in place
+    // only to say which task it is and where its line lives.
+    assert!(p.deletes.is_empty() && p.moves.is_empty());
+    assert_eq!(p.puts.len(), 1);
+    let link = &p.puts[0];
+    assert_eq!(link.name, "5417");
+    assert_eq!(link.if_match.as_deref(), Some("\"5417\""));
+    assert_eq!(link.wire.uid.as_deref(), Some(TASKS_ORG_UID));
+    assert_eq!(link.extras, vec!["DESCRIPTION:with a note"]);
+
+    let adopted = &link.task;
+    assert_eq!(adopted.uid, tasks_org_uid());
     assert_eq!(adopted.text, "Made in Tasks.org");
     assert_eq!(adopted.priority, Some(Priority::Highest));
     assert_eq!(adopted.list, slug("inbox"));
     assert_eq!(adopted.source.path, "TODO.md");
-    assert_eq!(adoption.put.if_match, None);
-    assert_eq!(adoption.put.extras, vec!["DESCRIPTION:with a note"]);
-    assert_eq!(
-        adoption.foreign,
-        DeleteOp {
-            list: slug("inbox"),
-            name: "5417".to_string(),
-            etag: Some("\"5417\"".to_string()),
-        }
-    );
-    assert_eq!(p.inbox_inserts, vec![adopted.clone()]);
-    assert!(
-        p.deletes.is_empty(),
-        "the original goes only after the put succeeded"
-    );
+
+    // What was read is settled at once, under the etag it was read with: a link the
+    // server refuses is then a merge over this, not a conflict.
+    assert_eq!(p.settled.len(), 1);
+    assert_eq!(p.settled[0].task, *adopted);
+    assert_eq!(p.settled[0].etag, "\"5417\"");
+
+    // The server copy keeps its creation date; the line in TODO.md does not show it.
+    assert!(adopted.created.is_some());
+    let mut shown = adopted.clone();
+    shown.created = None;
+    assert_eq!(p.inbox_inserts, vec![shown]);
     // Same snapshot, same UID: a retried adoption can never duplicate the task.
-    assert_eq!(world.plan().adoptions[0].put.task.uid, adopted.uid);
+    assert_eq!(world.plan().puts[0].task.uid, adopted.uid);
+}
+
+#[test]
+fn r5_a_change_made_by_the_client_that_owns_the_task_reaches_its_line() {
+    // Regression: the task was re-created under a restask UID and the original deleted,
+    // so the next edit in Tasks.org — a priority — landed on a resource the vault line
+    // was no longer tied to, and was dropped with it.
+    let line = adopted_line();
+    // Nothing happened: nothing to do.
+    let p = adopted_world(&line).remote(linked(&[]), "inbox").plan();
+    assert!(p.is_noop(), "{p:?}");
+
+    // Tasks.org lowers the priority and keeps restask's properties.
+    let p = adopted_world(&line)
+        .remote(linked(&["PRIORITY:9"]), "inbox")
+        .plan();
+    assert_eq!(
+        p.mutations.get("TODO.md").map(Vec::as_slice),
+        Some(
+            &[Mutation::SetPriority {
+                uid: line.uid.clone(),
+                priority: Some(Priority::Lowest),
+            }][..]
+        )
+    );
+    assert!(p.puts.is_empty() && p.deletes.is_empty() && p.adopted.is_empty());
+    assert!(p.inbox_inserts.is_empty(), "no second line");
+
+    // A client that writes the resource back without them: the change still arrives,
+    // and the link is written again — to the same resource.
+    let mut bare: Vec<&str> = TASKS_ORG.to_vec();
+    bare.retain(|line| !line.starts_with("PRIORITY"));
+    bare.push("PRIORITY:9");
+    let p = adopted_world(&line)
+        .remote(foreign("inbox", "5417", &bare), "inbox")
+        .plan();
+    assert_eq!(mutations_for(&p, "TODO.md").len(), 1);
+    assert!(p.inbox_inserts.is_empty() && p.deletes.is_empty());
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].name, "5417");
+    assert_eq!(p.puts[0].wire.uid.as_deref(), Some(TASKS_ORG_UID));
+    assert_eq!(p.puts[0].task.priority, Some(Priority::Lowest));
+}
+
+#[test]
+fn r5_a_change_in_the_vault_is_written_to_the_resource_of_the_other_client() {
+    let line = adopted_line();
+    let mut edited = line.clone();
+    edited.text = "Made in Tasks.org, reworded in the vault".to_string();
+    let p = adopted_world(&edited).remote(linked(&[]), "inbox").plan();
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].name, "5417");
+    assert_eq!(p.puts[0].if_match.as_deref(), Some("\"5417\""));
+    assert_eq!(p.puts[0].wire.uid.as_deref(), Some(TASKS_ORG_UID));
+    assert_eq!(p.puts[0].task.uid, line.uid, "the UID of the line");
+    assert_eq!(p.puts[0].extras, vec!["DESCRIPTION:with a note"]);
+}
+
+#[test]
+fn r5_the_link_holds_when_the_other_client_rewrites_the_creation_date() {
+    let line = adopted_line();
+    // Linked: the property says which task it is.
+    let p = adopted_world(&line)
+        .remote(linked(&["CREATED:20260101T000000Z"]), "inbox")
+        .plan();
+    assert!(p.adopted.is_empty() && p.mutations.is_empty() && p.deletes.is_empty());
+
+    // Property dropped as well: the vault still knows the task by that `UID`.
+    let mut bare: Vec<&str> = TASKS_ORG.to_vec();
+    bare.retain(|line| !line.starts_with("CREATED"));
+    let p = adopted_world(&line)
+        .remote(foreign("inbox", "5417", &bare), "inbox")
+        .plan();
+    assert!(p.adopted.is_empty() && p.mutations.is_empty() && p.deletes.is_empty());
+    assert_eq!(p.puts.len(), 1, "linked again");
+    assert_eq!(p.puts[0].task.uid, line.uid);
+}
+
+#[test]
+fn r5_a_copy_made_under_another_uid_is_a_task_of_its_own() {
+    // Another client duplicated the resource, restask's properties included: the copy
+    // must not pass for the original (it would be deleted as a stray).
+    let line = adopted_line();
+    let link = format!("X-RESTASK-UID:{}", line.uid.as_str());
+    let p = adopted_world(&line)
+        .remote(linked(&[]), "inbox")
+        .remote(
+            foreign(
+                "inbox",
+                "copy",
+                &[
+                    "UID:another-uid",
+                    "SUMMARY:Made in Tasks.org",
+                    link.as_str(),
+                ],
+            ),
+            "inbox",
+        )
+        .plan();
+    assert!(p.deletes.is_empty(), "{:?}", p.deletes);
+    assert_eq!(p.adopted, vec![TaskUid::derived("another-uid", None)]);
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].name, "copy");
+    assert_eq!(p.puts[0].wire.uid.as_deref(), Some("another-uid"));
 }
 
 #[test]
 fn r5_an_interrupted_adoption_is_resumed_not_repeated() {
-    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
-    let adopted = world.plan().adoptions[0].put.task.clone();
-
-    // The line made it into the vault, the put did not: push it with the extras.
+    // The line made it into the vault, the state did not: the resource is linked, and
+    // no second line appears.
     let resumed = World::new()
-        .local(&adopted)
+        .local(&adopted_line())
         .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox")
         .plan();
     assert!(resumed.inbox_inserts.is_empty() && resumed.mutations.is_empty());
-    assert!(resumed.puts.is_empty(), "the adoption owns the push");
-    assert_eq!(resumed.adoptions.len(), 1);
-    assert_eq!(
-        resumed.adoptions[0].put.extras,
-        vec!["DESCRIPTION:with a note"]
-    );
+    assert!(resumed.adopted.is_empty() && resumed.deletes.is_empty());
+    assert_eq!(resumed.puts.len(), 1);
+    assert_eq!(resumed.puts[0].name, "5417");
+    assert_eq!(resumed.puts[0].extras, vec!["DESCRIPTION:with a note"]);
+}
 
-    // The put made it, the delete of the original did not: only the delete is left.
+#[test]
+fn r5_an_original_left_behind_by_an_earlier_adoption_is_removed() {
+    // Earlier versions re-created the task under its restask UID and deleted the
+    // original; a client that uploads the original again must not get a second task.
+    let mut adopted = adopted_line();
+    adopted.created = Some(date("2026-09-21"));
     let leftover = World::new()
         .local(&adopted)
         .settled(&adopted, "\"new\"")
         .remote(resource(&adopted, T0, "\"new\""), "inbox")
         .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox")
         .plan();
-    assert!(leftover.adoptions.is_empty());
+    assert!(leftover.adopted.is_empty() && leftover.puts.is_empty());
     assert_eq!(leftover.deletes.len(), 1);
     assert_eq!(leftover.deletes[0].name, "5417");
 }
 
 #[test]
-fn r5_an_adopted_task_deleted_in_the_vault_takes_its_original_with_it() {
-    let world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
-    let adopted = world.plan().adoptions[0].put.task.uid.clone();
-    let mut world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
-    world.s.tombstones.insert(adopted);
+fn r5_an_adopted_task_deleted_in_the_vault_is_deleted_for_its_client_too() {
+    // The line is gone and the state knows the task: deleted in the vault.
+    let line = adopted_line();
+    let mut world = World::new()
+        .settled(&adopted_base(), "\"5417\"")
+        .remote(linked(&[]), "inbox");
     let p = world.plan();
-    assert!(p.adoptions.is_empty() && p.inbox_inserts.is_empty());
+    assert!(p.adopted.is_empty() && p.inbox_inserts.is_empty());
+    assert_eq!(p.deletes.len(), 1);
+    assert_eq!(p.deletes[0].name, "5417");
+    assert_eq!(p.tombstones, vec![line.uid.clone()]);
+
+    // Uploaded again from that client's cache afterwards: it does not come back.
+    world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.s.tombstones.insert(line.uid);
+    let p = world.plan();
+    assert!(p.adopted.is_empty() && p.inbox_inserts.is_empty() && p.puts.is_empty());
     assert_eq!(p.deletes.len(), 1);
 }
 
@@ -853,8 +1018,8 @@ fn r5_foreign_tasks_are_adopted_only_where_the_vault_has_a_place_for_them() {
             "home",
         )
         .plan();
-    assert_eq!(p.adoptions.len(), 1);
-    assert_eq!(p.adoptions[0].put.task.source.path, "notes/home.md");
+    assert_eq!(p.adopted.len(), 1);
+    assert_eq!(p.puts[0].task.source.path, "notes/home.md");
     assert_eq!(mutations_for(&p, "notes/home.md").len(), 1);
 }
 
@@ -895,12 +1060,27 @@ fn r5_a_foreign_family_keeps_its_hierarchy_parents_first() {
         }
         other => panic!("expected parent then child, got {other:?}"),
     }
-    let pushed_child = p
-        .adoptions
-        .iter()
-        .find(|adoption| adoption.put.task.uid == child)
-        .unwrap();
-    assert_eq!(pushed_child.put.task.parent, Some(parent));
+    // In the vault the child hangs under the parent's restask UID; on the server the
+    // relation keeps naming the parent as its client does.
+    let pushed_child = p.puts.iter().find(|put| put.task.uid == child).unwrap();
+    assert_eq!(pushed_child.task.parent, Some(parent));
+    assert_eq!(pushed_child.wire.parent.as_deref(), Some("p@tasks.org"));
+    assert_eq!(pushed_child.wire.uid.as_deref(), Some("c@tasks.org"));
+}
+
+#[test]
+fn r5_a_task_of_the_vault_under_an_adopted_parent_names_it_as_its_client_does() {
+    let line = adopted_line();
+    let mut child = task(7, "inbox", "typed under it");
+    child.source.path = "TODO.md".to_string();
+    child.parent = Some(line.uid.clone());
+    let p = adopted_world(&line)
+        .local(&child)
+        .remote(linked(&[]), "inbox")
+        .plan();
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].wire.uid, None, "a task of restask's own");
+    assert_eq!(p.puts[0].wire.parent.as_deref(), Some(TASKS_ORG_UID));
 }
 
 #[test]
@@ -915,7 +1095,9 @@ fn r5_a_second_resource_with_the_same_foreign_uid_is_just_removed() {
             "inbox",
         )
         .plan();
-    assert_eq!(p.adoptions.len(), 1);
+    assert_eq!(p.adopted.len(), 1);
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].name, "one");
     assert_eq!(p.deletes.len(), 1);
     assert_eq!(p.deletes[0].name, "two");
 }

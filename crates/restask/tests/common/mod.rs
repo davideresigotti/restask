@@ -13,8 +13,7 @@ use tempfile::TempDir;
 
 use restask::caldav::{CaldavPort, CollectionInfo, RemoteResource};
 use restask::domain::{Clock, ListSlug, LocalDate, Task, TaskUid};
-use restask::markdown::MARKER;
-use restask::vtodo::{from_vcalendar, to_vcalendar_with};
+use restask::vtodo::{from_vcalendar, to_vcalendar_as, WireNames};
 use restask::{CaldavErrorKind, RestaskError};
 
 /// Fixed-instant clock (§3.3): `now_utc` is the first field, the device-local offset the
@@ -172,8 +171,8 @@ impl CaldavPort for MockCaldav {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
-        Ok(self
-            .lock()
+        let state = self.lock();
+        Ok(state
             .collections
             .iter()
             .map(|(slug, display)| CollectionInfo {
@@ -181,6 +180,15 @@ impl CaldavPort for MockCaldav {
                 slug: slug.clone(),
                 display_name: Some(display.clone()),
                 supports_vtodo: true,
+                // Like a server's: it changes with every write to the collection.
+                ctag: Some(
+                    state
+                        .resources
+                        .iter()
+                        .filter(|((list, _), _)| list == slug)
+                        .map(|((_, name), resource)| format!("{name}={};", resource.etag))
+                        .collect(),
+                ),
             })
             .collect())
     }
@@ -230,6 +238,7 @@ impl CaldavPort for MockCaldav {
         task: &Task,
         name: &str,
         extras: &[String],
+        wire: &WireNames,
         if_match: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<String, RestaskError> {
@@ -261,7 +270,7 @@ impl CaldavPort for MockCaldav {
         state.resources.insert(
             key,
             MockResource {
-                body: to_vcalendar_with(task, now, extras),
+                body: to_vcalendar_as(task, now, extras, wire),
                 etag: etag.clone(),
             },
         );
@@ -303,9 +312,27 @@ pub fn temp_vault() -> TempDir {
     write_vault_file(
         &dir,
         "TODO.md",
-        &format!("---\nrestask-list: inbox\n---\n\n{MARKER}\n\n# TODO\n\n## Inbox\n"),
+        &sealed("---\nrestask-list: inbox\n---\n# TODO\n\n## No Priority\n"),
     );
     dir
+}
+
+/// `view` — a TODO.md without a seal line — as the engine renders it (§7.2): the seal
+/// is the last property of the frontmatter block. The digest is computed here
+/// independently of the crate: FNV-1a (64-bit) over the unsealed text, 16 lowercase hex
+/// digits.
+pub fn sealed(view: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in view.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let at = view.find("\n---\n").expect("a view has frontmatter") + 1;
+    format!(
+        "{}restask-render: {hash:016x}\n{}",
+        &view[..at],
+        &view[at..]
+    )
 }
 
 /// Writes (or overwrites) a file inside the temporary vault.

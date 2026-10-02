@@ -120,6 +120,17 @@ describe("§15.5 typing next to the token", () => {
 		expect(type(`- [ ] a|${A}`, " b")).toBe(`- [ ] a b|${A}`);
 	});
 
+	it("shows a blank typed at the visible end and keeps the cursor behind it", () => {
+		expect(type(`- [ ] a|${A}`, " ")).toBe(`- [ ] a |${A}`);
+		expect(type(type(`- [ ] a|${A}`, " "), "🔺")).toBe(`- [ ] a 🔺|${A}`);
+		expect(type(type(`- [ ] a|${A}`, " "), " ")).toBe(`- [ ] a  |${A}`);
+	});
+
+	it("rests behind the blanks a line was saved with, one of them hidden with the token", () => {
+		expect(moveTo(`- [ ] |a  ${A}`, `- [ ] a  ${A}|`)).toBe(`- [ ] a  |${A}`);
+		expect(remove(`- [ ] a  |${A}`, 1, 0, "delete.backward")).toBe(`- [ ] a |${A}`);
+	});
+
 	it("does so for text inserted behind the token as well", () => {
 		expect(apply(`|- [ ] a${A}`, (state) => ({ changes: { from: state.doc.length, insert: " ✅ 2026-10-01" } }))).toBe(
 			`|- [ ] a ✅ 2026-10-01${A}`,
@@ -160,6 +171,14 @@ describe("§15.5 a new line never takes the token along", () => {
 
 	it("splits a line in the middle of its text as text", () => {
 		expect(enter(`- [ ] he|llo${A}`, "input.type")).toBe(`- [ ] he\n- [ ] |llo${A}`);
+	});
+
+	it("leaves a replacement that starts on an earlier line as it is", () => {
+		const spec = { changes: { from: 1, to: 10, insert: "1\n2" } };
+		const unguarded = EditorState.create({ doc: `xy\n- [ ] a${A}`, selection: EditorSelection.cursor(1) }).update(spec).state;
+		expect(show(unguarded)).toBe(`x|1\n2${A}`);
+		// …except for the token, which would show on the line that is no task any more.
+		expect(apply(`x|y\n- [ ] a${A}`, () => spec)).toBe("x|1\n2");
 	});
 
 	it("leaves a line appended behind the token where it is", () => {
@@ -207,12 +226,46 @@ describe("§15.5 deleting next to the token", () => {
 		expect(removeSelection(`- [ ] a${A}‹\n- [ ] b${B}|`)).toBe(`- [ ] a|${A}`);
 	});
 
-	it("a deletion across lines keeps the token of the line it starts in", () => {
-		expect(removeSelection(`- [ ] he‹llo${A}\n- [ ] b${B}\n- [ ] wor|ld${C}`)).toBe(`- [ ] he|${A}ld${C}`);
+	it("a deletion across lines keeps the token of the line it starts in, and only that one", () => {
+		expect(removeSelection(`- [ ] he‹llo${A}\n- [ ] b${B}\n- [ ] wor|ld${C}`)).toBe(`- [ ] he|${A}ld`);
+	});
+});
+
+describe("§15.5 a token never comes out of hiding", () => {
+	it("goes with the line's text when that is selected from the visible end and deleted", () => {
+		expect(removeSelection(`|- [ ] hello‹${A}`)).toBe("|");
+		expect(removeSelection(`|- [ ] hello‹${A}\n- [ ] b${B}`)).toBe(`|\n- [ ] b${B}`);
+		expect(removeSelection(`  |- [ ] hello  ‹${A}`)).toBe("  |");
 	});
 
-	it("a deletion that ends inside a token keeps that token", () => {
-		expect(apply(`|x\n- [ ] b${B}`, () => ({ changes: { from: 1, to: 14 }, userEvent: "delete.selection" }))).toBe(`|x${B}`);
+	it("goes when the checkbox in front of an emptied task is deleted", () => {
+		expect(remove(`- [ ]| ${A}`, 5, 0, "delete.backward")).toBe("|  ");
+		expect(remove(`- [ ]|${A}`, 1, 0, "delete.backward")).toBe("- [ | ");
+	});
+
+	it("goes when an edit turns the task into an ordinary line", () => {
+		expect(removeSelection(`- ‹[ ] |hello${A}`)).toBe("- |hello");
+		expect(apply(`|- [ ] hello${A}`, () => ({ changes: { from: 0, to: 6, insert: "> " } }))).toBe("|> hello");
+		expect(apply(`- [| ] hello${A}`, () => ({ changes: { from: 3, to: 4, insert: "/" } }))).toBe("- [|/] hello");
+		expect(type(`- [ |] hello${A}`, "?")).toBe("- [ ?|] hello");
+	});
+
+	it("stays with the head of its task when a plain line break cuts the text off", () => {
+		expect(apply(`- [ ] he|llo${A}`, (state) => ({ ...state.replaceSelection("\n"), userEvent: "input.type" }))).toBe(
+			`- [ ] he${A}\n|llo`,
+		);
+		expect(apply(`|- [ ] hello${A}`, () => ({ changes: { from: 8, insert: "\nx\n" } }))).toBe(`|- [ ] he${A}\nx\nllo`);
+	});
+
+	it("goes when a deletion from a line that is no task ends inside it", () => {
+		expect(apply(`|x\n- [ ] b${B}`, () => ({ changes: { from: 1, to: 14 }, userEvent: "delete.selection" }))).toBe("|x");
+		expect(removeSelection(`x‹\n- [ ] |b${B}`)).toBe("x|b");
+	});
+
+	it("stays while the line is a task, whatever else changes on it", () => {
+		expect(removeSelection(`‹  |- [ ] hello${A}`)).toBe(`|- [ ] hello${A}`);
+		expect(apply(`- [| ] hello${A}`, () => ({ changes: { from: 3, to: 4, insert: "x" } }))).toBe(`- [|x] hello${A}`);
+		expect(apply(`|- [ ] hello${A}`, () => ({ changes: { from: 0, to: 1, insert: "*" } }))).toBe(`|* [ ] hello${A}`);
 	});
 });
 

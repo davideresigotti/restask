@@ -23,7 +23,7 @@ use crate::caldav::protocol::{
     mkcol_body, parse_collections, parse_report, propfind_collections_body, report_vtodos,
 };
 use crate::domain::{ListSlug, Task};
-use crate::vtodo::{from_vcalendar, to_vcalendar_with};
+use crate::vtodo::{from_vcalendar, to_vcalendar_as, WireNames};
 use crate::{CaldavErrorKind, RestaskError};
 
 /// Standard retry budget (§10.4): 1 s, 2 s, 4 s — four attempts total.
@@ -374,6 +374,7 @@ impl CaldavPort for CaldavClient {
         task: &Task,
         name: &str,
         extras: &[String],
+        wire: &WireNames,
         if_match: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<String, RestaskError> {
@@ -381,7 +382,7 @@ impl CaldavPort for CaldavClient {
         let mut builder = self
             .authenticate(self.http.request(Method::PUT, &url))
             .header("Content-Type", "text/calendar; charset=utf-8")
-            .body(to_vcalendar_with(task, now, extras));
+            .body(to_vcalendar_as(task, now, extras, wire));
         builder = match if_match {
             Some(etag) => builder.header(IF_MATCH, etag),
             None => builder.header(IF_NONE_MATCH, "*"),

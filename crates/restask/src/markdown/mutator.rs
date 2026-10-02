@@ -20,15 +20,16 @@ pub enum WhenField {
 /// A single line-level mutation (§6.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
-    /// Appends `➕ <created>` and `🆔 <uid>` to the task line at `line_no`.
+    /// Appends `🆔 <uid>` to the task line at `line_no` — and `➕ <created>` when the line
+    /// asks for its creation date and does not state one.
     Register {
         /// 1-based line number of the unregistered task line (referring to the contents
         /// passed to [`apply`]).
         line_no: usize,
         /// UID to assign.
         uid: TaskUid,
-        /// Creation date to record.
-        created: LocalDate,
+        /// Creation date to write; `None` leaves the line without one (the default).
+        created: Option<LocalDate>,
     },
     /// Replaces the UID of the task line at `line_no` with a fresh one (a duplicated line:
     /// the copy becomes its own task; every other token is kept).
@@ -101,6 +102,14 @@ pub enum Mutation {
     Delete {
         /// Target task.
         uid: TaskUid,
+    },
+    /// Writes the creation date a line asks for with a bare `➕` (§6.4). A line that
+    /// states a date keeps it.
+    SetCreated {
+        /// Target task.
+        uid: TaskUid,
+        /// The task's creation date.
+        created: LocalDate,
     },
     /// Inserts a new, already-registered task line (a task created on the server).
     Insert {
@@ -208,7 +217,8 @@ pub(crate) fn fmt_when(when: When) -> String {
 }
 
 /// Renders a task line: indent + marker + checkbox + text + canonical metadata tail
-/// (`<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted.
+/// (`<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted; a requested
+/// creation date that is not known yet is written as the bare `➕` it was asked with.
 pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     let mut tail: Vec<String> = Vec::new();
     if let Some(p) = draft.priority {
@@ -229,8 +239,11 @@ pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     if let Some(d) = draft.completed_on {
         tail.push(format!("✅ {}", d.format()));
     }
-    if let Some(d) = draft.created {
-        tail.push(format!("➕ {}", d.format()));
+    match draft.created {
+        Some(d) => tail.push(format!("➕ {}", d.format())),
+        // A request nobody has answered yet stays on the line.
+        None if draft.wants_created => tail.push("➕".to_string()),
+        None => {}
     }
     if let Some(u) = &draft.uid {
         tail.push(format!("🆔 {u}"));
@@ -321,7 +334,7 @@ pub fn apply(
                         let indent = line.text[..task.indent_chars].to_string();
                         let marker = task.marker;
                         let mut draft = task.draft;
-                        draft.created = Some(*created);
+                        draft.created = draft.created.or(*created);
                         draft.uid = Some(uid.clone());
                         line.text = canonical_line(&indent, marker, &draft);
                         applied.push(op.clone());
@@ -377,6 +390,16 @@ pub fn apply(
                 if with_uid_line(&mut lines, uid, |draft| {
                     draft.checked = checked;
                     draft.completed_on = completed_on.or_else(|| checked.then_some(today));
+                }) {
+                    applied.push(op.clone());
+                } else {
+                    skipped.push((op.clone(), SkipReason::UidNotFound));
+                }
+            }
+            Mutation::SetCreated { uid, created } => {
+                let created = *created;
+                if with_uid_line(&mut lines, uid, |draft| {
+                    draft.created = draft.created.or(Some(created));
                 }) {
                     applied.push(op.clone());
                 } else {

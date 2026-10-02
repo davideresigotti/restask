@@ -44,7 +44,7 @@ fn register_appends_created_and_uid() {
         &[Mutation::Register {
             line_no: 1,
             uid: uid(UID1),
-            created: date("2026-09-22"),
+            created: Some(date("2026-09-22")),
         }],
     );
     assert_eq!(out.applied.len(), 1);
@@ -62,7 +62,7 @@ fn register_preserves_indent_marker_and_metadata() {
         &[Mutation::Register {
             line_no: 1,
             uid: uid(UID1),
-            created: date("2026-09-22"),
+            created: Some(date("2026-09-22")),
         }],
     );
     assert_eq!(
@@ -79,7 +79,7 @@ fn register_is_idempotent_for_same_uid() {
         &[Mutation::Register {
             line_no: 1,
             uid: uid(UID1),
-            created: date("2026-09-22"),
+            created: Some(date("2026-09-22")),
         }],
     );
     assert_eq!(out.applied.len(), 1);
@@ -94,17 +94,17 @@ fn register_skips_line_changed() {
             Mutation::Register {
                 line_no: 1,
                 uid: uid(UID1),
-                created: date("2026-09-22"),
+                created: Some(date("2026-09-22")),
             },
             Mutation::Register {
                 line_no: 2,
                 uid: uid(UID1),
-                created: date("2026-09-22"),
+                created: Some(date("2026-09-22")),
             },
             Mutation::Register {
                 line_no: 99,
                 uid: uid(UID1),
-                created: date("2026-09-22"),
+                created: Some(date("2026-09-22")),
             },
         ],
     );
@@ -817,4 +817,77 @@ fn recurrence_sits_after_the_priority_and_a_record_loses_it() {
         cleared.contents,
         "- [ ] A 🔽 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
     );
+}
+
+#[test]
+fn register_writes_no_creation_date_unless_given_one() {
+    let out = run(
+        "- [ ] Buy milk 🔺\n",
+        &[Mutation::Register {
+            line_no: 1,
+            uid: uid(UID1),
+            created: None,
+        }],
+    );
+    assert_eq!(out.contents, format!("- [ ] Buy milk 🔺 🆔 {UID1}\n"));
+}
+
+#[test]
+fn register_answers_a_bare_created_token_and_keeps_a_date_the_line_states() {
+    let asked = run(
+        "- [ ] Buy milk ➕ 📅 2026-10-05\n",
+        &[Mutation::Register {
+            line_no: 1,
+            uid: uid(UID1),
+            created: Some(date("2026-09-22")),
+        }],
+    );
+    assert_eq!(
+        asked.contents,
+        format!("- [ ] Buy milk 📅 2026-10-05 ➕ 2026-09-22 🆔 {UID1}\n")
+    );
+
+    let stated = run(
+        "- [ ] Buy milk ➕ 2026-09-01\n",
+        &[Mutation::Register {
+            line_no: 1,
+            uid: uid(UID1),
+            created: Some(date("2026-09-22")),
+        }],
+    );
+    assert_eq!(
+        stated.contents,
+        format!("- [ ] Buy milk ➕ 2026-09-01 🆔 {UID1}\n")
+    );
+}
+
+#[test]
+fn set_created_fills_the_date_in_and_never_replaces_one() {
+    let op = Mutation::SetCreated {
+        uid: uid(UID1),
+        created: date("2026-09-01"),
+    };
+    let asked = run(
+        &format!("- [ ] Buy ➕ milk 🔺 🆔 {UID1}\n"),
+        std::slice::from_ref(&op),
+    );
+    assert_eq!(
+        asked.contents,
+        format!("- [ ] Buy milk 🔺 ➕ 2026-09-01 🆔 {UID1}\n")
+    );
+
+    let stated = format!("- [ ] Buy milk ➕ 2026-08-15 🆔 {UID1}\n");
+    assert_eq!(run(&stated, &[op]).contents, stated);
+}
+
+#[test]
+fn an_unanswered_created_request_survives_a_rewrite_of_its_line() {
+    let out = run(
+        &format!("- [ ] Buy milk ➕ 🆔 {UID1}\n"),
+        &[Mutation::SetPriority {
+            uid: uid(UID1),
+            priority: Some(Priority::High),
+        }],
+    );
+    assert_eq!(out.contents, format!("- [ ] Buy milk ⏫ ➕ 🆔 {UID1}\n"));
 }

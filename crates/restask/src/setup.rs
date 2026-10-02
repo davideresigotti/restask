@@ -1,20 +1,23 @@
 //! Setup wizard (§13.2): composes the vault scaffold (with the Obsidian plugin installed
 //! and enabled in it), the fresh TODO.md creation (any pre-existing file is renamed to the
 //! timestamped backup), machine-config records, the typed inbox binding, the first full
-//! reconcile, and the systemd user-unit install that keeps the daemon running on this
-//! vault. [`run_setup`] carries the tested behavior;
+//! reconcile, and the install of the vault's one daemon ([`DaemonHost`]): as a systemd
+//! user unit on this machine, or — over ssh, with the credentials typed here — on the
+//! always-on server that holds a copy of the vault. A vault that another device already
+//! set up is *joined* instead ([`joins`]): the machine gets its config, a first sync and
+//! the unit, and the vault is left as it is. [`run_setup`] carries the tested behavior;
 //! [`run_interactive`] is a thin TTY shell over it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
-use crate::config::{CaldavConfig, MachineConfig, VaultConfig, VaultSection};
+use crate::config::{CaldavConfig, MachineConfig, NodeSection, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
 use crate::fsio;
-use crate::markdown::render;
+use crate::markdown::{is_view, render};
 use crate::store::{cache_remove, Index};
 use crate::sync::{Engine, ReconcileReport};
 use crate::RestaskError;
@@ -32,6 +35,137 @@ pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, Restas
             }),
         })
         .collect()
+}
+
+/// Stack directory on the sync node when none is given: `restask` in the home directory
+/// of the ssh user.
+pub const NODE_DIR: &str = "restask";
+
+/// Where the daemon goes when it is installed on another machine (§13.2 step 6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeTarget {
+    /// ssh host of the always-on machine, as `ssh <host>` reaches it.
+    pub host: String,
+    /// The vault's folder on that machine, as the file sync keeps it there.
+    pub vault: String,
+    /// Directory of the daemon's compose stack there (sources, machine config).
+    pub dir: String,
+}
+
+/// Which machine runs the vault's one daemon (§1.1) — the question setup settles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonHost {
+    /// This machine: it is the sync node, keeps the credentials and gets the unit.
+    Here,
+    /// An always-on server: setup installs the daemon there over ssh and hands it the
+    /// credentials. This machine only edits and keeps none.
+    Node(NodeTarget),
+    /// Another machine, where the daemon is installed by hand (`--no-daemon`). This
+    /// machine only edits and keeps no credentials.
+    Elsewhere,
+}
+
+/// What the command line says about the daemon's place (`--node`, `--node-vault`,
+/// `--node-dir`, `--no-daemon`); the interactive wizard asks for what is missing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonFlags {
+    /// `--no-daemon`.
+    pub no_daemon: bool,
+    /// `--node <ssh-host>`.
+    pub node: Option<String>,
+    /// `--node-vault <path>`.
+    pub node_vault: Option<String>,
+    /// `--node-dir <dir>`.
+    pub node_dir: Option<String>,
+}
+
+impl DaemonFlags {
+    /// The place the flags name, without asking: this machine unless they say otherwise.
+    /// `--node` needs `--node-vault` here, since nothing can be prompted for.
+    pub fn resolve(self) -> Result<DaemonHost, RestaskError> {
+        match (self.node, self.no_daemon) {
+            (Some(host), _) => Ok(DaemonHost::Node(NodeTarget {
+                host,
+                vault: self.node_vault.ok_or_else(|| RestaskError::Validation {
+                    field: "node-vault",
+                    reason: "--node needs --node-vault: the vault's folder on that machine"
+                        .to_string(),
+                })?,
+                dir: self.node_dir.unwrap_or_else(|| NODE_DIR.to_string()),
+            })),
+            (None, true) => Ok(DaemonHost::Elsewhere),
+            (None, false) => Ok(DaemonHost::Here),
+        }
+    }
+
+    /// [`DaemonFlags::resolve`] for the interactive wizard: with no flag it asks whether
+    /// an always-on server holds the vault, and for the vault's folder there.
+    fn ask(self) -> Result<DaemonHost, RestaskError> {
+        if self.no_daemon && self.node.is_none() {
+            return Ok(DaemonHost::Elsewhere);
+        }
+        let host = match self.node {
+            Some(host) => host,
+            None => {
+                println!(
+                    "\nOne machine that is always on keeps the vault and the server in sync. \
+                     If a server holds a copy of this vault (through the file sync), restask \
+                     is installed there now, over ssh, with the credentials above."
+                );
+                crate::tui::prompt("ssh host of that server (Enter: this computer does it):")?
+            }
+        };
+        if host.is_empty() {
+            return Ok(DaemonHost::Here);
+        }
+        let vault = match self.node_vault {
+            Some(vault) => vault,
+            None => loop {
+                let typed = crate::tui::prompt(&format!("Vault folder on {host}:"))?;
+                if !typed.is_empty() {
+                    break typed;
+                }
+            },
+        };
+        Ok(DaemonHost::Node(NodeTarget {
+            host,
+            vault,
+            dir: self.node_dir.unwrap_or_else(|| NODE_DIR.to_string()),
+        }))
+    }
+}
+
+/// A password in memory. It is never printed: `Debug` shows a placeholder (§17).
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    /// Wraps `password`.
+    pub fn new(password: impl Into<String>) -> Self {
+        Self(password.into())
+    }
+
+    /// The password itself, for the one place that must send it on.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(…)")
+    }
+}
+
+/// What the daemon on a node is given to reach the server ([`DaemonInstaller::install_node`]).
+#[derive(Debug, Clone, Copy)]
+pub struct NodeAccess<'a> {
+    /// CalDAV base URL, as the node reaches it.
+    pub url: &'a str,
+    /// CalDAV user name.
+    pub username: &'a str,
+    /// CalDAV password.
+    pub password: &'a Secret,
 }
 
 /// Non-interactive setup inputs (§13.2 flags). Exactly one of `password_env` /
@@ -58,12 +192,25 @@ pub struct SetupArgs {
     /// collection is created up front with `name` as its display name. Routing itself
     /// is declared in the notes (§5), never here.
     pub collections: Vec<(String, String)>,
+    /// Join a vault that is already set up (§13.2 *Joining*, see [`joins`]): only this
+    /// machine is configured, nothing in the vault is created or replaced.
+    pub join: bool,
+    /// Which machine runs the vault's daemon (§1.1, §13.2 step 6). Anything but
+    /// [`DaemonHost::Here`] makes this an editing machine: no unit, and no credentials
+    /// in its machine config.
+    pub daemon: DaemonHost,
+    /// The password itself, for [`DaemonHost::Node`] only: it is handed to the node's
+    /// daemon and recorded nowhere on this machine.
+    pub password: Option<Secret>,
 }
 
 impl SetupArgs {
-    /// Validates the §13.2 non-interactive flags (`--url`, `--username`, `--password-env`
-    /// are all required when `--non-interactive` is set). A binding named `inbox`
-    /// (case-insensitive) is lifted into [`SetupArgs::inbox_collection`].
+    /// Validates the §13.2 non-interactive flags (`--url` and `--username` are required
+    /// when `--non-interactive` is set; the password is the caller's to obtain, from
+    /// `--password-env` or `--password-stdin`). A binding named `inbox`
+    /// (case-insensitive) is lifted into [`SetupArgs::inbox_collection`]. A join takes no
+    /// bindings: the vault it joins already names its lists. The daemon is placed on this
+    /// machine; the caller sets [`SetupArgs::daemon`] for anything else.
     pub fn from_flags(
         vault: PathBuf,
         config_path: PathBuf,
@@ -71,7 +218,16 @@ impl SetupArgs {
         username: Option<String>,
         password_env: Option<String>,
         mut collections: Vec<(String, String)>,
+        join: bool,
     ) -> Result<Self, RestaskError> {
+        if join && !collections.is_empty() {
+            return Err(RestaskError::Validation {
+                field: "collection",
+                reason: "--collection has no meaning when joining a vault that is already \
+                         set up: its restask.toml and notes name the lists"
+                    .to_string(),
+            });
+        }
         let missing = |flag: &str| RestaskError::Validation {
             field: "setup",
             reason: format!("--{flag} is required with --non-interactive"),
@@ -85,12 +241,51 @@ impl SetupArgs {
             config_path,
             url: url.ok_or_else(|| missing("url"))?,
             username: username.ok_or_else(|| missing("username"))?,
-            password_env: Some(password_env.ok_or_else(|| missing("password-env"))?),
+            password_env,
             password_file: None,
             inbox_collection,
             collections,
+            join,
+            daemon: DaemonHost::Here,
+            password: None,
         })
     }
+}
+
+/// Whether this setup run joins the vault instead of setting it up (§13.2 *Joining*):
+/// asked for with `--join`, or decided by what is there — the vault is already set up and
+/// this machine has no config yet, which is a second machine receiving the vault through
+/// the file sync. Setting such a vault up again would replace its TODO.md on every device.
+///
+/// `--join` on a vault that is not set up is an error rather than a fresh setup: on a
+/// machine the file sync has not reached yet, a fresh setup would write files that then
+/// collide with the ones arriving.
+pub fn joins(vault: &Path, config_path: &Path, requested: bool) -> Result<bool, RestaskError> {
+    let set_up = vault_is_set_up(vault)?;
+    if requested && !set_up {
+        return Err(RestaskError::Validation {
+            field: "join",
+            reason: format!(
+                "{} is not set up yet (no restask.toml, or its inbox file is not a restask \
+                 view). If the file sync is still delivering the vault, wait for it; to set \
+                 the vault up here, run `restask setup` without --join",
+                vault.display()
+            ),
+        });
+    }
+    Ok(requested || (set_up && !config_path.is_file()))
+}
+
+/// Whether some restask already set `vault` up: it has a `restask.toml`, and the inbox
+/// file that config names is a view restask rendered.
+fn vault_is_set_up(vault: &Path) -> Result<bool, RestaskError> {
+    let config_path = vault.join("restask.toml");
+    if !config_path.is_file() {
+        return Ok(false);
+    }
+    let cfg =
+        VaultConfig::load(&config_path).map_err(|error| config_error(&config_path, &error))?;
+    Ok(std::fs::read_to_string(vault.join(&cfg.inbox_file)).is_ok_and(|inbox| is_view(&inbox)))
 }
 
 /// What one setup run did (§13.2 step 7 summary inputs).
@@ -100,6 +295,8 @@ pub struct SetupSummary {
     pub vault: PathBuf,
     /// Machine config written.
     pub config_path: PathBuf,
+    /// `true` when the run joined a vault that was already set up (§13.2 *Joining*).
+    pub joined: bool,
     /// Backup file name, when a pre-existing TODO.md was renamed aside (every run that
     /// finds one creates one).
     pub backup: Option<String>,
@@ -108,31 +305,49 @@ pub struct SetupSummary {
     /// Human note about the Obsidian plugin install (§13.2 step 1); `None` when it failed
     /// (a warning was logged).
     pub plugin: Option<String>,
-    /// Human note about the daemon unit install (§13.2 step 6), when one was enabled.
+    /// Human note about the daemon (§13.2 step 6): the unit that was enabled, the node
+    /// it runs on, or that it is installed by hand elsewhere. `None` when the environment
+    /// cannot host a unit or its install failed.
     pub daemon: Option<String>,
-    /// The first full reconcile's report.
+    /// Whether this run made a first sync from this machine. A machine that joins a vault
+    /// whose daemon runs elsewhere does not: the pass is the sync node's.
+    pub synced: bool,
+    /// The first full reconcile's report (all zero when [`SetupSummary::synced`] is not).
     pub report: ReconcileReport,
 }
 
 /// Executes the non-interactive setup plan (§13.2): scaffold the vault and install the
 /// Obsidian plugin in it, recreate TODO.md (renaming any existing file to the backup), record the machine config, ensure the
-/// inbox collection exists, run the first full reconcile, and install the daemon unit
-/// via `installer` (pass `None` to skip — hermetic tests).
+/// inbox collection exists, run the first full reconcile, and install the daemon where
+/// [`SetupArgs::daemon`] says, via `installer` (pass `None` to skip — hermetic tests).
+/// With [`SetupArgs::join`] the vault steps are skipped: machine config, first reconcile
+/// and daemon only.
 pub async fn run_setup<C: CaldavPort>(
     args: SetupArgs,
     caldav: C,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
 ) -> Result<SetupSummary, RestaskError> {
-    prepare_and_sync(args, caldav, clock, installer).await
+    if args.join {
+        join_and_sync(args, caldav, clock, installer).await
+    } else {
+        prepare_and_sync(args, caldav, clock, installer).await
+    }
 }
 
 /// Interactive setup (§13.2): prompts for every step, verifies credentials with a
 /// `PROPFIND` (401 re-prompts up to 3 tries), stores the password only in the
 /// machine-local `radicale.passwd` (0600, §17), then shares the non-interactive plan.
+/// With `join` (see [`joins`]) the vault already names the calendar TODO.md is bound to.
+/// Last it asks which machine runs the daemon, unless `daemon` says so
+/// ([`DaemonFlags`]): the password typed once goes to this machine's password file when
+/// the daemon runs here, and to the node — and nowhere on this machine — when it runs
+/// there.
 pub async fn run_interactive(
     vault: PathBuf,
     config_path: PathBuf,
+    join: bool,
+    daemon: DaemonFlags,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
 ) -> Result<(), RestaskError> {
@@ -142,6 +357,13 @@ pub async fn run_interactive(
             field: "vault",
             reason: "setup cancelled".to_string(),
         });
+    }
+    if join {
+        println!(
+            "{} is already set up for restask: connecting this machine to it. Nothing in \
+             the vault is replaced.",
+            vault.display()
+        );
     }
 
     let url = crate::tui::prompt("CalDAV URL (e.g. http://radicale.local:5232):")?;
@@ -166,13 +388,25 @@ pub async fn run_interactive(
         }
     };
 
-    let dir = config_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    std::fs::create_dir_all(&dir)?;
-    let passwd = dir.join("radicale.passwd");
-    write_secret(&passwd, &password)?;
+    if join {
+        let daemon = daemon.ask()?;
+        let args = SetupArgs {
+            vault,
+            password_file: keep_password(&config_path, &daemon, &password)?,
+            config_path,
+            url,
+            username,
+            password_env: None,
+            inbox_collection: None,
+            collections: Vec::new(),
+            join: true,
+            daemon,
+            password: Some(Secret::new(password)),
+        };
+        let summary = join_and_sync(args, client, clock, installer).await?;
+        print_summary(&summary);
+        return Ok(());
+    }
 
     // Step 4 (§13.2): the one required binding — TODO.md (the inbox) is bound to a
     // calendar chosen by name from the server's list. Other lists are declared by hand
@@ -199,15 +433,19 @@ pub async fn run_interactive(
         }
     };
 
+    let daemon = daemon.ask()?;
     let args = SetupArgs {
         vault,
-        config_path: config_path.clone(),
+        password_file: keep_password(&config_path, &daemon, &password)?,
+        config_path,
         url,
         username,
         password_env: None,
-        password_file: Some(passwd),
         inbox_collection: Some(inbox),
         collections: Vec::new(),
+        join: false,
+        daemon,
+        password: Some(Secret::new(password)),
     };
     let summary = prepare_and_sync(args, client, clock, installer).await?;
     print_summary(&summary);
@@ -236,6 +474,11 @@ async fn prepare_and_sync<C: CaldavPort>(
     installer: Option<&dyn DaemonInstaller>,
 ) -> Result<SetupSummary, RestaskError> {
     let vault = args.vault.clone();
+
+    // A node is looked at before anything is written here: a setup that cannot place
+    // its daemon leaves the vault as it found it. The daemon already running there is
+    // stopped, so this machine's first sync is the only pass while the vault changes.
+    prepare_node(installer, &args)?;
 
     // Step 1 — vault: §14-default restask.toml when missing, plus `.restask/`.
     let config_path = vault.join("restask.toml");
@@ -297,18 +540,7 @@ async fn prepare_and_sync<C: CaldavPort>(
 
     // Steps 3–4 — machine config (endpoint + secret reference, never the secret); the
     // inbox collection and any requested ones exist before the first sync.
-    let machine = MachineConfig {
-        vault: VaultSection {
-            path: Some(vault.clone()),
-        },
-        caldav: CaldavConfig {
-            url: Some(args.url.clone()),
-            username: Some(args.username.clone()),
-            password_env: args.password_env.clone(),
-            password_file: args.password_file.clone(),
-            ..CaldavConfig::default()
-        },
-    };
+    let machine = machine_config(&args);
     let mut collections = Vec::new();
     if let Some(inbox_collection) = &args.inbox_collection {
         let slug = ListSlug::from_name(inbox_collection)?;
@@ -322,26 +554,226 @@ async fn prepare_and_sync<C: CaldavPort>(
         caldav.ensure_collection(&slug, name).await?;
         collections.push(slug.as_str().to_string());
     }
-    machine
-        .save(&args.config_path)
-        .map_err(|error| config_error(&args.config_path, &error))?;
+    if args.daemon == DaemonHost::Here {
+        save_machine(&machine, &args.config_path)?;
+    }
 
     // Step 5 — first sync: registers fresh lines, pulls tasks from the bound calendar.
-    let engine = Engine::new(&vault, cfg, machine, caldav, clock);
+    // It is made from here also when the daemon runs elsewhere: the vault leaves this
+    // machine converged, and the node's daemon finds nothing to do in it.
+    let engine = Engine::new(&vault, cfg, machine.clone(), caldav, clock);
     let report = engine.reconcile().await?;
 
-    // Step 6 — daemon (§13.2): install/refresh the systemd user unit so this vault keeps
-    // syncing without manual steps. A failed install is a warning — the sync already
-    // happened and `restask doctor` diagnoses the environment.
-    let daemon = install_daemon(installer, &vault);
+    // Step 6 — daemon (§13.2), so the vault keeps syncing without manual steps.
+    let daemon = place_daemon(installer, &machine, &args)?;
 
     Ok(SetupSummary {
         vault,
         config_path: args.config_path,
+        joined: false,
         backup,
         collections,
         plugin,
         daemon,
+        synced: true,
+        report,
+    })
+}
+
+/// Step 6 of both setup bodies: puts the daemon where [`SetupArgs::daemon`] says and, on
+/// a machine that only edits, records that in the machine config.
+///
+/// On this machine a failed unit install is a warning — the sync already happened and
+/// `restask doctor` diagnoses the environment. On a node a failure is the run's error:
+/// without the daemon nothing syncs the vault. The machine config of an editing machine
+/// is written only after the daemon is in place, so a run that failed is repeated, not
+/// taken for done.
+fn place_daemon(
+    installer: Option<&dyn DaemonInstaller>,
+    machine: &MachineConfig,
+    args: &SetupArgs,
+) -> Result<Option<String>, RestaskError> {
+    let note = match &args.daemon {
+        DaemonHost::Here => return Ok(install_daemon(installer, &args.vault)),
+        DaemonHost::Node(node) => match installer {
+            Some(installer) => {
+                let access = NodeAccess {
+                    url: &args.url,
+                    username: &args.username,
+                    password: args.password.as_ref().ok_or(RestaskError::Validation {
+                        field: "node",
+                        reason: "no password to hand to the node's daemon".to_string(),
+                    })?,
+                };
+                Some(
+                    installer
+                        .install_node(node, &args.vault, access)
+                        .map_err(|error| node_error(node, &error))?,
+                )
+            }
+            None => None,
+        },
+        DaemonHost::Elsewhere => Some(
+            "daemon: not installed here (--no-daemon). Install it on the always-on machine \
+             with `restask setup --join` in its copy of the vault; a unit from an earlier \
+             setup keeps running here until `systemctl --user disable --now restask`"
+                .to_string(),
+        ),
+    };
+    save_machine(machine, &args.config_path)?;
+    forget_password(&args.config_path)?;
+    Ok(note)
+}
+
+/// Runs [`DaemonInstaller::prepare_node`] when the daemon goes to a node. A URL that
+/// names this machine itself is refused first: the node could not reach it.
+fn prepare_node(
+    installer: Option<&dyn DaemonInstaller>,
+    args: &SetupArgs,
+) -> Result<(), RestaskError> {
+    let DaemonHost::Node(node) = &args.daemon else {
+        return Ok(());
+    };
+    if is_loopback(&args.url) {
+        return Err(RestaskError::Validation {
+            field: "url",
+            reason: format!(
+                "{} is this machine itself; the daemon on {} needs the address the server \
+                 has on the network (e.g. http://192.168.1.10:5232)",
+                args.url, node.host
+            ),
+        });
+    }
+    match installer {
+        Some(installer) => installer.prepare_node(node),
+        None => Ok(()),
+    }
+}
+
+/// Whether `url` names the local machine (`localhost`, `127.x.x.x`, `[::1]`).
+pub fn is_loopback(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost") || host.starts_with("127.") || host == "::1"
+}
+
+/// The error of a node install that failed, with the way to finish it: the vault is set
+/// up by then, so the same command with `--join` installs the daemon and nothing else.
+fn node_error(node: &NodeTarget, error: &RestaskError) -> RestaskError {
+    RestaskError::Validation {
+        field: "node",
+        reason: format!(
+            "the daemon is not running on {host} yet: {error}. Nothing syncs the vault \
+             until it does. When the cause is fixed, finish with `restask setup --join \
+             --node {host} --node-vault \"{vault}\" --node-dir \"{dir}\"`",
+            host = node.host,
+            vault = node.vault,
+            dir = node.dir,
+        ),
+    }
+}
+
+/// Writes the machine config (0600).
+fn save_machine(machine: &MachineConfig, path: &Path) -> Result<(), RestaskError> {
+    machine
+        .save(path)
+        .map_err(|error| config_error(path, &error))
+}
+
+/// The machine config a setup run records. On the sync node: this vault, the endpoint,
+/// and where the password is found — never the password (§17). On a machine that only
+/// edits: this vault and where its daemon is, with no way to reach the server (§14.2).
+fn machine_config(args: &SetupArgs) -> MachineConfig {
+    let vault = VaultSection {
+        path: Some(args.vault.clone()),
+    };
+    let node = |target: Option<&NodeTarget>| NodeSection {
+        host: target.map(|node| node.host.clone()),
+        dir: target.map(|node| node.dir.clone()),
+        vault: target.map(|node| node.vault.clone()),
+        url: Some(args.url.clone()),
+        username: Some(args.username.clone()),
+    };
+    match &args.daemon {
+        DaemonHost::Here => MachineConfig {
+            vault,
+            caldav: CaldavConfig {
+                url: Some(args.url.clone()),
+                username: Some(args.username.clone()),
+                password_env: args.password_env.clone(),
+                password_file: args.password_file.clone(),
+                ..CaldavConfig::default()
+            },
+            node: None,
+        },
+        DaemonHost::Node(target) => MachineConfig {
+            vault,
+            caldav: CaldavConfig::default(),
+            node: Some(node(Some(target))),
+        },
+        DaemonHost::Elsewhere => MachineConfig {
+            vault,
+            caldav: CaldavConfig::default(),
+            node: Some(node(None)),
+        },
+    }
+}
+
+/// Setup body for a vault that is already set up (§13.2 *Joining*): the machine-local
+/// half only. The vault is handed to the engine as it is — no scaffold, no fresh TODO.md,
+/// no plugin install, no collection created by hand — so nothing here reaches the other
+/// devices except what an ordinary pass does.
+///
+/// A machine that joins as the sync node makes the first sync. One that joins a vault
+/// whose daemon runs elsewhere makes none — the pass is the node's, and a second machine
+/// passing over its own copy would race the file sync (§1.1): it proves the credentials,
+/// has the daemon installed on the node when asked to, and records where it is.
+///
+/// The machine config is written last. A join that fails (server unreachable, wrong
+/// credentials, a vault the pass refuses) leaves the machine without one, so running
+/// setup again joins again instead of setting the vault up afresh.
+async fn join_and_sync<C: CaldavPort>(
+    args: SetupArgs,
+    caldav: C,
+    clock: Arc<dyn Clock>,
+    installer: Option<&dyn DaemonInstaller>,
+) -> Result<SetupSummary, RestaskError> {
+    let vault = args.vault.clone();
+    let config_path = vault.join("restask.toml");
+    let cfg =
+        VaultConfig::load(&config_path).map_err(|error| config_error(&config_path, &error))?;
+    let machine = machine_config(&args);
+    prepare_node(installer, &args)?;
+
+    // Endpoint and credentials are proven before anything is recorded.
+    caldav.list_collections().await?;
+    let synced = args.daemon == DaemonHost::Here;
+    let report = if synced {
+        let engine = Engine::new(&vault, cfg, machine.clone(), caldav, clock);
+        let report = engine.reconcile().await?;
+        save_machine(&machine, &args.config_path)?;
+        report
+    } else {
+        ReconcileReport::default()
+    };
+    let daemon = place_daemon(installer, &machine, &args)?;
+
+    Ok(SetupSummary {
+        vault,
+        config_path: args.config_path,
+        joined: true,
+        backup: None,
+        collections: Vec::new(),
+        plugin: None,
+        daemon,
+        synced,
         report,
     })
 }
@@ -464,24 +896,92 @@ fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
-/// Installs the machine-local systemd user unit (§13.2 step 6) that keeps
-/// `restask daemon` running on this vault after setup. A port so tests record instead of
-/// touching the host's systemd session.
+/// Installs the vault's daemon (§13.2 step 6): the machine-local systemd user unit that
+/// keeps `restask daemon` running on this vault, or the daemon on an always-on server.
+/// A port so tests record instead of touching the host's systemd session or the network.
 pub trait DaemonInstaller {
     /// Writes and enables the unit. `Ok(None)` means this environment cannot host a user
     /// unit (no systemd session) — setup continues without one.
     ///
     /// `vault` is the folder the unit points at; `exec` is the `restask` binary to run.
     fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError>;
+
+    /// Checks that `node` can run the daemon — it is reachable, has what the install
+    /// needs, holds the vault's folder — and stops a daemon already running there. Called
+    /// before setup writes anything, so that no other pass runs while it does.
+    fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
+        Err(no_node_support(node))
+    }
+
+    /// Installs and starts the daemon on `node`, configured with `access`, once the file
+    /// sync has delivered `vault` (this machine's copy) there unchanged. Returns the
+    /// summary note.
+    fn install_node(
+        &self,
+        node: &NodeTarget,
+        vault: &Path,
+        access: NodeAccess<'_>,
+    ) -> Result<String, RestaskError> {
+        let _ = (vault, access);
+        Err(no_node_support(node))
+    }
 }
 
-/// Real [`DaemonInstaller`]: writes `restask.service` into
+/// The answer of an installer that reaches no other machine.
+fn no_node_support(node: &NodeTarget) -> RestaskError {
+    RestaskError::Validation {
+        field: "node",
+        reason: format!("this installer cannot install on {}", node.host),
+    }
+}
+
+/// Real [`DaemonInstaller`]. On this machine: writes `restask.service` into
 /// `$XDG_CONFIG_HOME/systemd/user/`, runs `systemctl --user daemon-reload`,
 /// `systemctl --user enable --now restask.service`, and enables linger so the unit
-/// survives logout. Re-running setup overwrites the unit (idempotent refresh).
-pub struct SystemdInstaller;
+/// survives logout; re-running setup overwrites the unit (idempotent refresh). On a
+/// node: runs `contrib/node.sh` of the restask sources ([`node_script`]), which drives
+/// the server over ssh (App. E).
+pub struct SystemInstaller;
 
-impl DaemonInstaller for SystemdInstaller {
+impl DaemonInstaller for SystemInstaller {
+    fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
+        let script = node_script()?;
+        println!("checking {} …", node.host);
+        run_script(
+            &script,
+            &["check", &node.host, &node.vault, &node.dir],
+            None,
+        )
+    }
+
+    fn install_node(
+        &self,
+        node: &NodeTarget,
+        vault: &Path,
+        access: NodeAccess<'_>,
+    ) -> Result<String, RestaskError> {
+        let script = node_script()?;
+        let vault = vault.display().to_string();
+        // The script reads the three values from its standard input, one per line: the
+        // password is in no argument list and no file.
+        let input = format!(
+            "{}\n{}\n{}\n",
+            access.url,
+            access.username,
+            access.password.expose()
+        );
+        run_script(
+            &script,
+            &["install", &node.host, &node.vault, &node.dir, &vault],
+            Some(&input),
+        )?;
+        Ok(format!(
+            "daemon: running on {} (stack {}, vault {}); this computer runs none and \
+             keeps no password",
+            node.host, node.dir, node.vault
+        ))
+    }
+
     fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError> {
         if !systemd_user_available() {
             return Ok(None);
@@ -545,8 +1045,9 @@ fn xdg_config_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".config"))
 }
 
-/// Best-effort daemon-unit install (§13.2 step 6): no installer, an unresolvable binary
-/// or an installer error all degrade to a warning — never fail the setup run.
+/// Best-effort daemon-unit install on this machine (§13.2 step 6): no installer, an
+/// unresolvable binary or an installer error all degrade to a warning — never fail the
+/// setup run.
 fn install_daemon(installer: Option<&dyn DaemonInstaller>, vault: &Path) -> Option<String> {
     let installer = installer?;
     let exec = match std::env::current_exe() {
@@ -575,6 +1076,101 @@ fn run(program: &str, args: &[&str]) -> Result<(), RestaskError> {
     }
 }
 
+/// `contrib/node.sh` of the restask sources: the script that installs the daemon on a
+/// node, and the tree it builds the daemon from there (a node has its own architecture,
+/// so this machine's binary is of no use to it). The sources are the ones named by
+/// `RESTASK_SOURCE`, else the clone this binary was built from.
+pub fn node_script() -> Result<PathBuf, RestaskError> {
+    let source = std::env::var_os("RESTASK_SOURCE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    let script = source.join("contrib").join("node.sh");
+    if script.is_file() {
+        Ok(script)
+    } else {
+        Err(RestaskError::Validation {
+            field: "node",
+            reason: format!(
+                "the restask sources are needed to build the daemon on the server, and {} \
+                 is not there: set RESTASK_SOURCE to a clone of the repository",
+                script.display()
+            ),
+        })
+    }
+}
+
+/// Runs `contrib/node.sh` with `args`, its output going to the terminal, `input` to its
+/// standard input.
+fn run_script(script: &Path, args: &[&str], input: Option<&str>) -> Result<(), RestaskError> {
+    use std::io::Write as _;
+    let mut child = Command::new("bash")
+        .arg(script)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(input.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "{} {} failed: {status}",
+            script.display(),
+            args.first().copied().unwrap_or_default()
+        ))
+        .into())
+    }
+}
+
+/// The machine's password file: `radicale.passwd` beside the machine config.
+fn password_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("radicale.passwd")
+}
+
+/// Stores `password` in the machine's password file (0600, §17) and returns its path:
+/// what the sync node's daemon reads it from.
+pub fn store_password(config_path: &Path, password: &str) -> Result<PathBuf, RestaskError> {
+    let path = password_path(config_path);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_secret(&path, password)?;
+    Ok(path)
+}
+
+/// [`store_password`] when this machine runs the daemon; a machine that only edits
+/// stores nothing.
+fn keep_password(
+    config_path: &Path,
+    daemon: &DaemonHost,
+    password: &str,
+) -> Result<Option<PathBuf>, RestaskError> {
+    match daemon {
+        DaemonHost::Here => store_password(config_path, password).map(Some),
+        DaemonHost::Node(_) | DaemonHost::Elsewhere => Ok(None),
+    }
+}
+
+/// Removes the password file an earlier setup left on a machine that now only edits: its
+/// config no longer names it, and a secret nothing reads should not stay on disk (§17).
+fn forget_password(config_path: &Path) -> Result<(), RestaskError> {
+    match std::fs::remove_file(password_path(config_path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Writes the password to `path` with mode 0600 on Unix (§17).
 fn write_secret(path: &Path, password: &str) -> Result<(), RestaskError> {
     #[cfg(unix)]
@@ -599,15 +1195,25 @@ fn write_secret(path: &Path, password: &str) -> Result<(), RestaskError> {
 
 /// Prints the §13.2 step-7 summary (backup, config, client wiring, next steps) to stdout.
 pub fn print_summary(summary: &SetupSummary) {
+    if summary.joined {
+        println!(
+            "joined the vault at {} (already set up; nothing in it was replaced)",
+            summary.vault.display()
+        );
+    }
     if let Some(backup) = &summary.backup {
         println!("renamed existing TODO.md to {backup}");
     }
     println!("machine config: {}", summary.config_path.display());
-    println!("collections: {}", summary.collections.join(", "));
-    println!(
-        "first sync: scanned {} registered {} pushed {}",
-        summary.report.scanned_files, summary.report.registered, summary.report.pushes
-    );
+    if !summary.collections.is_empty() {
+        println!("collections: {}", summary.collections.join(", "));
+    }
+    if summary.synced {
+        println!(
+            "first sync: scanned {} registered {} pushed {}",
+            summary.report.scanned_files, summary.report.registered, summary.report.pushes
+        );
+    }
     if let Some(note) = &summary.plugin {
         println!("{note}");
     }

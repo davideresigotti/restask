@@ -28,6 +28,9 @@ const DATE_FIELD_SUGGESTIONS: readonly Suggestion[] = [
 	{ keyword: "start", insert: "🛫 " },
 	{ keyword: "scheduled", insert: "⏳ " },
 	{ keyword: "repeat", insert: "🔁 every " },
+	// Bare: the date is written when the line is settled — today for a new task, the
+	// server's creation date for one that exists (§6.4).
+	{ keyword: "created", insert: "➕" },
 ];
 
 /** Suggestion threshold: nothing matches until ≥ 2 letters are typed (§15.2). */

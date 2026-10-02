@@ -15,9 +15,28 @@ const PRODID: &str = "-//restask//restask 0.1.0//EN";
 /// Maximum octets per physical line before folding (§8.1).
 const FOLD_LIMIT: usize = 75;
 
+/// The names a task goes by on the server where they are not restask UIDs (§8.1). A
+/// task another client created stays that client's resource: it keeps the `UID` it was
+/// given, and a relation to it is written with that `UID`, so the client that owns the
+/// task still finds it — and its subtasks — after restask wrote to it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WireNames {
+    /// The `UID` to write instead of the task's own; the task's UID then travels as
+    /// `X-RESTASK-UID`.
+    pub uid: Option<String>,
+    /// The `UID` the parent goes by on the server, when it is not the parent's own.
+    pub parent: Option<String>,
+}
+
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1) with no foreign content.
 pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
     to_vcalendar_with(task, now_utc, &[])
+}
+
+/// Serializes a task under its own UID, with the unmanaged content `extras` of the
+/// resource being replaced: [`to_vcalendar_as`] with no other names.
+pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> String {
+    to_vcalendar_as(task, now_utc, extras, &WireNames::default())
 }
 
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1), terminated by CRLF.
@@ -31,13 +50,23 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String {
 /// before `END:VTODO`, so descriptions, reminders, recurrence rules and other clients'
 /// properties survive a push. A `DURATION` extra is dropped when a `DUE` is written (RFC
 /// 5545 forbids both).
-pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> String {
+///
+/// `wire` names the task and its parent as the server knows them: with `wire.uid` the
+/// `UID` is that one and `X-RESTASK-UID` carries the task's own (after
+/// `X-RESTASK-SOURCE`).
+pub fn to_vcalendar_as(
+    task: &Task,
+    now_utc: DateTime<Utc>,
+    extras: &[String],
+    wire: &WireNames,
+) -> String {
     let mut out = String::with_capacity(512);
     push_line(&mut out, "BEGIN:VCALENDAR");
     push_line(&mut out, "VERSION:2.0");
     push_line(&mut out, &format!("PRODID:{PRODID}"));
     push_line(&mut out, "BEGIN:VTODO");
-    push_line(&mut out, &format!("UID:{}", task.uid.as_str()));
+    let uid = wire.uid.as_deref().unwrap_or(task.uid.as_str());
+    push_line(&mut out, &format!("UID:{uid}"));
     let now = format_utc_instant(now_utc);
     push_line(&mut out, &format!("DTSTAMP:{now}"));
     if let Some(day) = task.created {
@@ -70,10 +99,8 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
         push_line(&mut out, &format!("RRULE:{}", rule.to_rrule()));
     }
     if let Some(parent) = &task.parent {
-        push_line(
-            &mut out,
-            &format!("RELATED-TO;RELTYPE=PARENT:{}", parent.as_str()),
-        );
+        let parent = wire.parent.as_deref().unwrap_or(parent.as_str());
+        push_line(&mut out, &format!("RELATED-TO;RELTYPE=PARENT:{parent}"));
     }
     if let Some(scheduled) = task.scheduled {
         push_line(&mut out, &when_property("X-RESTASK-SCHEDULED", scheduled));
@@ -85,6 +112,9 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
             escape_text(&task.source.path)
         ),
     );
+    if wire.uid.is_some() {
+        push_line(&mut out, &format!("X-RESTASK-UID:{}", task.uid.as_str()));
+    }
     let mut nested = 0usize;
     for extra in extras {
         let upper = extra.to_ascii_uppercase();

@@ -7,7 +7,7 @@ use restask::domain::dates::{LocalDate, When};
 use restask::domain::priority::Priority;
 use restask::domain::task::{ListSlug, SourceRef, Status, Task};
 use restask::domain::uid::TaskUid;
-use restask::vtodo::{from_vcalendar, to_vcalendar, to_vcalendar_with};
+use restask::vtodo::{from_vcalendar, to_vcalendar, to_vcalendar_as, to_vcalendar_with, WireNames};
 use restask::RestaskError;
 
 /// Byte-exact golden contract (App. A) — every line CRLF-terminated.
@@ -648,4 +648,59 @@ fn legacy_x_properties_and_uid_prefix_still_parse() {
         remote.task.scheduled,
         Some(When::Date(LocalDate::parse("2026-09-23").unwrap()))
     );
+}
+
+// ── a task another client created keeps its UID (§8.1, §11 R5) ────────────────────────
+
+#[test]
+fn a_task_of_another_client_is_written_under_the_uid_it_was_given() {
+    let remote = from_vcalendar(FOREIGN, &tz_cet(), &list()).unwrap();
+    assert_eq!(remote.adopted_as, None);
+    let mut task = remote.task.clone();
+    task.uid = TaskUid::derived(&remote.raw_uid, remote.created_at);
+    task.parent = Some(TaskUid::derived("parent@tasks.org", None));
+    task.source.path = "TODO.md".to_string();
+    let wire = WireNames {
+        uid: Some(remote.raw_uid.clone()),
+        parent: Some("parent@tasks.org".to_string()),
+    };
+    let out = to_vcalendar_as(&task, now(), &remote.extras, &wire);
+    assert!(
+        out.contains("BEGIN:VTODO\r\nUID:5417861935824551742\r\n"),
+        "{out}"
+    );
+    assert!(out.contains("RELATED-TO;RELTYPE=PARENT:parent@tasks.org\r\n"));
+    assert!(out.contains(&format!(
+        "X-RESTASK-SOURCE;VALUE=TEXT:TODO.md\r\nX-RESTASK-UID:{}\r\n",
+        task.uid.as_str()
+    )));
+    assert_eq!(out.matches("\r\nUID:").count(), 1);
+
+    // Read back: still the other client's resource, now saying which task it is; the
+    // property is restask's own and never becomes an extra.
+    let back = from_vcalendar(&out, &tz_cet(), &list()).unwrap();
+    assert!(!back.managed);
+    assert_eq!(back.raw_uid, "5417861935824551742");
+    assert_eq!(back.adopted_as, Some(task.uid.clone()));
+    assert_eq!(back.parent_raw.as_deref(), Some("parent@tasks.org"));
+    assert_eq!(back.extras, remote.extras);
+    assert!(task.uid.adopts(&back.raw_uid));
+
+    // A task of restask's own is written as before.
+    assert_eq!(
+        to_vcalendar_as(&golden_task(), now(), &[], &WireNames::default()),
+        GOLDEN
+    );
+    assert_eq!(to_vcalendar_with(&golden_task(), now(), &[]), GOLDEN);
+}
+
+#[test]
+fn a_malformed_link_property_is_no_link() {
+    let body = FOREIGN.replace("END:VTODO", "X-RESTASK-UID:not-a-uid\r\nEND:VTODO");
+    let remote = from_vcalendar(&body, &tz_cet(), &list()).unwrap();
+    assert_eq!(remote.adopted_as, None);
+    assert!(!remote
+        .extras
+        .iter()
+        .any(|line| line.contains("X-RESTASK-UID")));
 }

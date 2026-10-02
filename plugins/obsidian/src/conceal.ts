@@ -12,7 +12,7 @@ import { bodyStart, uidSpan } from "./markdown";
 export interface UidToken {
 	/** Where the line's body starts (right after the checkbox). */
 	bodyStart: number;
-	/** Start of the hidden range: the token and the blanks before it. */
+	/** Start of the hidden range: the token and the one blank before it. */
 	start: number;
 	/** End of the hidden range: the end of the UID. */
 	end: number;
@@ -25,17 +25,21 @@ function blanksBefore(text: string, at: number, floor: number): number {
 }
 
 /**
- * The token that gives a task line its UID, with the blanks in front of it, or undefined
- * when the line is not a task or carries no valid UID. A token on any other line, a
- * malformed one, and a second one on the same line are not hidden: they are not a task's
- * identity, and the user should see them.
+ * The token that gives a task line its UID, with the blank in front of it, or undefined
+ * when the line is not a task or carries no valid UID. One blank only — the separator
+ * registration writes: were every blank hidden, a blank typed at the visible end of the
+ * line would vanish into the range and take the cursor with it. A token on any other
+ * line, a malformed one, and a second one on the same line are not hidden: they are not
+ * a task's identity, and the user should see them.
  */
 export function uidToken(line: string): UidToken | undefined {
 	const body = bodyStart(line);
 	if (body === undefined) return undefined;
 	const span = uidSpan(line.slice(body));
 	if (span === undefined) return undefined;
-	return { bodyStart: body, start: blanksBefore(line, body + span.start, body), end: body + span.end };
+	const at = body + span.start;
+	const blank = at > body && (line[at - 1] === " " || line[at - 1] === "\t");
+	return { bodyStart: body, start: blank ? at - 1 : at, end: body + span.end };
 }
 
 /** `text` — the rendered text of a task item — without its UID token (reading view). */

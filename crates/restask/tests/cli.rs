@@ -401,6 +401,38 @@ async fn lists_and_local_commands_need_no_server() {
     assert!(todo.contains("- [ ] captured offline"));
 }
 
+/// `settle` (§13.3) is what an editor runs on save: the local work, and no request —
+/// also on a machine that has an endpoint configured.
+#[tokio::test]
+async fn settle_registers_and_renders_without_asking_the_server() {
+    let vault = temp_vault();
+    write_vault_file(
+        &vault,
+        "notes/home.md",
+        "---\nrestask-list: Home Lab\n---\n\n- [ ] rack the switch 🔺\n",
+    );
+    let mock = MockCaldav::new();
+    let code = run(
+        Command::Settle {
+            file: Some(vault.path().join("notes/home.md").display().to_string()),
+        },
+        vault.path(),
+        &mock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(code, 0);
+    let note = std::fs::read_to_string(vault.path().join("notes/home.md")).unwrap();
+    assert!(
+        note.contains("- [ ] rack the switch 🔺 🆔 restask-"),
+        "{note}"
+    );
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.contains("- [ ] rack the switch 🔺 [[home"), "{todo}");
+    assert_eq!(mock.counters(), (0, 0, 0));
+    assert!(mock.collection_names().is_empty());
+}
+
 #[test]
 fn an_absolute_file_selector_finds_its_vault_from_the_file() {
     let vault = temp_vault();
@@ -554,7 +586,7 @@ async fn doctor_healthy_reports_all_ok_and_exit_zero() {
     assert_eq!(status_of(&report, "vault-config"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "routing"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "scan"), Some(DoctorStatus::Ok));
-    assert_eq!(status_of(&report, "todo-marker"), Some(DoctorStatus::Ok));
+    assert_eq!(status_of(&report, "todo-view"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "sync-conflict"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
     // The auth probe runs against the configured endpoint; with no reachable real
@@ -634,10 +666,31 @@ async fn doctor_reports_duplicated_lines_as_a_warning() {
         .contains(uid.as_str()));
 }
 
+/// A view is known by the seal line in its frontmatter (§7.2).
 #[tokio::test]
-async fn doctor_warns_on_missing_marker_and_conflict_files_without_failing() {
+async fn doctor_accepts_a_sealed_view() {
     let vault = temp_vault();
-    std::fs::write(vault.path().join("TODO.md"), "- [ ] plain without marker\n").unwrap();
+    std::fs::write(
+        vault.path().join("TODO.md"),
+        common::sealed("---\nrestask-list: inbox\n---\n# TODO\n\n## Done\n"),
+    )
+    .unwrap();
+    let passwd = vault.path().join("radicale.passwd");
+    std::fs::write(&passwd, "secret").unwrap();
+    let machine = doctor_machine(Some(passwd));
+
+    let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
+    assert_eq!(status_of(&report, "todo-view"), Some(DoctorStatus::Ok));
+}
+
+#[tokio::test]
+async fn doctor_warns_on_a_foreign_todo_and_conflict_files_without_failing() {
+    let vault = temp_vault();
+    std::fs::write(
+        vault.path().join("TODO.md"),
+        "- [ ] plain, not a restask view\n",
+    )
+    .unwrap();
     write_vault_file(
         &vault,
         "notes/home.sync-conflict-20260922-101500-ABCDEFG.md",
@@ -649,7 +702,7 @@ async fn doctor_warns_on_missing_marker_and_conflict_files_without_failing() {
 
     let report = doctor_report(&vault, &machine, MockCaldav::new()).await;
     assert_eq!(report.exit_code, 0);
-    assert_eq!(status_of(&report, "todo-marker"), Some(DoctorStatus::Warn));
+    assert_eq!(status_of(&report, "todo-view"), Some(DoctorStatus::Warn));
     assert_eq!(
         status_of(&report, "sync-conflict"),
         Some(DoctorStatus::Warn)
@@ -667,6 +720,49 @@ async fn doctor_without_a_configured_endpoint_stays_soft() {
     assert_eq!(report.exit_code, 0);
     assert_eq!(status_of(&report, "caldav"), Some(DoctorStatus::Ok));
     assert_eq!(status_of(&report, "caldav-auth"), None);
+}
+
+#[tokio::test]
+async fn doctor_on_an_editing_machine_points_at_the_sync_node() {
+    // No endpoint here is the intended state of a machine whose vault is synced by the
+    // daemon on a node (§14.2): not a warning, and the check says where to look.
+    let vault = temp_vault();
+    let machine = MachineConfig {
+        node: Some(restask::config::NodeSection {
+            host: Some("homeserver".to_string()),
+            dir: Some("restask".to_string()),
+            ..Default::default()
+        }),
+        ..MachineConfig::default()
+    };
+    let report = cli::doctor(
+        vault.path(),
+        &machine,
+        None::<MockCaldav>,
+        &vault.path().join("machine.toml"),
+        clock(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.exit_code, 0);
+    let caldav = report
+        .checks
+        .iter()
+        .find(|check| check.name == "caldav")
+        .unwrap();
+    assert_eq!(caldav.status, DoctorStatus::Ok);
+    assert!(
+        caldav.detail.contains("the daemon on homeserver"),
+        "{}",
+        caldav.detail
+    );
+    assert!(
+        caldav
+            .detail
+            .contains("ssh homeserver 'cd restask && docker compose logs"),
+        "{}",
+        caldav.detail
+    );
 }
 
 #[tokio::test]

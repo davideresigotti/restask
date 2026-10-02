@@ -14,6 +14,8 @@ fn parse_etags(xml: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The body is the one a Radicale 3.8 accepts (seen against a real server: without the
+/// `prop` element it answers 403 and the list's collection is never created).
 #[test]
 fn mkcol_body_requests_vtodo_only_collection() {
     let body = mkcol_body("Home Lab");
@@ -22,14 +24,16 @@ fn mkcol_body_requests_vtodo_only_collection() {
         r#"<?xml version="1.0" encoding="utf-8"?>
 <D:mkcol xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:set>
-    <D:resourcetype>
-      <D:collection/>
-      <C:calendar/>
-    </D:resourcetype>
-    <D:displayname>Home Lab</D:displayname>
-    <C:supported-calendar-component-set>
-      <C:comp name="VTODO"/>
-    </C:supported-calendar-component-set>
+    <D:prop>
+      <D:resourcetype>
+        <D:collection/>
+        <C:calendar/>
+      </D:resourcetype>
+      <D:displayname>Home Lab</D:displayname>
+      <C:supported-calendar-component-set>
+        <C:comp name="VTODO"/>
+      </C:supported-calendar-component-set>
+    </D:prop>
   </D:set>
 </D:mkcol>
 "#
@@ -69,11 +73,12 @@ fn propfind_body_requests_collection_properties() {
     assert_eq!(
         body,
         r#"<?xml version="1.0" encoding="utf-8"?>
-<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
   <D:prop>
     <D:resourcetype/>
     <D:displayname/>
     <C:supported-calendar-component-set/>
+    <CS:getctag/>
   </D:prop>
 </D:propfind>
 "#
@@ -228,24 +233,28 @@ fn parse_collections_classifies_radicale_propfind() {
                 slug: "me".to_string(),
                 display_name: Some("me".to_string()),
                 supports_vtodo: false,
+                ctag: None,
             },
             restask::caldav::protocol::CollectionInfo {
                 href: "/me/inbox/".to_string(),
                 slug: "inbox".to_string(),
                 display_name: Some("inbox".to_string()),
                 supports_vtodo: true,
+                ctag: None,
             },
             restask::caldav::protocol::CollectionInfo {
                 href: "/me/university/".to_string(),
                 slug: "university".to_string(),
                 display_name: Some("University & Co".to_string()),
                 supports_vtodo: true,
+                ctag: None,
             },
             restask::caldav::protocol::CollectionInfo {
                 href: "/me/contacts/".to_string(),
                 slug: "contacts".to_string(),
                 display_name: None,
                 supports_vtodo: false,
+                ctag: None,
             },
         ]
     );
@@ -266,6 +275,39 @@ fn parse_collections_is_namespace_prefix_agnostic() {
     assert_eq!(collections.len(), 1);
     assert_eq!(collections[0].slug, "inbox");
     assert!(collections[0].supports_vtodo);
+}
+
+#[test]
+fn parse_collections_reads_the_change_tag() {
+    // Radicale: the home is no calendar and answers "not found" for the tag.
+    let tagged = r#"<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
+ <D:response>
+  <D:href>/me/</D:href>
+  <D:propstat>
+   <D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop>
+   <D:status>HTTP/1.1 200 OK</D:status>
+  </D:propstat>
+  <D:propstat>
+   <D:prop><CS:getctag/></D:prop>
+   <D:status>HTTP/1.1 404 Not Found</D:status>
+  </D:propstat>
+ </D:response>
+ <D:response>
+  <D:href>/me/inbox/</D:href>
+  <D:propstat>
+   <D:prop>
+    <D:resourcetype><D:collection/><C:calendar/></D:resourcetype>
+    <C:supported-calendar-component-set><C:comp name="VTODO"/></C:supported-calendar-component-set>
+    <CS:getctag>&quot;5f2a9c&quot;</CS:getctag>
+   </D:prop>
+   <D:status>HTTP/1.1 200 OK</D:status>
+  </D:propstat>
+ </D:response>
+</D:multistatus>"#;
+    let collections = parse_collections(tagged);
+    assert_eq!(collections.len(), 2);
+    assert_eq!(collections[0].ctag, None);
+    assert_eq!(collections[1].ctag.as_deref(), Some("\"5f2a9c\""));
 }
 
 #[test]

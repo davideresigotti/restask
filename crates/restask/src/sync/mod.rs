@@ -7,5 +7,5 @@ pub mod planner;
 pub use engine::{Engine, ReconcileReport};
 pub use merge::{merge, Merged, RemoteView, TIE_WINDOW_SECS};
 pub use planner::{
-    plan, AdoptOp, DeferReason, DeleteOp, MoveOp, Plan, PutOp, Settled, Snapshots, DEFER_LIMIT,
+    plan, DeferReason, DeleteOp, MoveOp, Plan, PutOp, Settled, Snapshots, DEFER_LIMIT,
 };

@@ -16,7 +16,7 @@ use crate::domain::{Clock, ListSlug, LocalDate, SourceRef, Status, Task, TaskUid
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::parser::{link_parents, ParsedTask};
-use crate::markdown::todo_view::looks_like_mirror;
+use crate::markdown::todo_view::{looks_like_mirror, section_priority};
 use crate::markdown::{self};
 use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
 use crate::store::index::Index;
@@ -62,6 +62,10 @@ pub struct Scan {
     /// Lines in routed notes that share a UID with an earlier line (read-only scans
     /// report them; repair scans reassign them).
     pub duplicates: Vec<(TaskUid, String)>,
+    /// Registered tasks whose line asks for its creation date with a bare `➕` (§6.4):
+    /// UID → vault-relative path of the file the line is in. A line registered in this
+    /// scan is not among them: it got today's date with its UID.
+    pub created_requests: BTreeMap<TaskUid, String>,
 }
 
 /// One routed file loaded for scanning.
@@ -93,7 +97,10 @@ fn write_back(vault: &Path, file: &Loaded, contents: &str) -> Result<bool, Resta
 /// Scans the vault (§5–§6). In [`ScanMode::Repair`] routed notes are rewritten where
 /// needed — atomically, one write per file — before their tasks are collected:
 ///
-/// * a task line without a UID gets `➕ <today>` and a fresh `🆔` (§6.4);
+/// * a task line without a UID gets a fresh `🆔` — and `➕ <today>` when it asks for its
+///   creation date with a bare `➕` (§6.4);
+/// * in the inbox file, such a line under a priority section's heading also gets that
+///   priority, unless it names one itself (§7.4);
 /// * a line sharing its UID with an earlier line (a duplicated line) gets its own UID;
 /// * a checked line outside the done region is stamped `✅` and moved under the done
 ///   heading; an unchecked line inside it is restored to the active region — so checking
@@ -297,7 +304,26 @@ pub fn scan(
                     .cloned()
                     .collect();
                 let duplicate = |task: &ParsedTask| duplicates.contains(&task.line_no);
-                let ops = repairs(&own, &duplicate, today, false);
+                let mut ops = repairs(&own, &duplicate, today, false);
+                // A line typed under a priority's heading takes that priority as it is
+                // registered (§7.4); one that names a priority itself keeps its own.
+                let ranked: Vec<Mutation> = ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        Mutation::Register { line_no, uid, .. } => own
+                            .iter()
+                            .find(|task| task.line_no == *line_no)
+                            .filter(|task| task.draft.priority.is_none())
+                            .and_then(|task| task.heading.as_deref())
+                            .and_then(section_priority)
+                            .map(|priority| Mutation::SetPriority {
+                                uid: uid.clone(),
+                                priority: Some(priority),
+                            }),
+                        _ => None,
+                    })
+                    .collect();
+                ops.extend(ranked);
                 if ops.is_empty() {
                     tasks
                 } else {
@@ -364,12 +390,15 @@ fn repairs(
     let mut status = Vec::new();
     for task in tasks {
         let uid = match &task.draft.uid {
+            // A checkbox without text is a task still to be written (§6.4): it has no
+            // identity yet, and nothing to bring in line with its box.
+            None if task.draft.text.is_empty() => continue,
             None => {
                 let uid = TaskUid::generate();
                 identity.push(Mutation::Register {
                     line_no: task.line_no,
                     uid: uid.clone(),
-                    created: today,
+                    created: task.draft.wants_created.then_some(today),
                 });
                 uid
             }
@@ -468,6 +497,11 @@ fn collect(
     let Some(uid) = task.draft.uid.clone() else {
         return;
     };
+    if task.draft.wants_created && task.draft.created.is_none() {
+        scan.created_requests
+            .entry(uid.clone())
+            .or_insert_with(|| path.to_string());
+    }
     let status = if task.draft.checked {
         Status::Completed {
             on: task.draft.completed_on.unwrap_or(today),

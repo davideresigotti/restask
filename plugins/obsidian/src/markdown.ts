@@ -44,6 +44,8 @@ export interface TaskDraft {
 	start: When | undefined;
 	scheduled: When | undefined;
 	created: string | undefined;
+	/** `true` when the line asks for its creation date: a `➕` standing alone, without a date (§6.1). */
+	wantsCreated: boolean;
 	completedOn: string | undefined;
 	/** `🔁` rule in the vault spelling, as written (e.g. `every 2 weeks on Monday`). */
 	recurrence: string | undefined;
@@ -89,6 +91,8 @@ const START_RE = /🛫[ \t]+(\d{4}-\d{2}-\d{2}(?:[ \t]+\d{2}:\d{2})?)/gu;
 const SCHEDULED_RE = /⏳[ \t]+(\d{4}-\d{2}-\d{2}(?:[ \t]+\d{2}:\d{2})?)/gu;
 const COMPLETED_RE = /✅[ \t]+(\d{4}-\d{2}-\d{2})/gu;
 const CREATED_RE = /➕[ \t]+(\d{4}-\d{2}-\d{2})/gu;
+// A `➕` on its own, no date behind it: the request for the creation date.
+export const BARE_CREATED_RE = /(^|[ \t])➕(?=$|[ \t])(?![ \t]+\d{4}-\d{2}-\d{2})/gu;
 const UID_RE = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
 
 // `restask-` and the legacy `taskres-` prefix are both 8 characters long.
@@ -172,6 +176,7 @@ function emptyDraft(): TaskDraft {
 		start: undefined,
 		scheduled: undefined,
 		created: undefined,
+		wantsCreated: false,
 		completedOn: undefined,
 		recurrence: undefined,
 	};
@@ -257,6 +262,13 @@ export function bodyStart(line: string): number | undefined {
 	return m[0].length - m.groups["body"].length;
 }
 
+/** Offset of the checkbox character (` `, `x`, `X`) of a task line (§6.1), or undefined when the line is not a task. */
+export function checkOffset(line: string): number | undefined {
+	const m = LINE_RE.exec(line);
+	if (m === null || m.groups === undefined) return undefined;
+	return line.indexOf("[", m.groups["indent"].length) + 1;
+}
+
 /**
  * The token that gives `body` its UID (§6.1): the first `🆔` match, and only when its
  * value is a valid ULID — the same token `parseLine` reads the `uid` field from.
@@ -280,6 +292,7 @@ export function parseLine(line: string): TaskLine | undefined {
 	const scheduled = collect(body, SCHEDULED_RE, 1);
 	const completed = collect(body, COMPLETED_RE, 1);
 	const created = collect(body, CREATED_RE, 1);
+	const bareCreated = collect(body, BARE_CREATED_RE, 0);
 	const uid = collect(body, UID_RE, 1);
 	const priority = collect(body, PRIORITY_RE, 2);
 	const recurrence = collectRecurrence(body);
@@ -313,6 +326,7 @@ export function parseLine(line: string): TaskLine | undefined {
 					...scheduled.spans,
 					...completed.spans,
 					...created.spans,
+					...bareCreated.spans,
 					...uid.spans,
 					...priority.spans,
 					...recurrence.spans,
@@ -324,6 +338,7 @@ export function parseLine(line: string): TaskLine | undefined {
 			start: startValue,
 			scheduled: scheduledValue,
 			created: createdValue,
+			wantsCreated: bareCreated.spans.length > 0,
 			completedOn: completedValue,
 			recurrence: recurrence.value,
 		},

@@ -10,6 +10,7 @@ use restask::config::{
     expand_tilde, machine_config_path_from, ConfigError, MachineConfig, VaultConfig,
     ENV_CALDAV_PASSWORD, ENV_CALDAV_URL, ENV_CALDAV_USERNAME, ENV_CONFIG, ENV_VAULT,
 };
+use restask::daemon::DaemonConfig;
 use tempfile::tempdir;
 
 /// Builds an injectable environment lookup from key/value pairs (hermetic; no process env).
@@ -66,6 +67,13 @@ fn vault_load_missing_file_is_error() {
 fn machine_config_defaults() {
     let cfg = MachineConfig::from_str("").unwrap();
     assert_eq!(cfg.caldav.poll_secs, 300);
+    // A machine config that does not spell the watch out — every one setup wrote — asks
+    // the server every two seconds.
+    assert_eq!(cfg.caldav.watch_secs, 2);
+    assert_eq!(
+        DaemonConfig::default().watch_ms,
+        cfg.caldav.watch_secs * 1_000
+    );
     assert!(cfg.caldav.allow_create_lists);
     assert!(cfg.caldav.url.is_none());
     assert!(cfg.caldav.username.is_none());
@@ -101,6 +109,42 @@ fn machine_config_round_trip() {
     let path = dir.path().join("config.toml");
     cfg.save(&path).unwrap();
     assert_eq!(MachineConfig::load(&path).unwrap(), cfg);
+}
+
+#[test]
+fn an_editing_machine_records_its_sync_node_and_no_credentials() {
+    // What `restask setup` writes on a computer whose vault is synced by a daemon on an
+    // always-on server (§14.2): where that daemon is, and the endpoint it talks to — for
+    // `restask lists` — but nothing this machine could log in with.
+    let text = "[vault]\npath = \"/home/me/Vault\"\n\n[node]\nhost = \"homeserver\"\ndir = \"restask\"\nvault = \"/srv/sync/vault\"\nurl = \"http://192.168.1.10:5232\"\nusername = \"me\"\n";
+    let cfg = MachineConfig::from_str(text).unwrap();
+    let node = cfg.node.clone().unwrap();
+    assert_eq!(node.host.as_deref(), Some("homeserver"));
+    assert_eq!(node.dir.as_deref(), Some("restask"));
+    assert_eq!(node.vault.as_deref(), Some("/srv/sync/vault"));
+    assert_eq!(node.url.as_deref(), Some("http://192.168.1.10:5232"));
+    assert_eq!(node.username.as_deref(), Some("me"));
+    assert_eq!(cfg.caldav.url, None);
+    assert_eq!(
+        cfg.resolved_password_with(Path::new("/home/me"), |_| None)
+            .unwrap(),
+        None
+    );
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    cfg.save(&path).unwrap();
+    assert_eq!(MachineConfig::load(&path).unwrap(), cfg);
+
+    // The section is the mark of an editing machine: a sync node's config has none, also
+    // after it was written back, and a bare `[node]` (the daemon was installed by hand)
+    // is kept.
+    assert_eq!(MachineConfig::default().node, None);
+    MachineConfig::default().save(&path).unwrap();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("[node]"));
+    let bare = MachineConfig::from_str("[node]\n").unwrap();
+    bare.save(&path).unwrap();
+    assert!(MachineConfig::load(&path).unwrap().node.is_some());
 }
 
 #[test]

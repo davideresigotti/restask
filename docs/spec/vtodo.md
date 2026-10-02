@@ -9,6 +9,8 @@
 ```rust
 pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String;
 pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> String;
+pub struct WireNames { pub uid: Option<String>, pub parent: Option<String> }
+pub fn to_vcalendar_as(task: &Task, now_utc: DateTime<Utc>, extras: &[String], wire: &WireNames) -> String;
 ```
 
 A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
@@ -16,7 +18,7 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 `BEGIN:VCALENDAR`, `VERSION:2.0`, `PRODID:-//restask//restask 0.1.0//EN`, `BEGIN:VTODO`,
 `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`,
 `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, `RRULE`, `RELATED-TO`, `X-RESTASK-SCHEDULED`,
-`X-RESTASK-SOURCE`, *extras*, `END:VTODO`, `END:VCALENDAR`.
+`X-RESTASK-SOURCE`, `X-RESTASK-UID`, *extras*, `END:VTODO`, `END:VCALENDAR`.
 
 - `DTSTAMP` / `LAST-MODIFIED` = `now_utc`. `CREATED` only when the task has a creation
   date (§4).
@@ -28,6 +30,12 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 - `RRULE:<canonical rule>` when the task has a repeat rule (§3.6). It is written once: an
   `RRULE` among the extras is dropped when the task carries its own.
 - `RELATED-TO;RELTYPE=PARENT:<uid>` when the task has a parent.
+- **Wire names** (`to_vcalendar_as`): a task another client created keeps the `UID` that
+  client gave it (§11 R5). With `wire.uid` the `UID` property is that value and
+  `X-RESTASK-UID:<the task's restask UID>` is written — the link between the resource
+  and its vault line. With `wire.parent` the parent relation names the parent by that
+  value (the parent is such a task). Without them — every task made in the vault — the
+  output is as above and there is no `X-RESTASK-UID`.
 - `X-RESTASK-SOURCE;VALUE=TEXT:<vault-relative path>` always: it routes the task back to
   its note when it reaches another device's vault first.
 - **Extras** — the unmanaged content of the resource being replaced (§8.2) — are written
@@ -42,6 +50,7 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 pub struct RemoteTask {
     pub raw_uid: String,                    // UID verbatim
     pub managed: bool,                      // raw_uid is a restask UID
+    pub adopted_as: Option<TaskUid>,        // X-RESTASK-UID (as written; §11 R5 checks it)
     pub task: Task,                         // uid is a placeholder when !managed
     pub source_path: Option<String>,        // X-RESTASK-SOURCE
     pub created_at: Option<DateTime<Utc>>,  // CREATED as an instant
@@ -67,6 +76,8 @@ Collections are shared with other clients, so the parser is forgiving:
   legacy `TOREL=PARENT`. Other relation types are extras.
 - `tz` is the device zone used for `Z`/`TZID` values (§4). Production passes
   `chrono::Local`; tests pass a `FixedOffset` or a `chrono_tz::Tz`.
+- `X-RESTASK-UID` is read as a restask UID or not at all; whether it is believed is the
+  planner's decision (§11 R5).
 - `RRULE`: a rule the vault can spell exactly (§3.6) becomes `task.recurrence`; any other
   rule is an extra, handed back as written.
 - **Extras**: every property the serializer does not own, and every nested component

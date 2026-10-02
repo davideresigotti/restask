@@ -20,7 +20,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::caldav::{CaldavPort, RemoteResource};
 use crate::config::{MachineConfig, VaultConfig};
 use crate::domain::{
-    Clock, ListSlug, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
+    Clock, ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
 };
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
@@ -59,7 +59,7 @@ pub struct ReconcileReport {
     pub markdown_mutations: usize,
     /// Task lines created in the vault for tasks that came from the server.
     pub inserts: usize,
-    /// Foreign tasks adopted.
+    /// Tasks another client created that got their line in the vault.
     pub adoptions: usize,
     /// UIDs deferred (vault file older than its base).
     pub deferred: usize,
@@ -74,6 +74,9 @@ pub struct Engine<C: CaldavPort> {
     state_dir: PathBuf,
     cfg: VaultConfig,
     allow_create_lists: bool,
+    /// `false` on a machine that leaves the syncing to the vault's sync node (§1.1): a
+    /// command that changed the vault here settles it and does not start a pass.
+    syncs_here: bool,
     caldav: C,
     clock: Arc<dyn Clock>,
 }
@@ -115,6 +118,7 @@ impl<C: CaldavPort> Engine<C> {
             vault: vault.to_path_buf(),
             cfg,
             allow_create_lists: machine.caldav.allow_create_lists,
+            syncs_here: machine.node.is_none(),
             caldav,
             clock,
         }
@@ -204,8 +208,26 @@ impl<C: CaldavPort> Engine<C> {
         outcome.map(|()| report)
     }
 
+    /// Does the local work of a pass and nothing else (§11.1 phase 1, then the render):
+    /// what an editor integration runs when a note was written (§13.3 `restask settle`).
+    /// The server is not contacted and no sync state is written, so it works offline and
+    /// leaves the vault as the daemon's pass would — which then finds nothing to do in it.
+    pub async fn settle(&self) -> Result<ReconcileReport, RestaskError> {
+        let _lock = self.lock().await?;
+        self.settle_locked()
+    }
+
+    fn settle_locked(&self) -> Result<ReconcileReport, RestaskError> {
+        let mut report = ReconcileReport::default();
+        let index = Index::load(&self.state_dir)?;
+        let scan = self.scan_local(&index, &mut report)?;
+        self.render(&scan.local)?;
+        Ok(report)
+    }
+
     /// Appends a new task to the TODO.md inbox and syncs (§13.3 `restask add`). The task
-    /// is safe in the vault even when the server is unreachable.
+    /// is safe in the vault even when the server is unreachable; a machine that is not
+    /// the sync node only settles the vault.
     pub async fn add(
         &self,
         text: &str,
@@ -216,13 +238,8 @@ impl<C: CaldavPort> Engine<C> {
         let _lock = self.lock().await?;
         let now = self.clock.now_utc();
         let index = Index::load(&self.state_dir)?;
-        let scan = vault::scan(
-            &self.vault,
-            &self.cfg,
-            self.clock.as_ref(),
-            &index,
-            ScanMode::Repair,
-        )?;
+        // The view is rendered from this scan: what the user edited in it comes first.
+        let scan = self.scan_local(&index, &mut ReconcileReport::default())?;
         let task = Task {
             uid: TaskUid::generate(),
             list: vault::inbox_list(&self.cfg)?,
@@ -233,7 +250,7 @@ impl<C: CaldavPort> Engine<C> {
             start: None,
             scheduled: None,
             recurrence,
-            created: Some(self.clock.today_local()),
+            created: None,
             parent: None,
             source: SourceRef {
                 path: self.cfg.inbox_file.clone(),
@@ -251,7 +268,8 @@ impl<C: CaldavPort> Engine<C> {
     }
 
     /// Completes or reopens a task in its source file, then syncs (§13.3 `restask
-    /// done/undone`). The change is safe in the vault even when the server is unreachable.
+    /// done/undone`). The change is safe in the vault even when the server is unreachable;
+    /// a machine that is not the sync node only settles the vault.
     pub async fn set_done(&self, uid: &TaskUid, done: bool) -> Result<Task, RestaskError> {
         let _lock = self.lock().await?;
         let index = Index::load(&self.state_dir)?;
@@ -302,7 +320,8 @@ impl<C: CaldavPort> Engine<C> {
     // ── phase 1: local ────────────────────────────────────────────────────────────────
 
     /// Scans and repairs the vault, then carries edits made on TODO.md mirror lines to
-    /// their source notes (rescanning when that changed anything).
+    /// their source notes and gives lines moved to another section of TODO.md their new
+    /// priority (rescanning when that changed anything).
     fn scan_local(
         &self,
         index: &Index,
@@ -322,25 +341,36 @@ impl<C: CaldavPort> Engine<C> {
             Ok(scan)
         };
         let first = scan(report)?;
-        let (Ok(current), Ok(rendered)) = (
+        let mut edits = match (
             std::fs::read_to_string(self.vault.join(&self.cfg.inbox_file)),
             std::fs::read_to_string(self.state_dir.join(RENDERED_FILE)),
-        ) else {
-            return Ok(first);
+        ) {
+            (Ok(current), Ok(rendered)) => todo_view::mirror_edits(
+                &current,
+                &rendered,
+                &first.local,
+                &self.cfg,
+                self.clock.today_local(),
+            ),
+            _ => BTreeMap::new(),
         };
-        let edits = todo_view::mirror_edits(
-            &current,
-            &rendered,
-            &first.local,
-            &self.cfg,
-            self.clock.today_local(),
-        );
+        // A line that asks for its creation date gets it here, before anything renders
+        // or pushes the task (§6.4).
+        for (uid, path) in &first.created_requests {
+            edits
+                .entry(path.clone())
+                .or_default()
+                .push(Mutation::SetCreated {
+                    uid: uid.clone(),
+                    created: self.created_on(uid, index),
+                });
+        }
         if edits.is_empty() {
             return Ok(first);
         }
         for (path, ops) in &edits {
             let applied = self.apply_file(path, ops)?;
-            tracing::info!(path = %path, count = applied, "todo edit carried to its note");
+            tracing::info!(path = %path, count = applied, "edit applied to its task");
         }
         report.normalized += edits.len();
         scan(report)
@@ -377,6 +407,7 @@ impl<C: CaldavPort> Engine<C> {
         let plan = progress.plan.insert(planner::plan(&snapshots));
 
         report.deferred = plan.deferred.len();
+        report.adoptions = plan.adopted.len();
         report.inserts = plan.inbox_inserts.len();
         for (path, mutations) in &plan.mutations {
             report.inserts += mutations
@@ -430,24 +461,6 @@ impl<C: CaldavPort> Engine<C> {
                     }
                     Err(error) => {
                         if failed(error, "list move", report) {
-                            break 'ops;
-                        }
-                    }
-                }
-            }
-            for adoption in &plan.adoptions {
-                match self.put(&adoption.put, now).await {
-                    Ok(etag) => {
-                        report.adoptions += 1;
-                        progress.pushed.push((adoption.put.task.clone(), etag));
-                        if let Err(error) = self.delete(&adoption.foreign).await {
-                            if failed(error, "removing the adopted original", report) {
-                                break 'ops;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        if failed(error, "adoption", report) {
                             break 'ops;
                         }
                     }
@@ -519,6 +532,7 @@ impl<C: CaldavPort> Engine<C> {
                 &put.task,
                 &put.name,
                 &put.extras,
+                &put.wire,
                 put.if_match.as_deref(),
                 now,
             )
@@ -540,8 +554,8 @@ impl<C: CaldavPort> Engine<C> {
     /// Renders TODO.md (§7) and remembers the render; neither file is touched when its
     /// content is unchanged.
     fn render(&self, tasks: &BTreeMap<TaskUid, Task>) -> Result<(), RestaskError> {
-        let rendered = todo_view::render(tasks, &self.cfg);
         let todo = self.vault.join(&self.cfg.inbox_file);
+        let rendered = todo_view::render(tasks, &self.cfg);
         if let Some(parent) = todo.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -609,7 +623,12 @@ impl<C: CaldavPort> Engine<C> {
 
     /// Runs a reconcile after a local command already changed the vault: a server that
     /// cannot be reached is reported, not fatal — the change is saved and syncs later.
+    /// On a machine that is not the sync node the vault is settled instead: the pass is
+    /// the node's, once the file sync has carried the change there (§1.1).
     async fn sync_after_local_change(&self) -> Result<(), RestaskError> {
+        if !self.syncs_here {
+            return self.settle_locked().map(|_| ());
+        }
         match self.reconcile_locked().await {
             Ok(_) => Ok(()),
             Err(error @ RestaskError::Caldav { .. }) => {
@@ -618,6 +637,24 @@ impl<C: CaldavPort> Engine<C> {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// The creation date of a registered task (§6.4): the server's `CREATED` as the base
+    /// snapshot recorded it at the last sync — when the index vouches for the snapshot —
+    /// else the day the UID was minted, else today.
+    fn created_on(&self, uid: &TaskUid, index: &Index) -> LocalDate {
+        // Snapshots only hold date and floating values: the zone is irrelevant.
+        base_store::cache_read(&self.state_dir, uid, &Utc)
+            .zip(index.get(uid))
+            .filter(|(base, entry)| {
+                // The snapshot carries no list; the thumbprint covers it.
+                let mut base = base.clone();
+                base.list = entry.list.clone();
+                entry.thumbprint == base.thumbprint()
+            })
+            .and_then(|(base, _)| base.created)
+            .or_else(|| uid.created_on())
+            .unwrap_or_else(|| self.clock.today_local())
     }
 
     /// Loads the base snapshots (`.restask/tasks/*.ics`), taking each task's list from

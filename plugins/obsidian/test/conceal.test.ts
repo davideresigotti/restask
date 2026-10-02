@@ -13,10 +13,15 @@ function shown(line: string): string {
 }
 
 describe("§15.5 uidToken", () => {
-	it("hides the token and the blanks before it", () => {
+	it("hides the token and the blank before it", () => {
 		expect(shown(`- [ ] Buy milk ➕ 2026-09-22 🆔 ${UID}`)).toBe("- [ ] Buy milk ➕ 2026-09-22");
-		expect(shown(`\t* [x] Done \t🆔  ${UID}`)).toBe("\t* [x] Done");
+		expect(shown(`\t* [x] Done\t🆔  ${UID}`)).toBe("\t* [x] Done");
 		expect(shown(`- [ ] old 🆔 ${LEGACY}`)).toBe("- [ ] old");
+	});
+
+	it("hides one blank only: further ones are text the user typed, and can see", () => {
+		expect(shown(`- [ ] Buy milk   🆔 ${UID}`)).toBe("- [ ] Buy milk  ");
+		expect(shown(`\t* [x] Done \t🆔  ${UID}`)).toBe("\t* [x] Done ");
 	});
 
 	it("keeps what follows the token", () => {

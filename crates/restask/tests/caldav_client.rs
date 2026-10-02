@@ -17,6 +17,7 @@ use common::{sample_task, MockCaldav};
 use restask::caldav::protocol::report_vtodos;
 use restask::caldav::{CaldavClient, CaldavPort};
 use restask::domain::{ListSlug, LocalDate, When};
+use restask::vtodo::WireNames;
 use restask::{CaldavErrorKind, RestaskError};
 
 const UID_A: &str = "restask-01jzq4tsvg2c9xkw7n5m8rhdpb";
@@ -452,6 +453,7 @@ async fn put_replaces_exactly_the_version_the_caller_saw() {
             &sample_task(UID_A, "inbox", "Edited locally"),
             UID_A,
             &extras,
+            &WireNames::default(),
             Some("\"remote-1\""),
             stamp(),
         )
@@ -487,6 +489,7 @@ async fn put_create_uses_if_none_match_star() {
             &sample_task(UID_A, "inbox", "New task"),
             UID_A,
             &[],
+            &WireNames::default(),
             None,
             stamp(),
         )
@@ -507,6 +510,7 @@ async fn put_without_an_etag_header_still_succeeds() {
             &sample_task(UID_A, "inbox", "New task"),
             UID_A,
             &[],
+            &WireNames::default(),
             None,
             stamp(),
         )
@@ -526,6 +530,7 @@ async fn put_precondition_conflict_without_retry() {
             &sample_task(UID_A, "inbox", "local edit"),
             UID_A,
             &[],
+            &WireNames::default(),
             Some("\"stale\""),
             stamp(),
         )
@@ -678,10 +683,16 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
 
     // No collection yet: listing says so, writing fails.
     assert!(mock.list_tasks(&inbox).await.unwrap().is_none());
-    assert!(mock.put(&task, UID_A, &[], None, stamp()).await.is_err());
+    assert!(mock
+        .put(&task, UID_A, &[], &WireNames::default(), None, stamp())
+        .await
+        .is_err());
 
     mock.seed_collection("inbox", "Inbox");
-    let etag = mock.put(&task, UID_A, &[], None, stamp()).await.unwrap();
+    let etag = mock
+        .put(&task, UID_A, &[], &WireNames::default(), None, stamp())
+        .await
+        .unwrap();
     let listed = mock.list_tasks(&inbox).await.unwrap().unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(
@@ -692,7 +703,10 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
 
     // Creating twice and replacing a stale version are both precondition failures.
     for stale in [None, Some("\"nope\"")] {
-        match mock.put(&task, UID_A, &[], stale, stamp()).await {
+        match mock
+            .put(&task, UID_A, &[], &WireNames::default(), stale, stamp())
+            .await
+        {
             Err(RestaskError::Caldav {
                 kind: CaldavErrorKind::Conflict,
                 ..
@@ -701,7 +715,14 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
         }
     }
     let rewritten = mock
-        .put(&task, UID_A, &[], Some(&etag), stamp())
+        .put(
+            &task,
+            UID_A,
+            &[],
+            &WireNames::default(),
+            Some(&etag),
+            stamp(),
+        )
         .await
         .unwrap();
     assert_ne!(etag, rewritten);

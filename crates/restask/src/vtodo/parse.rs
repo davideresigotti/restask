@@ -26,6 +26,10 @@ pub struct RemoteTask {
     pub raw_uid: String,
     /// `true` when `raw_uid` parses as a [`TaskUid`] (i.e. a restask-managed resource).
     pub managed: bool,
+    /// `X-RESTASK-UID`: the UID restask adopted this task under, on a resource that
+    /// keeps another client's `UID`. The planner believes it only when it can have been
+    /// derived from that `UID` ([`TaskUid::adopts`]).
+    pub adopted_as: Option<TaskUid>,
     /// Parsed task; when `!managed`, `uid` is a placeholder the planner replaces on adoption.
     pub task: Task,
     /// `X-RESTASK-SOURCE` value — the vault-relative path the task routes back to.
@@ -44,7 +48,7 @@ pub struct RemoteTask {
 const PLACEHOLDER_UID: &str = "restask-00000000000000000000000000";
 
 /// Properties the serializer owns; everything else inside the `VTODO` is an extra.
-const MANAGED: [&str; 15] = [
+const MANAGED: [&str; 16] = [
     "UID",
     "DTSTAMP",
     "CREATED",
@@ -60,6 +64,7 @@ const MANAGED: [&str; 15] = [
     "X-TASKRES-SCHEDULED",
     "X-RESTASK-SOURCE",
     "X-TASKRES-SOURCE",
+    "X-RESTASK-UID",
 ];
 
 /// Parses an iCalendar body into a [`RemoteTask`] (§8.2).
@@ -91,6 +96,7 @@ pub fn from_vcalendar<Z: TimeZone>(
     let mut scheduled: Option<When> = None;
     let mut parent_raw: Option<String> = None;
     let mut source_path: Option<String> = None;
+    let mut adopted_as: Option<TaskUid> = None;
     let mut recurrence: Option<Recurrence> = None;
     let mut extras: Vec<String> = Vec::new();
 
@@ -131,6 +137,9 @@ pub fn from_vcalendar<Z: TimeZone>(
             "X-RESTASK-SCHEDULED" | "X-TASKRES-SCHEDULED" => scheduled = when(&prop, tz),
             "X-RESTASK-SOURCE" | "X-TASKRES-SOURCE" if source_path.is_none() => {
                 source_path = Some(unescape_text(&prop.value)).filter(|path| !path.is_empty());
+            }
+            "X-RESTASK-UID" if adopted_as.is_none() => {
+                adopted_as = TaskUid::parse(&prop.value).ok();
             }
             "RELATED-TO" if is_parent_relation(&prop) => {
                 if parent_raw.is_none() {
@@ -183,6 +192,7 @@ pub fn from_vcalendar<Z: TimeZone>(
     Ok(RemoteTask {
         raw_uid,
         managed: uid.is_some(),
+        adopted_as,
         task,
         source_path,
         created_at,

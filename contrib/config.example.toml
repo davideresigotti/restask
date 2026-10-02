@@ -12,8 +12,19 @@ url  = "http://192.168.1.10:5232"   # LAN example; use HTTPS when exposed beyond
 username = "me"
 password_file = "~/.config/restask/radicale.passwd"  # chmod 600; OR password_env below
 # password_env = "RESTASK_CALDAV_PASSWORD"            # alternative source
-poll_secs = 300
+poll_secs = 300                     # a pass at least this often, whether anything changed or not
+watch_secs = 2                      # how often the daemon asks the server for changes; 0 = poll only
 allow_create_lists = true           # MKCOL missing collections on first push
 
 # Lists are not configured here: a note routes itself with `restask-list` /
 # `restask-list-root` frontmatter, and list `Home Lab` syncs with collection `home-lab`.
+
+# A machine that only edits the vault has no [caldav] endpoint and no password. `restask
+# setup` writes this instead, naming the machine whose daemon syncs the vault (§14.2):
+#
+# [node]
+# host = "myserver"                 # ssh host of the sync node
+# dir = "restask"                   # its stack directory there
+# vault = "/srv/sync/vault"         # the vault's folder there
+# url = "http://192.168.1.10:5232"  # the endpoint that daemon syncs with
+# username = "me"

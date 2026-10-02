@@ -29,9 +29,29 @@ url  = "http://192.168.1.10:5232"              # use HTTPS beyond a trusted LAN
 username = "me"
 password_file = "~/.config/restask/radicale.passwd"   # 0600; or:
 # password_env = "RESTASK_CALDAV_PASSWORD"
-poll_secs = 300                                # how often the daemon looks at the server
+poll_secs = 300                                # a pass at least this often, changed or not
+watch_secs = 2                                 # how often the daemon asks the server whether
+                                               # another client wrote there (§13.1); 0 = never
 allow_create_lists = true                      # MKCOL a routed list's missing collection
 ```
+
+On an **editing machine** (§1.1) setup writes no endpoint and no password source, and a
+`[node]` section instead — the mark of such a machine (§13.3):
+
+```toml
+[vault]
+path = "/home/me/Vault"
+
+[node]                                         # this vault's daemon runs elsewhere
+host = "myserver"                              # ssh host of the sync node …
+dir = "restask"                                # … the directory of its stack there …
+vault = "/srv/sync/vault"                      # … and the vault's folder there
+url = "http://192.168.1.10:5232"               # the endpoint that daemon syncs with:
+username = "me"                                # what `restask lists` prints URLs from
+```
+
+`host`, `dir` and `vault` are absent when the daemon was installed by hand
+(`--no-daemon`). `contrib/update.sh` reads `host` and `dir`.
 
 - A literal `password = "…"` key anywhere is a **validation error**.
 - There is no list configuration: routing lives in the notes (§5). A `[[lists]]` table
@@ -40,7 +60,10 @@ allow_create_lists = true                      # MKCOL a routed list's missing c
 ### 14.3 Environment
 
 `RESTASK_VAULT` · `RESTASK_CONFIG` (machine config path) · `RESTASK_CALDAV_URL` ·
-`RESTASK_CALDAV_USERNAME` · `RESTASK_CALDAV_PASSWORD` · `RUST_LOG`. Environment values
+`RESTASK_CALDAV_USERNAME` · `RESTASK_CALDAV_PASSWORD` · `RUST_LOG` · `RESTASK_SOURCE`
+(the restask sources setup builds a node's daemon from; default: the clone the binary
+was built from) · `RESTASK_NODE_WAIT` (seconds `contrib/node.sh` waits for the file sync,
+default 300). Environment values
 override the file; `RESTASK_CALDAV_PASSWORD` wins over `password_env`, which wins over
 `password_file`.
 
@@ -49,6 +72,10 @@ override the file; `RESTASK_CALDAV_PASSWORD` wins over `password_env`, which win
 - **Passwords** live only in `~/.config/restask/radicale.passwd` (0600) or an environment
   variable — never in `config.toml`, never in the vault, never in logs (the
   `Authorization` header is not logged; `CaldavClient`'s `Debug` redacts the password).
+  Only the sync node has one. Setup hands it to a node through standard input — of
+  `contrib/node.sh`, of `ssh`, of the container's `restask setup --password-stdin` —
+  never in an argument list or a temporary file, and in memory it is a `setup::Secret`,
+  whose `Debug` prints a placeholder.
 - `restask doctor` warns hard (exit 1) when no password is configured, and when the
   server accepts a deliberately wrong password (authentication disabled server-side).
 - Plain HTTP is acceptable on a trusted LAN only.

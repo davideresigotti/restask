@@ -2,7 +2,6 @@
 //! snapshots, and the server. Zero I/O; time enters only as the `now` parameter and the
 //! same snapshots always yield the same plan.
 
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::caldav::RemoteResource;
@@ -12,6 +11,7 @@ use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
 use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
 use crate::vtodo::recurrence::{consume_count, find_in_extras};
+use crate::vtodo::WireNames;
 
 /// Consecutive cycles a stale-looking vault file is waited on (R1) before the vault is
 /// taken at its word again (vault authority).
@@ -57,8 +57,9 @@ pub struct Plan {
     pub puts: Vec<PutOp>,
     /// List moves: `PUT` into the new collection, then `DELETE` from the old one.
     pub moves: Vec<MoveOp>,
-    /// Foreign resources replaced by a managed one (R5).
-    pub adoptions: Vec<AdoptOp>,
+    /// Tasks another client created that enter the vault in this pass (R5). Their
+    /// lines are among the inserts and their links among `puts`; this only names them.
+    pub adopted: Vec<TaskUid>,
     /// Resources to delete.
     pub deletes: Vec<DeleteOp>,
     /// Tasks whose base is refreshed without a push (already equal on the server).
@@ -90,6 +91,9 @@ pub struct PutOp {
     pub name: String,
     /// Unmanaged content of the resource being replaced, written back verbatim.
     pub extras: Vec<String>,
+    /// The `UID`s to write where they are not restask's own: a task another client
+    /// created keeps the one it was given (R5).
+    pub wire: WireNames,
     /// Etag of the version being replaced; `None` creates the resource.
     pub if_match: Option<String>,
 }
@@ -101,15 +105,6 @@ pub struct MoveOp {
     pub put: PutOp,
     /// The copy to remove afterwards — only once the write succeeded.
     pub from: DeleteOp,
-}
-
-/// An adoption (§11.2 R5): a foreign resource becomes a managed one.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AdoptOp {
-    /// The managed resource to create (carrying the foreign resource's extras).
-    pub put: PutOp,
-    /// The foreign resource to remove afterwards — only once the write succeeded.
-    pub foreign: DeleteOp,
 }
 
 /// A remote resource deletion (§11.2).
@@ -140,7 +135,7 @@ pub enum DeferReason {
     VaultFileStale,
 }
 
-/// One copy of a managed UID on the server.
+/// One copy of a task on the server.
 type Copy<'a> = (&'a ListSlug, &'a RemoteResource);
 
 /// A task line waiting to be inserted into the vault.
@@ -200,12 +195,28 @@ pub fn plan(s: &Snapshots) -> Plan {
                     task: task.clone(),
                     etag: origin.1.etag.clone(),
                 });
+                if origin.1.task.managed {
+                    tracing::info!(uid = %uid, list = %origin.0.as_str(), "caldav_pull");
+                } else {
+                    // R5 — another client's task: it stays that client's resource and
+                    // is linked to its line. Settled as found first, so a link the
+                    // server refuses (the client wrote again meanwhile) is retried as a
+                    // merge over what was read here, never as a conflict.
+                    p.puts.push(PutOp {
+                        wire: ctx.wire(&task),
+                        task: task.clone(),
+                        name: origin.1.name.clone(),
+                        extras: origin.1.task.extras.clone(),
+                        if_match: Some(origin.1.etag.clone()),
+                    });
+                    p.adopted.push(uid.clone());
+                    tracing::info!(uid = %uid, list = %origin.0.as_str(), "task_adopted");
+                }
                 inserts.push(PendingInsert {
                     path,
                     parent: ctx.parent_of(origin.1),
                     task,
                 });
-                tracing::info!(uid = %uid, list = %origin.0.as_str(), "caldav_pull");
             }
             continue;
         };
@@ -260,15 +271,17 @@ pub fn plan(s: &Snapshots) -> Plan {
             if let Some(roll) = roll_forward(&merged.task, Some(resource)) {
                 // R8r — one occurrence of a recurring task was completed in the vault:
                 // the checked line becomes a record of its own, the series moves on.
-                let (task, extras) = apply_roll(&mut p, &local.source.path, uid, roll);
+                let (task, extras) = apply_roll(&mut p, local, roll);
                 p.puts.push(PutOp {
+                    wire: ctx.wire(&task),
                     task,
                     name: resource.name.clone(),
                     extras,
                     if_match: Some(resource.etag.clone()),
                 });
-            } else if merged.push {
+            } else if merged.push || !ctx.linked(uid, resource) {
                 p.puts.push(PutOp {
+                    wire: ctx.wire(&merged.task),
                     task: merged.task,
                     name: resource.name.clone(),
                     extras: resource.task.extras.clone(),
@@ -291,12 +304,18 @@ pub fn plan(s: &Snapshots) -> Plan {
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
             let (task, extras) = match roll_forward(&merged.task, Some(origin.1)) {
-                Some(roll) => apply_roll(&mut p, &local.source.path, uid, roll),
+                Some(roll) => apply_roll(&mut p, local, roll),
                 None => (merged.task, origin.1.task.extras.clone()),
             };
             p.moves.push(MoveOp {
                 put: PutOp {
-                    name: uid.as_str().to_string(),
+                    wire: ctx.wire(&task),
+                    // A task of restask's own is named after its UID; another client's
+                    // keeps the name that client gave it.
+                    name: match ctx.aliases.get(uid) {
+                        Some(_) => origin.1.name.clone(),
+                        None => uid.as_str().to_string(),
+                    },
                     task,
                     extras,
                     if_match: None,
@@ -304,9 +323,6 @@ pub fn plan(s: &Snapshots) -> Plan {
                 from: delete_of(origin),
             });
             p.deletes.extend(rest.iter().map(delete_of));
-        } else if ctx.adoptable.contains_key(uid) {
-            // An adoption in flight (line inserted, foreign resource still there):
-            // resumed below with the foreign resource's extras.
         } else if ctx.deleted_on_server(local, entry) {
             // R3 — it was settled and the server no longer has it: deleted remotely.
             p.mutations
@@ -319,11 +335,15 @@ pub fn plan(s: &Snapshots) -> Plan {
         } else {
             // R2 — the server has never seen it (or lost it wholesale): push. A recurring
             // task that is already checked rolls forward first (R8r).
-            let (task, extras) = match roll_forward(local, None) {
-                Some(roll) => apply_roll(&mut p, &local.source.path, uid, roll),
+            let (mut task, extras) = match roll_forward(local, None) {
+                Some(roll) => apply_roll(&mut p, local, roll),
                 None => (local.clone(), Vec::new()),
             };
+            // The server records when the task was created even though its line does
+            // not say (§8.1): the day its UID was minted.
+            task.created = task.created.or_else(|| uid.created_on());
             p.puts.push(PutOp {
+                wire: ctx.wire(&task),
                 task,
                 name: uid.as_str().to_string(),
                 extras,
@@ -332,51 +352,6 @@ pub fn plan(s: &Snapshots) -> Plan {
         }
     }
 
-    // R5 — foreign VTODOs become managed tasks under a UID derived from their own.
-    for (uid, (slug, resource)) in &ctx.adoptable {
-        let foreign = delete_of(&(*slug, *resource));
-        if ctx.managed.contains_key(uid) {
-            // Already re-homed on the server; only the foreign original is left over.
-            p.deletes.push(foreign);
-            continue;
-        }
-        let task = match s.local.get(uid) {
-            Some(local) => {
-                let mut task = local.clone();
-                if !ctx.parent_authoritative(local) {
-                    task.parent = ctx.parent_of(resource);
-                }
-                task
-            }
-            None if s.tombstones.contains(uid) => {
-                // Adopted earlier, then deleted in the vault.
-                p.deletes.push(foreign);
-                continue;
-            }
-            None => {
-                let (path, mut task) = ctx.place(slug, resource);
-                task.uid = uid.clone();
-                inserts.push(PendingInsert {
-                    path,
-                    parent: ctx.parent_of(resource),
-                    task: task.clone(),
-                });
-                tracing::info!(uid = %uid, list = %slug.as_str(), "task_adopted");
-                task
-            }
-        };
-        p.adoptions.push(AdoptOp {
-            put: PutOp {
-                name: uid.as_str().to_string(),
-                task,
-                extras: resource.task.extras.clone(),
-                if_match: None,
-            },
-            foreign,
-        });
-    }
-    p.deletes.extend(ctx.duplicates.iter().map(delete_of));
-
     schedule_inserts(&mut p, s, inserts);
     p
 }
@@ -384,12 +359,11 @@ pub fn plan(s: &Snapshots) -> Plan {
 /// Lookup tables derived once from the snapshots.
 struct Context<'a> {
     s: &'a Snapshots,
-    /// Managed UID → every server copy, in collection order.
-    managed: BTreeMap<&'a TaskUid, Vec<Copy<'a>>>,
-    /// Adopted UID → the foreign resource it stands for.
-    adoptable: BTreeMap<TaskUid, Copy<'a>>,
-    /// Further resources carrying an already-adopted foreign UID.
-    duplicates: Vec<Copy<'a>>,
+    /// Task UID → every server copy, in collection order. A resource another client
+    /// created counts under the UID it is adopted as (R5).
+    managed: BTreeMap<TaskUid, Vec<Copy<'a>>>,
+    /// Adopted UID → the `UID` its resource carries on the server.
+    aliases: BTreeMap<TaskUid, &'a str>,
     /// Foreign `UID` → adopted UID (resolves parent relations between foreign tasks).
     adopted_uids: BTreeMap<&'a str, TaskUid>,
     /// Lists whose settled tasks vanished wholesale: a reset collection, not deletions.
@@ -398,15 +372,14 @@ struct Context<'a> {
 
 impl<'a> Context<'a> {
     fn new(s: &'a Snapshots) -> Self {
-        let mut managed: BTreeMap<&TaskUid, Vec<Copy<'_>>> = BTreeMap::new();
-        let mut adoptable: BTreeMap<TaskUid, Copy<'_>> = BTreeMap::new();
-        let mut duplicates = Vec::new();
+        let mut managed: BTreeMap<TaskUid, Vec<Copy<'_>>> = BTreeMap::new();
+        let mut aliases = BTreeMap::new();
         let mut adopted_uids = BTreeMap::new();
         for (slug, resources) in &s.remote {
             for resource in resources {
                 if resource.task.managed {
                     managed
-                        .entry(&resource.task.task.uid)
+                        .entry(resource.task.task.uid.clone())
                         .or_default()
                         .push((slug, resource));
                     continue;
@@ -421,21 +394,30 @@ impl<'a> Context<'a> {
                 } else {
                     &resource.task.raw_uid
                 };
-                let uid = TaskUid::derived(seed, resource.task.created_at);
-                match adoptable.entry(uid) {
-                    Entry::Occupied(_) => duplicates.push((slug, resource)),
-                    Entry::Vacant(slot) => {
-                        adopted_uids.insert(seed, slot.key().clone());
-                        slot.insert((slug, resource));
-                    }
-                }
+                // The UID the resource says it was linked under (`X-RESTASK-UID`), when
+                // that can have come from this `UID`; else the one the vault or the
+                // state already knows this `UID` by (a client may drop the property
+                // and rewrite `CREATED`); else the one derived from it.
+                let uid = match &resource.task.adopted_as {
+                    Some(linked) if linked.adopts(seed) => linked.clone(),
+                    _ => s
+                        .local
+                        .keys()
+                        .chain(s.index.entries.keys())
+                        .chain(&s.tombstones)
+                        .find(|known| known.adopts(seed))
+                        .cloned()
+                        .unwrap_or_else(|| TaskUid::derived(seed, resource.task.created_at)),
+                };
+                aliases.insert(uid.clone(), seed);
+                adopted_uids.insert(seed, uid.clone());
+                managed.entry(uid).or_default().push((slug, resource));
             }
         }
         // Canonical copy first: the one in the collection the index knows, and within a
         // collection the resource named after the UID.
-        for copies in managed.values_mut() {
+        for (uid, copies) in &mut managed {
             copies.sort_by_key(|(slug, resource)| {
-                let uid = &resource.task.task.uid;
                 let known_list = s.index.get(uid).is_some_and(|entry| entry.list == **slug);
                 let canonical_name = resource.name == uid.as_str();
                 (!known_list, (*slug).clone(), !canonical_name)
@@ -467,8 +449,7 @@ impl<'a> Context<'a> {
         Self {
             s,
             managed,
-            adoptable,
-            duplicates,
+            aliases,
             adopted_uids,
             reset,
         }
@@ -479,6 +460,23 @@ impl<'a> Context<'a> {
         let entry = self.s.index.get(uid)?;
         let base = self.s.base.get(uid)?;
         (entry.caldav_etag.is_some() && entry.thumbprint == base.thumbprint()).then_some(base)
+    }
+
+    /// The names `task` and its parent go by on the server where those are not their
+    /// restask UIDs: tasks another client created keep the `UID` it gave them.
+    fn wire(&self, task: &Task) -> WireNames {
+        let alias = |uid: &TaskUid| self.aliases.get(uid).map(|raw| raw.to_string());
+        WireNames {
+            uid: alias(&task.uid),
+            parent: task.parent.as_ref().and_then(alias),
+        }
+    }
+
+    /// Whether `resource` says which task it is: always for a resource of restask's
+    /// own; for another client's, once it carries the link (`X-RESTASK-UID`). A client
+    /// that drops the property on its next write has it written again.
+    fn linked(&self, uid: &TaskUid, resource: &RemoteResource) -> bool {
+        resource.task.managed || resource.task.adopted_as.as_ref() == Some(uid)
     }
 
     /// The parent of a server resource as a managed UID: its own when managed, else the
@@ -629,22 +627,25 @@ fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> 
     })
 }
 
-/// Queues the vault edits and the record's creation for a roll; returns the series write.
-fn apply_roll(p: &mut Plan, path: &str, uid: &TaskUid, roll: Roll) -> (Task, Vec<String>) {
+/// Queues the vault edits and the record's creation for a roll of the vault task
+/// `local`; returns the series write.
+fn apply_roll(p: &mut Plan, local: &Task, roll: Roll) -> (Task, Vec<String>) {
+    let uid = &local.uid;
     tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
-    let ops = p.mutations.entry(path.to_string()).or_default();
+    let ops = p.mutations.entry(local.source.path.clone()).or_default();
     ops.push(Mutation::Rekey {
         uid: uid.clone(),
         new_uid: roll.record.uid.clone(),
     });
-    ops.push(Mutation::Insert {
-        draft: TaskDraft::from(&roll.series),
-        under: None,
-    });
+    // The series' new line shows a creation date only if its line did (§6.4).
+    let mut draft = TaskDraft::from(&roll.series);
+    draft.created = local.created;
+    ops.push(Mutation::Insert { draft, under: None });
     p.puts.push(PutOp {
         name: roll.record.uid.as_str().to_string(),
         task: roll.record,
         extras: Vec::new(),
+        wire: WireNames::default(),
         if_match: None,
     });
     (roll.series, roll.extras)
@@ -710,7 +711,14 @@ fn schedule_inserts(p: &mut Plan, s: &Snapshots, mut pending: Vec<PendingInsert>
             (ready, blocked)
         };
         for insert in ready {
-            let PendingInsert { path, task, parent } = insert;
+            let PendingInsert {
+                path,
+                mut task,
+                parent,
+            } = insert;
+            // A line does not show its creation date unless the user asks for it (§6.4);
+            // the server keeps it.
+            task.created = None;
             placed.insert(task.uid.clone(), path.clone());
             let Some(path) = path else {
                 p.inbox_inserts.push(task);

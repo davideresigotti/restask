@@ -17,8 +17,8 @@ next pass repairs.
       is created if allowed, else left out of the snapshot.
    b. Plan: `planner::plan(&Snapshots) -> Plan` — pure.
    c. Apply vault mutations (one pass per file), then server writes: puts, moves (put,
-      then delete the old copy), adoptions (put, then delete the foreign original),
-      deletes. A dependent delete runs only if its put succeeded.
+      then delete the old copy), deletes. A dependent delete runs only if its put
+      succeeded.
 3. **Record.**
    Re-render TODO.md from the vault as it is now (plus tasks the plan placed in the
    inbox), then persist the state: a base + index entry for every task that was settled
@@ -26,6 +26,12 @@ next pass repairs.
 
 If the server is unreachable, phase 1 and the render still happen and the error is
 returned afterwards: registration, hand-edit repair and the TODO.md view work offline.
+
+`Engine::settle` is that part on its own — phase 1, then the render from the scan —
+with no request and no state written: the local work of invariant 12, as an editor
+integration runs it (§13.3 `restask settle`, §16). The render has no plan to take inbox
+tasks from, so a task the server holds and the vault does not yet is not shown by it;
+the daemon's pass adds it.
 
 The vault is written before the state that describes it. So the state can lag the vault
 (the next pass then finds both sides equal and settles) but never claim a line the vault
@@ -51,9 +57,9 @@ pub struct Snapshots {
 pub struct Plan {
     pub mutations: BTreeMap<String, Vec<Mutation>>,   // vault edits per file
     pub inbox_inserts: Vec<Task>,                     // server tasks landing in TODO.md
-    pub puts: Vec<PutOp>,                             // { task, name, extras, if_match }
+    pub puts: Vec<PutOp>,                             // { task, name, extras, wire, if_match }
     pub moves: Vec<MoveOp>,                           // { put, from }
-    pub adoptions: Vec<AdoptOp>,                      // { put, foreign }
+    pub adopted: Vec<TaskUid>,                        // foreign tasks entering the vault (R5)
     pub deletes: Vec<DeleteOp>,                       // { list, name, etag }
     pub settled: Vec<Settled>,                        // { task, etag }: base refresh, no push
     pub forgets: Vec<TaskUid>,                        // drop base + index entry
@@ -86,7 +92,9 @@ moves on any unrelated edit; using it to decide whether *this* task changed lose
 
 Not merged:
 
-- `created`: the vault's `➕` when present, else the server's `CREATED` is kept.
+- `created`: the vault's `➕` when present, else the server's `CREATED` is kept. A line
+  without `➕` therefore never changes the server's value, and the value never comes
+  back as a token (§6.4).
 - `parent`: the vault decides for an **active task in a note** (indentation). For done
   records and TODO.md lines — which cannot express nesting — the server's relation is
   kept as it is.
@@ -98,7 +106,10 @@ Outputs: the merged task; the mutations that turn the vault line into it (a comp
 (merged ≠ remote in any sync field, parent, creation date or source path). Both can
 happen at once: fields changed on different sides are all kept.
 
-### 11.4 Rule table (per UID over local ∪ base ∪ index ∪ managed remote)
+### 11.4 Rule table (per UID over local ∪ base ∪ index ∪ remote)
+
+A server copy of a UID is a resource whose `UID` is that restask UID, or a foreign
+resource adopted under it (R5, below). The rules do not tell the two apart.
 
 Task **not in the vault**:
 
@@ -108,7 +119,7 @@ Task **not in the vault**:
 | **R0** | tombstoned | delete every server copy; forget state |
 | **R6** | no server copy | forget state |
 | **Dv** | known (index/base) and a server copy exists | deleted in the vault → delete server copies, tombstone, forget |
-| **R4** | unknown and a server copy exists | created on the server → insert a line: in the note `X-RESTASK-SOURCE` names if it still routes to that list; else the list's home note; else the inbox. Under its parent if the parent is an active task of the same note. Settle. |
+| **R4** | unknown and a server copy exists | created on the server → insert a line: in the note `X-RESTASK-SOURCE` names if it still routes to that list; else the list's home note; else the inbox. Under its parent if the parent is an active task of the same note. The line carries no `➕` (§6.4); the settled task keeps the server's date. Settle. |
 
 Task **in the vault**:
 
@@ -120,27 +131,46 @@ Task **in the vault**:
 | **R7/R8** | a copy in its list | merge (§11.3). Vault mutations and/or a put (`If-Match` the listed etag, extras carried); if neither, settle when base/index are missing or stale. Other copies of the UID are strays → delete. |
 | **R8r** | the task is completed in the vault, the server copy is open or absent, and the task has a repeat rule with a next occurrence (applies to R8, R9 and R2) | **roll forward** (§11.6) instead of completing the series |
 | **R9** | copies only in other lists | **move**: merge with the first copy, put into the task's list (create), then delete the old copy; further copies are strays. |
-| — | no copy, an adoption for this UID is in flight | handled by R5 |
 | **R3** | no copy; settled; the collection it was settled in was listed and is not a *reset* | deleted on the server → delete the vault line, tombstone, forget |
-| **R2** | no copy otherwise | new (or lost wholesale) → put (create) |
+| **R2** | no copy otherwise | new (or lost wholesale) → put (create). A task whose line states no creation date is put with `CREATED` = the day its UID was minted (§4) |
 
 **Reset collections** (R3 guard): a collection created in this pass, or one where two or
 more settled tasks all vanished at once, did not have its tasks deleted one by one — it
 was emptied, recreated or restored. Its tasks are re-pushed (R2), never deleted from the
 vault.
 
-Foreign resources (after the UID loop), in lists that have a home in the vault:
+**R5 — foreign resources** (a `VTODO` whose `UID` is not a restask UID), in lists that
+have a home in the vault. Such a task is **adopted where it is**: the resource stays the
+one its client created — same name, same `UID`, never replaced by a copy — and counts as
+the server copy of the adoption UID `U`:
 
-| # | Condition | Action |
+1. the resource's `X-RESTASK-UID`, when it can have been derived from the resource's
+   `UID` (`TaskUid::adopts`; a copy another client made under a new `UID`, properties
+   included, is a task of its own);
+2. else the UID the vault, the index or a tombstone already knows that `UID` by (a
+   client may drop the property and rewrite `CREATED`);
+3. else `derived(uid, created)` — the resource name stands in for a missing `UID`.
+
+With that the table above applies as to any task:
+
+| Situation | Rule | Action |
 |---|---|---|
-| **R5** | foreign `VTODO`, adopted UID `U = derived(uid, created)` not in vault, not on server, not tombstoned | **adopt**: insert a line with UID `U` (placement as R4); put `U` carrying the foreign extras; when the put succeeded, delete the foreign resource |
-| | `U` in the vault, not on the server | resume: put the vault's `U` with the foreign extras, then delete the original |
-| | `U` already on the server | delete the foreign original only |
-| | `U` tombstoned and not in the vault | delete the foreign original |
-| | a second resource with the same foreign UID | delete it |
+| `U` nowhere in the vault or the state | R4 | **adopt** (`task_adopted`): insert a line with UID `U`, settle what was read, and put the resource in place (`If-Match`) with `X-RESTASK-SOURCE` and `X-RESTASK-UID` |
+| `U` in the vault | R7/R8 | merge; an edit made by the client that owns the task reaches the line, an edit of the line is put to that resource. A resource without the link (never written, or written back without it) is put again |
+| `U` known, its line gone | Dv | deleted in the vault → the resource is deleted |
+| `U` in the vault and settled, resource gone | R3 | deleted by its client → the line is deleted |
+| `U` tombstoned and not in the vault | R0 | the resource is deleted (a client re-uploading from its cache) |
+| a resource `U.ics` exists as well (left by versions that adopted by copy), or a second resource with the same foreign `UID` | R7/R4 | the extra copy is a stray → deleted; `U.ics` is the canonical one |
 
-A parent relation between foreign tasks is preserved: the child's parent becomes the
-parent's adopted UID, and inserts are ordered parents-first.
+Every put of such a task writes the `UID` the resource came with (`PutOp::wire`, §8.1).
+A parent relation between foreign tasks is preserved: in the vault the child hangs under
+the parent's adopted UID (inserts are ordered parents-first), on the server the relation
+keeps naming the parent by its own `UID` — also for a task made in the vault under an
+adopted parent.
+
+Why in place: a client keeps the task under the resource it created. Replacing that
+resource by a copy under `U` (what earlier versions did) left the client holding a task
+the vault was no longer tied to; its next edit went nowhere, or showed up twice.
 
 ### 11.6 Recurring tasks
 
@@ -181,9 +211,9 @@ server; until then the checked line simply waits under the done heading.
 
 - A failed put leaves no record: the next pass sees the same difference and plans the
   same write from *current* content. Nothing is replayed from a stored snapshot.
-- A failed delete is re-derived too: by the tombstone (R0), by the stray rule (R7/R9), or
-  by the leftover foreign original (R5).
+- A failed delete is re-derived too: by the tombstone (R0) or by the stray rule (R7/R9).
 - A pass over a converged vault plans nothing, writes no file and sends no write request.
 - Crash windows: after vault mutations, before state — the next pass finds vault and
   server equal (or merges) and settles. After a put, before state — same. After an
-  adoption's line insert, before its put — resumed (R5).
+  adoption's line insert, before its put — the resource is linked by the next pass's
+  merge (R5); a put the server refused is retried over what the adoption settled.

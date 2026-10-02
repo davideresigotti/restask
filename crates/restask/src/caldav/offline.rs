@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 
 use crate::caldav::port::{CaldavPort, CollectionInfo, RemoteResource};
 use crate::domain::{ListSlug, Task};
+use crate::vtodo::WireNames;
 use crate::{CaldavErrorKind, RestaskError};
 
 /// The "no server" port.
@@ -45,6 +46,7 @@ impl CaldavPort for Offline {
         _task: &Task,
         _name: &str,
         _extras: &[String],
+        _wire: &WireNames,
         _if_match: Option<&str>,
         _now: DateTime<Utc>,
     ) -> Result<String, RestaskError> {

@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use restask::caldav::{CaldavClient, CaldavPort};
 use restask::domain::{ListSlug, Priority, SourceRef, Status, Task, TaskUid};
+use restask::vtodo::WireNames;
 
 /// The dedicated development collection (slug `restask-dev`).
 const COLLECTION: &str = "Restask-Dev";
@@ -95,7 +96,14 @@ async fn e2e_server_restask_dev_lifecycle() {
     let mut task = probe_task(&slug, "restask e2e probe");
     let extras = vec!["DESCRIPTION:kept across pushes".to_string()];
     let created = client
-        .put(&task, task.uid.as_str(), &extras, None, now_unix())
+        .put(
+            &task,
+            task.uid.as_str(),
+            &extras,
+            &WireNames::default(),
+            None,
+            now_unix(),
+        )
         .await
         .expect("create failed");
 
@@ -128,6 +136,7 @@ async fn e2e_server_restask_dev_lifecycle() {
             &task,
             &remote.name,
             &remote.task.extras,
+            &WireNames::default(),
             Some(&remote.etag),
             now_unix(),
         )
@@ -135,7 +144,14 @@ async fn e2e_server_restask_dev_lifecycle() {
         .expect("replace failed");
     // The old etag is now stale: a second replace with it must be refused.
     let stale = client
-        .put(&task, &remote.name, &[], Some(&remote.etag), now_unix())
+        .put(
+            &task,
+            &remote.name,
+            &[],
+            &WireNames::default(),
+            Some(&remote.etag),
+            now_unix(),
+        )
         .await;
     assert!(stale.is_err(), "a stale If-Match must be refused");
 

@@ -18,24 +18,32 @@ pub struct CollectionInfo {
     pub display_name: Option<String>,
     /// `true` when `supported-calendar-component-set` advertises a `VTODO` comp.
     pub supports_vtodo: bool,
+    /// `getctag` when the server reports one: an opaque value that changes whenever
+    /// anything in the collection does. The daemon compares it between two looks to
+    /// learn that another client wrote to the server (§13.1).
+    pub ctag: Option<String>,
 }
 
 /// Builds the `MKCOL` body that creates a VTODO-only calendar collection (§10.1):
 /// resourcetype `collection` + `calendar`, `displayname` set to the list's display name,
 /// and `supported-calendar-component-set` restricted to `VTODO`.
+/// The properties sit in `set` / `prop` (RFC 5689): a server that finds no `prop` there
+/// sees a request for a plain folder, which Radicale refuses below a user's home (403).
 pub fn mkcol_body(display_name: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
 <D:mkcol xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:set>
-    <D:resourcetype>
-      <D:collection/>
-      <C:calendar/>
-    </D:resourcetype>
-    <D:displayname>{}</D:displayname>
-    <C:supported-calendar-component-set>
-      <C:comp name="VTODO"/>
-    </C:supported-calendar-component-set>
+    <D:prop>
+      <D:resourcetype>
+        <D:collection/>
+        <C:calendar/>
+      </D:resourcetype>
+      <D:displayname>{}</D:displayname>
+      <C:supported-calendar-component-set>
+        <C:comp name="VTODO"/>
+      </C:supported-calendar-component-set>
+    </D:prop>
   </D:set>
 </D:mkcol>
 "#,
@@ -77,14 +85,16 @@ pub fn report_vtodos() -> String {
 }
 
 /// Builds the `PROPFIND` body asking for the properties needed to classify collections
-/// (§10.1): `resourcetype`, `displayname`, and `supported-calendar-component-set`.
+/// (§10.1): `resourcetype`, `displayname`, and `supported-calendar-component-set` — and
+/// `getctag`, the collection's change tag.
 pub fn propfind_collections_body() -> String {
     r#"<?xml version="1.0" encoding="utf-8"?>
-<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav" xmlns:CS="http://calendarserver.org/ns/">
   <D:prop>
     <D:resourcetype/>
     <D:displayname/>
     <C:supported-calendar-component-set/>
+    <CS:getctag/>
   </D:prop>
 </D:propfind>
 "#
@@ -128,7 +138,8 @@ pub fn parse_report(xml: &str) -> Vec<ReportItem> {
 /// (§10.1). Namespace-prefix agnostic. Only responses whose `resourcetype` includes a
 /// `collection` element are returned; plain files, address books and foreign resource
 /// types are excluded. A missing `supported-calendar-component-set` yields
-/// `supports_vtodo = false`.
+/// `supports_vtodo = false`; a missing or empty `getctag` (a server without the
+/// extension, or its "not found" answer for a container) yields `ctag = None`.
 pub fn parse_collections(xml: &str) -> Vec<CollectionInfo> {
     let mut collections = Vec::new();
     for response in scan_elements(xml).iter().filter(|e| e.local == "response") {
@@ -167,11 +178,17 @@ pub fn parse_collections(xml: &str) -> Vec<CollectionInfo> {
                 })
             })
             .unwrap_or(false);
+        let ctag = props
+            .iter()
+            .find(|e| e.local == "getctag")
+            .map(|e| xml_unescape(&element_text(&e.inner)))
+            .filter(|text| !text.is_empty());
         collections.push(CollectionInfo {
             slug: last_path_segment(&href).to_string(),
             href,
             display_name,
             supports_vtodo,
+            ctag,
         });
     }
     collections

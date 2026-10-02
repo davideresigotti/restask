@@ -13,8 +13,11 @@
 └── lock                 advisory lock: one restask process per vault per machine
 ```
 
-The directory lives inside the vault and **rides the file sync**, so a second daemon on
-another device starts from the same knowledge. It is never scanned for tasks, whatever
+The directory lives inside the vault and **rides the file sync**: the plugin and
+`restask settle` on the editing machines read it (the remembered render, the base
+snapshots), and a machine that takes over as the sync node starts from the same
+knowledge. It is written by the one daemon (§1.1) — and, for the remembered render, by
+`settle`. It is never scanned for tasks, whatever
 `ignore` says. All of it is disposable: `restask rebuild` removes the index, the snapshots
 and the remembered render (tombstones stay), and the next pass re-derives them.
 

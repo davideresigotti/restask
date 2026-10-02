@@ -32,4 +32,13 @@ for _, case in ipairs(modes) do
 	local got = conceal.with_modes(case[1], case[2])
 	assert(got == case[3], ("with_modes(%q, %q): expected %q, got %q"):format(case[1], case[2], case[3], got))
 end
-print(("ok - %d cases"):format(#cases + #modes))
+local settle = require("restask.settle")
+local argv = settle.command("/vault/notes/a b.md")
+assert(table.concat(argv, "|") == "restask|settle|--file|/vault/notes/a b.md", table.concat(argv, "|"))
+local ran = false
+settle.without(function()
+	ran = true
+end)
+assert(ran, "without() runs its function")
+
+print(("ok - %d cases"):format(#cases + #modes + 2))

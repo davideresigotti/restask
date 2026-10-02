@@ -14,7 +14,7 @@ use crate::caldav::{CaldavClient, CaldavPort, Offline};
 use crate::config::{machine_config_path, ConfigError, MachineConfig, VaultConfig};
 use crate::daemon::{self, DaemonConfig};
 use crate::domain::{Clock, Priority, Recurrence, Status, SystemClock, TaskUid, When};
-use crate::markdown::{parse, MARKER};
+use crate::markdown::{is_view, parse};
 use crate::setup;
 use crate::store::{cache_read, Index};
 use crate::sync::merge::fields_differ;
@@ -50,15 +50,40 @@ pub enum Command {
         /// CalDAV username (required with `--non-interactive`).
         #[arg(long)]
         username: Option<String>,
-        /// Environment variable holding the password (required with `--non-interactive`).
+        /// Environment variable holding the password (with `--non-interactive`: this or
+        /// `--password-stdin`).
         #[arg(long)]
         password_env: Option<String>,
+        /// With `--non-interactive`: read the password from standard input (one line)
+        /// and store it in this machine's password file, where its daemon finds it.
+        #[arg(long, conflicts_with = "password_env", requires = "non_interactive")]
+        password_stdin: bool,
         /// Bind a list to a collection as `list=collection` (repeatable).
         #[arg(long = "collection")]
         collections: Vec<String>,
         /// Fail instead of prompting.
         #[arg(long)]
         non_interactive: bool,
+        /// Connect this machine to a vault that is already set up (it arrived through the
+        /// file sync): credentials, first sync and the daemon; the vault is left as it is.
+        #[arg(long, conflicts_with = "collections")]
+        join: bool,
+        /// Install the daemon on this always-on server instead of this computer, over
+        /// ssh (`ssh <NODE>` must work; the server needs Docker and a copy of the vault
+        /// from the file sync). The interactive wizard asks for it when no flag says.
+        #[arg(long, value_name = "SSH_HOST")]
+        node: Option<String>,
+        /// The vault's folder on the `--node` machine.
+        #[arg(long, value_name = "PATH", requires = "node")]
+        node_vault: Option<String>,
+        /// Where the daemon's files go on the `--node` machine (default: `restask` in
+        /// the ssh user's home directory).
+        #[arg(long, value_name = "DIR", requires = "node")]
+        node_dir: Option<String>,
+        /// Do not install the daemon at all: it is installed by hand on another, always-on
+        /// machine (one sync node per vault). This machine keeps no credentials.
+        #[arg(long, conflicts_with = "node")]
+        no_daemon: bool,
     },
     /// Run the single-writer reconciler until shutdown (§13.1).
     Daemon {
@@ -93,6 +118,13 @@ pub enum Command {
         /// How to address the task.
         #[command(flatten)]
         selector: Selector,
+    },
+    /// Do the local work for the vault as it is now — register, repair, file, refresh
+    /// TODO.md — without contacting the server. Editor integrations run it on save.
+    Settle {
+        /// A note of the vault (absolute path): the vault is found from it.
+        #[arg(long)]
+        file: Option<String>,
     },
     /// Print vault and sync-state counts.
     Status {
@@ -147,8 +179,9 @@ pub struct StatusReport {
 
 /// Environment entry point (§13.3): resolves the vault and machine config, builds the
 /// CalDAV client for server-bound commands, and dispatches. Offline commands
-/// ([`Command::Status`], [`Command::Rebuild`], [`Command::Lists`]) never construct a
-/// server client; `add`/`done`/`undone` work on a machine without one (vault-side only).
+/// ([`Command::Settle`], [`Command::Status`], [`Command::Rebuild`], [`Command::Lists`])
+/// never construct a server client; `add`/`done`/`undone` work on a machine without one
+/// (vault-side only).
 pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
     let Cli { vault, command } = cli;
     // `setup` carries its own vault fallback (§13.2 step 1): cwd, confirmed or
@@ -162,6 +195,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Done { selector } | Command::Undone { selector } => {
             resolve_vault_for_file(vault.as_deref(), selector.file.as_deref())?
         }
+        Command::Settle { file } => resolve_vault_for_file(vault.as_deref(), file.as_deref())?,
         _ => resolve_vault(vault.as_deref())?,
     };
     let config_path = machine_config_path();
@@ -169,51 +203,86 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
     match command {
         Command::Setup {
             non_interactive,
+            join,
+            no_daemon,
+            node,
+            node_vault,
+            node_dir,
             url,
             username,
             password_env,
+            password_stdin,
             collections,
         } => {
+            let join = setup::joins(&vault, &config_path, join)?;
+            let daemon = setup::DaemonFlags {
+                no_daemon,
+                node,
+                node_vault,
+                node_dir,
+            };
             if !non_interactive {
                 setup::run_interactive(
                     vault,
                     config_path,
+                    join,
+                    daemon,
                     Arc::new(SystemClock),
-                    Some(&setup::SystemdInstaller),
+                    Some(&setup::SystemInstaller),
                 )
                 .await?;
                 return Ok(0);
             }
-            let args = setup::SetupArgs::from_flags(
-                vault,
-                config_path,
-                url,
-                username,
-                password_env,
-                setup::parse_collections(&collections)?,
-            )?;
-            let password_env = match &args.password_env {
-                Some(name) => name.clone(),
-                None => {
-                    return Err(RestaskError::Validation {
-                        field: "password-env",
-                        reason: "--password-env is required with --non-interactive".to_string(),
-                    })
-                }
-            };
-            let password = std::env::var(&password_env)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| RestaskError::Validation {
+            let daemon = daemon.resolve()?;
+            let password = if password_stdin {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line.trim_end_matches(['\r', '\n']).to_string()
+            } else {
+                let name = password_env.as_deref().ok_or(RestaskError::Validation {
                     field: "password-env",
-                    reason: format!("${password_env} is not set"),
+                    reason: "--password-env or --password-stdin is required with \
+                             --non-interactive"
+                        .to_string(),
                 })?;
+                std::env::var(name).unwrap_or_default()
+            };
+            if password.is_empty() {
+                return Err(RestaskError::Validation {
+                    field: "password",
+                    reason: match &password_env {
+                        Some(name) => format!("${name} is not set"),
+                        None => "no password on standard input".to_string(),
+                    },
+                });
+            }
+            // The typed password is stored where this machine's daemon reads it; a
+            // machine that only edits stores none.
+            let password_file = if password_stdin && daemon == setup::DaemonHost::Here {
+                Some(setup::store_password(&config_path, &password)?)
+            } else {
+                None
+            };
+            let args = setup::SetupArgs {
+                daemon,
+                password_file,
+                password: Some(setup::Secret::new(password.clone())),
+                ..setup::SetupArgs::from_flags(
+                    vault,
+                    config_path,
+                    url,
+                    username,
+                    password_env,
+                    setup::parse_collections(&collections)?,
+                    join,
+                )?
+            };
             let caldav = CaldavClient::new(&args.url, args.username.clone(), Some(password))?;
             let summary = setup::run_setup(
                 args,
                 caldav,
                 Arc::new(SystemClock),
-                Some(&setup::SystemdInstaller),
+                Some(&setup::SystemInstaller),
             )
             .await?;
             setup::print_summary(&summary);
@@ -222,7 +291,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Doctor {} => {
             // Diagnostics must run even when the machine config is unusable, so the
             // client is best-effort here instead of the catch-all below.
-            let caldav = daemon::build_client(&machine).ok();
+            let caldav = server_client(&machine).ok();
             let report = doctor(
                 &vault,
                 &machine,
@@ -237,10 +306,12 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Status { json } => print_status(&vault, Arc::new(SystemClock), json),
         Command::Rebuild => run_rebuild(&vault),
         Command::Lists => print_lists(&vault, &machine, Arc::new(SystemClock)),
+        Command::Settle { .. } => settle(&vault, machine, Arc::new(SystemClock)).await,
         Command::Daemon { once } => {
-            let caldav = daemon::build_client(&machine)?;
+            let caldav = server_client(&machine)?;
             let dc = DaemonConfig {
                 poll_secs: machine.caldav.poll_secs,
+                watch_ms: machine.caldav.watch_secs.saturating_mul(1_000),
                 once,
                 ..DaemonConfig::default()
             };
@@ -262,8 +333,9 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         }
         local @ (Command::Add { .. } | Command::Done { .. } | Command::Undone { .. }) => {
             // The vault part of these commands needs no server; without a configured
-            // endpoint they still save locally and say so.
-            match daemon::build_client(&machine) {
+            // endpoint they still save locally and say so. A machine that leaves the
+            // syncing to the sync node builds no client at all.
+            match server_client(&machine) {
                 Ok(caldav) => {
                     run_with(
                         local,
@@ -289,7 +361,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             }
         }
         server => {
-            let caldav = daemon::build_client(&machine)?;
+            let caldav = server_client(&machine)?;
             run_with(
                 server,
                 vault,
@@ -300,6 +372,26 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             )
             .await
         }
+    }
+}
+
+/// The CalDAV client of a command that is server work (`sync`, `daemon`). A machine that
+/// leaves the syncing to the vault's sync node (`[node]`, §14.2) is refused one: a pass
+/// from a second machine races the file sync (§1.1).
+fn server_client(machine: &MachineConfig) -> Result<CaldavClient, RestaskError> {
+    match &machine.node {
+        Some(node) => Err(RestaskError::Config {
+            path: machine_config_path().display().to_string(),
+            reason: format!(
+                "this machine only edits the vault: {} syncs it with the server. \
+                 `restask settle` does the local work here",
+                match &node.host {
+                    Some(host) => format!("the daemon on {host}"),
+                    None => "the daemon on the vault's sync node".to_string(),
+                }
+            ),
+        }),
+        None => daemon::build_client(machine),
     }
 }
 
@@ -340,25 +432,42 @@ pub async fn run_with<C: CaldavPort>(
     match command {
         Command::Setup {
             non_interactive,
+            join,
+            no_daemon,
+            node,
+            node_vault,
+            node_dir,
             url,
             username,
             password_env,
+            password_stdin: _,
             collections,
         } => {
+            let join = setup::joins(&vault, &config_path, join)?;
+            let daemon = setup::DaemonFlags {
+                no_daemon,
+                node,
+                node_vault,
+                node_dir,
+            };
             if !non_interactive {
-                // Hermetic dispatch: never touch the host's systemd session.
-                setup::run_interactive(vault, config_path, clock, None).await?;
+                // Hermetic dispatch: never touch the host's systemd session or a node.
+                setup::run_interactive(vault, config_path, join, daemon, clock, None).await?;
                 return Ok(0);
             }
-            let args = setup::SetupArgs::from_flags(
-                vault,
-                config_path,
-                url,
-                username,
-                password_env,
-                setup::parse_collections(&collections)?,
-            )?;
-            // Hermetic dispatch: never touch the host's systemd session.
+            let args = setup::SetupArgs {
+                daemon: daemon.resolve()?,
+                ..setup::SetupArgs::from_flags(
+                    vault,
+                    config_path,
+                    url,
+                    username,
+                    password_env,
+                    setup::parse_collections(&collections)?,
+                    join,
+                )?
+            };
+            // Hermetic dispatch: never touch the host's systemd session or a node.
             let summary = setup::run_setup(args, caldav, clock, None).await?;
             setup::print_summary(&summary);
             Ok(0)
@@ -366,6 +475,7 @@ pub async fn run_with<C: CaldavPort>(
         Command::Daemon { once } => {
             let dc = DaemonConfig {
                 poll_secs: machine.caldav.poll_secs,
+                watch_ms: machine.caldav.watch_secs.saturating_mul(1_000),
                 once,
                 ..DaemonConfig::default()
             };
@@ -417,6 +527,7 @@ pub async fn run_with<C: CaldavPort>(
             print_doctor(&report);
             Ok(report.exit_code)
         }
+        Command::Settle { .. } => settle(&vault, machine, clock).await,
         Command::Status { json } => print_status(&vault, clock, json),
         Command::Rebuild => run_rebuild(&vault),
         Command::Lists => print_lists(&vault, &machine, clock),
@@ -743,21 +854,21 @@ pub async fn doctor<C: CaldavPort>(
 
     let inbox = vault.join(&cfg.inbox_file);
     match std::fs::read_to_string(&inbox) {
-        Ok(contents) if contents.contains(MARKER) => checks.push(check(
-            "todo-marker",
+        Ok(contents) if is_view(&contents) => checks.push(check(
+            "todo-view",
             DoctorStatus::Ok,
-            format!("{} carries the marker", cfg.inbox_file),
+            format!("{} is a restask view", cfg.inbox_file),
         )),
         Ok(_) => checks.push(check(
-            "todo-marker",
+            "todo-view",
             DoctorStatus::Warn,
             format!(
-                "{} lacks the restask marker (the next sync rewrites it)",
+                "{} was not rendered by restask (the next sync rewrites it)",
                 cfg.inbox_file
             ),
         )),
         Err(_) => checks.push(check(
-            "todo-marker",
+            "todo-view",
             DoctorStatus::Warn,
             format!("{} is missing", cfg.inbox_file),
         )),
@@ -855,11 +966,24 @@ pub async fn doctor<C: CaldavPort>(
                 exit_code = 1;
             }
         },
-        None => checks.push(check(
-            "caldav",
-            DoctorStatus::Warn,
-            "not configured (restask setup)",
-        )),
+        None => match &machine.node {
+            Some(node) => checks.push(check(
+                "caldav",
+                DoctorStatus::Ok,
+                match (&node.host, &node.dir) {
+                    (Some(host), Some(dir)) => format!(
+                        "left to the daemon on {host} (its log: ssh {host} 'cd {dir} && \
+                         docker compose logs --tail 20')"
+                    ),
+                    _ => "left to the daemon on the vault's sync node".to_string(),
+                },
+            )),
+            None => checks.push(check(
+                "caldav",
+                DoctorStatus::Warn,
+                "not configured (restask setup)",
+            )),
+        },
     }
 
     Ok(DoctorReport { checks, exit_code })
@@ -879,6 +1003,25 @@ fn check(name: &'static str, status: DoctorStatus, detail: impl std::fmt::Displa
         status,
         detail: detail.to_string(),
     }
+}
+
+/// Runs [`Engine::settle`] (§13.3 `restask settle`). The engine is built over the
+/// [`Offline`] port whatever the machine has configured: local work never reaches for
+/// the server.
+async fn settle(
+    vault: &Path,
+    machine: MachineConfig,
+    clock: Arc<dyn Clock>,
+) -> Result<i32, RestaskError> {
+    let cfg = load_vault_config(vault)?;
+    let report = Engine::new(vault, cfg, machine, Offline, clock)
+        .settle()
+        .await?;
+    println!(
+        "scanned {} registered {} normalized {}",
+        report.scanned_files, report.registered, report.normalized
+    );
+    Ok(0)
 }
 
 /// Completes/reopens via [`Engine::set_done`] after resolving the selector (§13.3).
@@ -1046,7 +1189,21 @@ fn print_lists(
     let inbox = vault::inbox_list(&cfg)?;
     let mut homes = scan.homes.clone();
     homes.insert(inbox, cfg.inbox_file.clone());
-    let base = match (&machine.caldav.url, &machine.caldav.username) {
+    // On a machine that only edits, the endpoint is the one its sync node talks to.
+    let node = machine.node.as_ref();
+    let endpoint = (
+        machine
+            .caldav
+            .url
+            .as_ref()
+            .or(node.and_then(|node| node.url.as_ref())),
+        machine
+            .caldav
+            .username
+            .as_ref()
+            .or(node.and_then(|node| node.username.as_ref())),
+    );
+    let base = match endpoint {
         (Some(url), Some(username)) => Some(format!("{}/{}", url.trim_end_matches('/'), username)),
         _ => None,
     };
