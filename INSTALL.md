@@ -14,7 +14,7 @@ cd /path/to/your/vault && restask setup
 
 1. **The Radicale URL, username and password.** Use the address the server has on your network (`http://192.168.1.10:5232`), not `localhost`.
 2. **Which calendar `TODO.md` binds to** — it lists the server's calendars; type one (e.g. `inbox`).
-3. **The ssh host of your always-on server**, if one holds a copy of the vault. Press Enter if there is none: this computer then keeps the vault in sync itself.
+3. **The ssh host of your always-on server**, if one holds a copy of the vault. Press Enter if there is none: this computer then keeps the vault in sync itself. Setup connects to the server at once: if it logs you in with a password (or your key has a passphrase), ssh asks for it here, once — restask does not keep it.
 4. **The vault's folder on that server** (only when you named one).
 
 Then it does the rest by itself:
@@ -30,7 +30,7 @@ Without a server the daemon is installed on this computer instead (a systemd use
 
 ### What the server needs
 
-- `ssh <host>` works from this computer (a host from `~/.ssh/config`, or `user@address`).
+- `ssh <host>` works from this computer (a host from `~/.ssh/config`, or `user@address`), with a key or with a password you type when setup connects.
 - Docker with the compose plugin.
 - A copy of the vault, kept by your file sync (Syncthing: share the vault's folder with the server and let it finish). `.restask/` must be part of the share.
 

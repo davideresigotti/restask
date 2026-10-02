@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
 use crate::config::{CaldavConfig, MachineConfig, NodeSection, VaultConfig, VaultSection};
@@ -98,30 +98,54 @@ impl DaemonFlags {
         }
     }
 
-    /// [`DaemonFlags::resolve`] for the interactive wizard: with no flag it asks whether
-    /// an always-on server holds the vault, and for the vault's folder there.
-    fn ask(self) -> Result<DaemonHost, RestaskError> {
+    /// [`DaemonFlags::resolve`] for the interactive wizard: with no flag it asks, through
+    /// `prompt`, whether an always-on server holds the vault, and for the vault's folder
+    /// there.
+    ///
+    /// The server is connected to as soon as it is named
+    /// ([`DaemonInstaller::connect_node`]), so whatever ssh needs typed — a password, a
+    /// key's passphrase — is asked right after the host, once, and before any other
+    /// question. A typed host that cannot be reached is asked for again; one given by
+    /// `--node` is the run's error.
+    pub fn ask(
+        self,
+        installer: Option<&dyn DaemonInstaller>,
+        prompt: &mut dyn FnMut(&str) -> Result<String, RestaskError>,
+    ) -> Result<DaemonHost, RestaskError> {
         if self.no_daemon && self.node.is_none() {
             return Ok(DaemonHost::Elsewhere);
         }
+        let connect = |host: &str| match installer {
+            Some(installer) => installer.connect_node(host),
+            None => Ok(()),
+        };
         let host = match self.node {
-            Some(host) => host,
+            Some(host) => {
+                connect(&host)?;
+                host
+            }
             None => {
                 println!(
                     "\nOne machine that is always on keeps the vault and the server in sync. \
                      If a server holds a copy of this vault (through the file sync), restask \
                      is installed there now, over ssh, with the credentials above."
                 );
-                crate::tui::prompt("ssh host of that server (Enter: this computer does it):")?
+                loop {
+                    let host = prompt("ssh host of that server (Enter: this computer does it):")?;
+                    if host.is_empty() {
+                        return Ok(DaemonHost::Here);
+                    }
+                    match connect(&host) {
+                        Ok(()) => break host,
+                        Err(error) => println!("{error}"),
+                    }
+                }
             }
         };
-        if host.is_empty() {
-            return Ok(DaemonHost::Here);
-        }
         let vault = match self.node_vault {
             Some(vault) => vault,
             None => loop {
-                let typed = crate::tui::prompt(&format!("Vault folder on {host}:"))?;
+                let typed = prompt(&format!("Vault folder on {host}:"))?;
                 if !typed.is_empty() {
                     break typed;
                 }
@@ -340,7 +364,8 @@ pub async fn run_setup<C: CaldavPort>(
 /// machine-local `radicale.passwd` (0600, §17), then shares the non-interactive plan.
 /// With `join` (see [`joins`]) the vault already names the calendar TODO.md is bound to.
 /// Last it asks which machine runs the daemon, unless `daemon` says so
-/// ([`DaemonFlags`]): the password typed once goes to this machine's password file when
+/// ([`DaemonFlags::ask`]; a server is connected to as soon as it is named, so ssh asks
+/// what it needs there): the password typed once goes to this machine's password file when
 /// the daemon runs here, and to the node — and nowhere on this machine — when it runs
 /// there.
 pub async fn run_interactive(
@@ -389,7 +414,7 @@ pub async fn run_interactive(
     };
 
     if join {
-        let daemon = daemon.ask()?;
+        let daemon = daemon.ask(installer, &mut |message| crate::tui::prompt(message))?;
         let args = SetupArgs {
             vault,
             password_file: keep_password(&config_path, &daemon, &password)?,
@@ -433,7 +458,7 @@ pub async fn run_interactive(
         }
     };
 
-    let daemon = daemon.ask()?;
+    let daemon = daemon.ask(installer, &mut |message| crate::tui::prompt(message))?;
     let args = SetupArgs {
         vault,
         password_file: keep_password(&config_path, &daemon, &password)?,
@@ -910,6 +935,17 @@ pub trait DaemonInstaller {
     /// `vault` is the folder the unit points at; `exec` is the `restask` binary to run.
     fn install(&self, vault: &Path, exec: &Path) -> Result<Option<String>, RestaskError>;
 
+    /// Opens the connection to `host`, the ssh host of a node, letting ssh ask on the
+    /// terminal whatever it needs to log in (a password, a key's passphrase, a new host's
+    /// fingerprint). What follows on that host — [`DaemonInstaller::prepare_node`],
+    /// [`DaemonInstaller::install_node`] — goes through the same connection and asks
+    /// nothing again. The wizard calls it as soon as the host is typed; an installer
+    /// that is not asked first connects when it first needs the host.
+    fn connect_node(&self, host: &str) -> Result<(), RestaskError> {
+        let _ = host;
+        Ok(())
+    }
+
     /// Checks that `node` can run the daemon — it is reachable, has what the install
     /// needs, holds the vault's folder — and stops a daemon already running there. Called
     /// before setup writes anything, so that no other pass runs while it does.
@@ -944,17 +980,144 @@ fn no_node_support(node: &NodeTarget) -> RestaskError {
 /// `systemctl --user enable --now restask.service`, and enables linger so the unit
 /// survives logout; re-running setup overwrites the unit (idempotent refresh). On a
 /// node: runs `contrib/node.sh` of the restask sources ([`node_script`]), which drives
-/// the server over ssh (App. E).
-pub struct SystemInstaller;
+/// the server over ssh (App. E) — through one connection ([`NodeLink`]) that is opened
+/// once, kept for the run and closed when the installer is dropped.
+#[derive(Default)]
+pub struct SystemInstaller {
+    link: Mutex<Option<NodeLink>>,
+}
+
+/// The ssh connection of one setup run to its node: a master connection (`ControlMaster`)
+/// that ssh authenticated once, shared through the socket `control` by every ssh call of
+/// the run.
+struct NodeLink {
+    /// The host the connection goes to.
+    host: String,
+    /// Private directory that holds the socket.
+    dir: PathBuf,
+    /// `ControlPath` of the connection.
+    control: String,
+}
+
+impl Drop for NodeLink {
+    fn drop(&mut self) {
+        let _ = Command::new("ssh")
+            .args(["-o", &format!("ControlPath={}", self.control)])
+            .args(["-O", "exit", "--", &self.host])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// How long the connection to a node stays open with nothing using it, in seconds: the
+/// time the user may take over the wizard's next question before ssh asks again.
+const NODE_LINK_IDLE_SECS: u32 = 900;
+
+/// The arguments of the `ssh` call that opens the connection to `host` and leaves it in
+/// the background behind the socket `control`: ssh asks what it needs on the terminal,
+/// runs nothing on the host and returns.
+pub fn node_link_args(control: &str, host: &str) -> Vec<String> {
+    vec![
+        "-o".to_string(),
+        "ControlMaster=yes".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={control}"),
+        "-o".to_string(),
+        format!("ControlPersist={NODE_LINK_IDLE_SECS}"),
+        "--".to_string(),
+        host.to_string(),
+        "true".to_string(),
+    ]
+}
+
+/// A new, private (0700) directory for a connection's socket: in `$XDG_RUNTIME_DIR`,
+/// else the system's temporary directory.
+fn node_link_dir() -> Result<PathBuf, RestaskError> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("restask-ssh-{}", std::process::id()));
+    // What an interrupted run with this process id left behind.
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    Ok(dir)
+}
+
+impl SystemInstaller {
+    /// The `ControlPath` of the connection to `host`, opening it when this run has none
+    /// yet ([`DaemonInstaller::connect_node`]).
+    fn link(&self, host: &str) -> Result<String, RestaskError> {
+        let mut link = self
+            .link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(open) = link.as_ref().filter(|open| open.host == host) {
+            return Ok(open.control.clone());
+        }
+        // A name that starts with a dash would be read by ssh as an option.
+        if host.starts_with('-') || host.chars().any(char::is_whitespace) {
+            return Err(RestaskError::Validation {
+                field: "node",
+                reason: format!("`{host}` is not an ssh host"),
+            });
+        }
+        *link = None;
+        println!("connecting to {host} …");
+        let dir = node_link_dir()?;
+        let control = dir.join("%C").display().to_string();
+        // Created before the call, so that a connection left behind by a call that
+        // failed half-way is closed with it.
+        let opening = NodeLink {
+            host: host.to_string(),
+            dir,
+            control: control.clone(),
+        };
+        let status = Command::new("ssh")
+            .args(node_link_args(&control, host))
+            .stdin(Stdio::null())
+            .status()
+            .map_err(|error| RestaskError::Validation {
+                field: "node",
+                reason: format!("cannot run ssh: {error}"),
+            })?;
+        if !status.success() {
+            return Err(RestaskError::Validation {
+                field: "node",
+                reason: format!("cannot reach `{host}` over ssh (does `ssh {host}` work?)"),
+            });
+        }
+        *link = Some(opening);
+        Ok(control)
+    }
+}
 
 impl DaemonInstaller for SystemInstaller {
+    fn connect_node(&self, host: &str) -> Result<(), RestaskError> {
+        self.link(host).map(|_| ())
+    }
+
     fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
         let script = node_script()?;
+        let control = self.link(&node.host)?;
         println!("checking {} …", node.host);
         run_script(
             &script,
             &["check", &node.host, &node.vault, &node.dir],
             None,
+            &control,
         )
     }
 
@@ -965,6 +1128,7 @@ impl DaemonInstaller for SystemInstaller {
         access: NodeAccess<'_>,
     ) -> Result<String, RestaskError> {
         let script = node_script()?;
+        let control = self.link(&node.host)?;
         // The script works from the sources' directory: a vault given relative to this
         // process's working directory would name another folder there.
         let vault = std::path::absolute(vault)?.display().to_string();
@@ -980,6 +1144,7 @@ impl DaemonInstaller for SystemInstaller {
             &script,
             &["install", &node.host, &node.vault, &node.dir, &vault],
             Some(&input),
+            &control,
         )?;
         Ok(format!(
             "daemon: running on {} (stack {}, vault {}); this computer runs none and \
@@ -1106,13 +1271,23 @@ pub fn node_script() -> Result<PathBuf, RestaskError> {
     }
 }
 
+/// Environment variable that hands `contrib/node.sh` the `ControlPath` of an ssh
+/// connection that is already open: the script uses it and leaves it open.
+pub const ENV_SSH_CONTROL: &str = "RESTASK_SSH_CONTROL";
+
 /// Runs `contrib/node.sh` with `args`, its output going to the terminal, `input` to its
-/// standard input.
-fn run_script(script: &Path, args: &[&str], input: Option<&str>) -> Result<(), RestaskError> {
+/// standard input, its ssh calls through the connection behind `control`.
+fn run_script(
+    script: &Path,
+    args: &[&str],
+    input: Option<&str>,
+    control: &str,
+) -> Result<(), RestaskError> {
     use std::io::Write as _;
     let mut child = Command::new("bash")
         .arg(script)
         .args(args)
+        .env(ENV_SSH_CONTROL, control)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {

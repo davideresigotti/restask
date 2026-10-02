@@ -94,6 +94,10 @@ On push and pull request, three jobs on `ubuntu-latest`:
   `restask setup --join` run in the container); mounts the vault at `/vault`;
   `restart: unless-stopped`.
 - `node.sh` — the sync node driven over ssh, one connection per run (`ControlMaster`).
+  Under `restask setup` that connection is the one setup opened when the host was named
+  (§13.2 step 6): its `ControlPath` arrives in `RESTASK_SSH_CONTROL`, `check` and
+  `install` share it, and the script leaves it open. Run by itself (`update.sh`) the
+  script opens its own, where ssh asks what it needs, and closes it on exit.
   Remote paths are passed as quoted arguments, never spliced into a command line.
   - `check <host> <vault> [<dir>]` (setup's `prepare_node`): ssh works; `docker compose
     version` answers; `<vault>` is a folder; a stack already in `<dir>` mounts that

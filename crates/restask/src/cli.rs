@@ -228,7 +228,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
                     join,
                     daemon,
                     Arc::new(SystemClock),
-                    Some(&setup::SystemInstaller),
+                    Some(&setup::SystemInstaller::default()),
                 )
                 .await?;
                 return Ok(0);
@@ -282,7 +282,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
                 args,
                 caldav,
                 Arc::new(SystemClock),
-                Some(&setup::SystemInstaller),
+                Some(&setup::SystemInstaller::default()),
             )
             .await?;
             setup::print_summary(&summary);

@@ -115,6 +115,15 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
 6. **The daemon** (`SetupArgs::daemon`, a `DaemonHost`). The interactive wizard asks
    for the ssh host of an always-on server that holds a copy of the vault (Enter: this
    computer) and for the vault's folder there; flags answer instead (`DaemonFlags`).
+   A server is **connected to as soon as it is named** (`connect_node`): one ssh
+   master connection is opened, on the terminal, so ssh itself asks whatever it needs
+   to log in — a password where no key is set up, a key's passphrase, a new host's
+   fingerprint — right after the host and before the next question, once. Everything
+   setup then does on the server goes through that connection; it is closed when the
+   run ends. restask never sees or stores what was typed there. A typed host that
+   cannot be logged in to is asked for again (Enter: this computer); one given by
+   `--node` fails the run. Without a terminal ssh can ask nothing: an unattended run
+   needs a key.
    - **`Here`** (no server; the default without a terminal). With a systemd user
      session, writes `$XDG_CONFIG_HOME/systemd/user/restask.service` (absolute, quoted
      `ExecStart=<this binary> daemon --vault <vault>`, `Restart=on-failure`), runs
@@ -142,8 +151,8 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    and not taken for done. Whichever machine this is, setup creates the directory of
    the machine config when it is missing (a computer restask was never set up on has
    none). The installer is an injectable port (`DaemonInstaller`:
-   `install`, `prepare_node`, `install_node`; the real one is `SystemInstaller`); tests
-   record instead.
+   `install`, `connect_node`, `prepare_node`, `install_node`; the real one is
+   `SystemInstaller`); tests record instead.
 7. **Summary.**
 
 Non-interactive: `--url`, `--username`, a password source (`--password-env <VAR>`, or

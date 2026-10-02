@@ -17,8 +17,8 @@ use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::setup::{
     daemon_unit_content, install_obsidian_plugin, is_loopback, joins, match_collection,
-    parse_collections, run_setup, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess, NodeTarget,
-    SetupArgs,
+    node_link_args, parse_collections, run_setup, DaemonFlags, DaemonHost, DaemonInstaller,
+    NodeAccess, NodeTarget, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -169,6 +169,8 @@ struct RecordingInstaller {
     watched: Option<PathBuf>,
     fail_prepare: bool,
     fail_node: bool,
+    /// An ssh host that cannot be logged in to.
+    unreachable: Option<String>,
 }
 
 impl RecordingInstaller {
@@ -215,6 +217,17 @@ impl DaemonInstaller for RecordingInstaller {
             .unwrap()
             .push(format!("{}|{}", vault.display(), exec.display()));
         Ok(Some(format!("daemon: enabled for {}", vault.display())))
+    }
+
+    fn connect_node(&self, host: &str) -> Result<(), RestaskError> {
+        self.node_calls
+            .lock()
+            .unwrap()
+            .push(format!("connect {host}"));
+        if self.unreachable.as_deref() == Some(host) {
+            return Err(Self::injected());
+        }
+        Ok(())
     }
 
     fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
@@ -933,6 +946,190 @@ async fn a_node_install_that_fails_is_finished_by_a_join() {
     assert!(installer.calls().is_empty());
     let machine = MachineConfig::load(&config).unwrap();
     assert_eq!(machine.node.unwrap().host.as_deref(), Some("homeserver"));
+}
+
+/// What the wizard asked and what it did on the node, in order: `ask <question>` and the
+/// installer's `connect <host>`. `answers` are typed in turn.
+fn asked(
+    flags: DaemonFlags,
+    installer: &RecordingInstaller,
+    answers: &[&str],
+) -> (Result<DaemonHost, RestaskError>, Vec<String>) {
+    let mut answers = answers.iter();
+    let log = installer.node_calls.clone();
+    let host = flags.ask(Some(installer), &mut |question| {
+        log.lock().unwrap().push(format!("ask {question}"));
+        Ok(answers
+            .next()
+            .expect("the wizard asked more than the test answers")
+            .to_string())
+    });
+    (host, installer.node_calls())
+}
+
+#[test]
+fn the_server_is_connected_to_as_soon_as_its_ssh_host_is_typed() {
+    // ssh asks for what it needs to log in — a password, where no key is set up — when
+    // the connection is opened. That is right after the host is typed and before the
+    // next question, not minutes later in the middle of the install.
+    const HOST: &str = "ask ssh host of that server (Enter: this computer does it):";
+    let installer = RecordingInstaller::default();
+    let (host, log) = asked(
+        DaemonFlags::default(),
+        &installer,
+        &["homeserver", "", "/srv/sync/vault"],
+    );
+    assert_eq!(host.unwrap(), DaemonHost::Node(node()));
+    assert_eq!(
+        log,
+        vec![
+            HOST,
+            "connect homeserver",
+            "ask Vault folder on homeserver:",
+            "ask Vault folder on homeserver:",
+        ]
+    );
+
+    // A host that cannot be logged in to (wrong password, wrong name) is asked for
+    // again, there and then; Enter gives up on the server.
+    let installer = RecordingInstaller {
+        unreachable: Some("homserver".to_string()),
+        ..RecordingInstaller::default()
+    };
+    let (host, log) = asked(
+        DaemonFlags::default(),
+        &installer,
+        &["homserver", "homeserver", "/srv/sync/vault"],
+    );
+    assert_eq!(host.unwrap(), DaemonHost::Node(node()));
+    assert_eq!(
+        log,
+        vec![
+            HOST,
+            "connect homserver",
+            HOST,
+            "connect homeserver",
+            "ask Vault folder on homeserver:",
+        ]
+    );
+    let (host, log) = asked(DaemonFlags::default(), &installer, &["homserver", ""]);
+    assert_eq!(host.unwrap(), DaemonHost::Here);
+    assert_eq!(log.last().map(String::as_str), Some(HOST));
+
+    // No server, no connection.
+    let installer = RecordingInstaller::default();
+    let (host, log) = asked(DaemonFlags::default(), &installer, &[""]);
+    assert_eq!(host.unwrap(), DaemonHost::Here);
+    assert_eq!(log, vec![HOST]);
+    let no_daemon = DaemonFlags {
+        no_daemon: true,
+        ..DaemonFlags::default()
+    };
+    let (host, log) = asked(no_daemon, &installer, &[]);
+    assert_eq!(host.unwrap(), DaemonHost::Elsewhere);
+    assert_eq!(log, vec![HOST]);
+
+    // A host named by `--node` is connected to before anything is asked, and is not
+    // asked for again when it cannot be reached: the flag was the answer.
+    let flags = |host: &str| DaemonFlags {
+        node: Some(host.to_string()),
+        node_vault: Some("/srv/sync/vault".to_string()),
+        ..DaemonFlags::default()
+    };
+    let installer = RecordingInstaller {
+        unreachable: Some("homserver".to_string()),
+        ..RecordingInstaller::default()
+    };
+    let (host, log) = asked(flags("homeserver"), &installer, &[]);
+    assert_eq!(host.unwrap(), DaemonHost::Node(node()));
+    assert_eq!(log, vec!["connect homeserver"]);
+    let (host, _) = asked(flags("homserver"), &installer, &[]);
+    assert!(host.is_err());
+}
+
+#[test]
+fn the_connection_to_the_server_is_opened_once_and_kept_for_the_run() {
+    // One master connection behind a socket, left in the background: ssh asks once,
+    // and the host can never be read as an option.
+    assert_eq!(
+        node_link_args("/run/user/1000/restask-ssh-7/%C", "me@homeserver"),
+        vec![
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            "ControlPath=/run/user/1000/restask-ssh-7/%C",
+            "-o",
+            "ControlPersist=900",
+            "--",
+            "me@homeserver",
+            "true",
+        ]
+    );
+}
+
+/// Runs `contrib/node.sh check` with an `ssh` that only records its arguments, one line
+/// per call, and returns those lines. `control` is setup's open connection, if any.
+#[cfg(unix)]
+fn node_script_ssh_calls(control: Option<&str>) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = TempDir::new().unwrap();
+    let log = bin.path().join("calls");
+    let fake = bin.path().join("ssh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{}'\ncat >/dev/null\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut script = std::process::Command::new("bash");
+    script
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/node.sh"))
+        .args(["check", "homeserver", "/srv/sync/vault"])
+        .env("PATH", path)
+        .env_remove(restask::setup::ENV_SSH_CONTROL)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    if let Some(control) = control {
+        script.env(restask::setup::ENV_SSH_CONTROL, control);
+    }
+    assert!(script.status().unwrap().success());
+    std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_node_script_uses_the_connection_setup_opened_and_leaves_it_open() {
+    // Setup logged in when the host was typed. The script's ssh calls go through that
+    // connection — a second one would ask for the password again — and do not close
+    // it: the install that follows needs it.
+    let calls = node_script_ssh_calls(Some("/run/user/1000/restask-ssh-7/%C"));
+    assert!(!calls.is_empty());
+    for call in &calls {
+        assert!(
+            call.contains("ControlPath=/run/user/1000/restask-ssh-7/%C"),
+            "{call}"
+        );
+        assert!(!call.contains("-O exit"), "{call}");
+    }
+
+    // Run by itself (`contrib/update.sh`) the script has a connection of its own for
+    // the run, and closes it.
+    let calls = node_script_ssh_calls(None);
+    assert!(calls.len() > 1);
+    assert!(calls.iter().all(|call| !call.contains("restask-ssh-7")));
+    assert!(calls.last().unwrap().contains("-O exit"), "{calls:?}");
 }
 
 #[test]

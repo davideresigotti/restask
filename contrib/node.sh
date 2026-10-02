@@ -34,14 +34,20 @@ action="$1"
 host="$2"
 
 # One ssh connection for the whole run: whatever ssh asks (a passphrase, a password) is
-# asked once.
-control="$(mktemp -d)"
-ssh_opts=(-o ControlMaster=auto -o "ControlPath=$control/%C" -o ControlPersist=60)
-cleanup() {
-    ssh "${ssh_opts[@]}" -O exit "$host" 2>/dev/null || true
-    rm -rf "$control"
-}
-trap cleanup EXIT
+# asked once. `restask setup` has asked already: it opened the connection when the host
+# was typed and names its socket in RESTASK_SSH_CONTROL; that connection is used, for
+# `check` and `install` alike, and left open — it is setup's to close.
+if [ -n "${RESTASK_SSH_CONTROL-}" ]; then
+    ssh_opts=(-o ControlMaster=auto -o "ControlPath=$RESTASK_SSH_CONTROL" -o ControlPersist=60)
+else
+    control="$(mktemp -d)"
+    ssh_opts=(-o ControlMaster=auto -o "ControlPath=$control/%C" -o ControlPersist=60)
+    cleanup() {
+        ssh "${ssh_opts[@]}" -O exit "$host" 2>/dev/null || true
+        rm -rf "$control"
+    }
+    trap cleanup EXIT
+fi
 
 # remote <args…> — runs the script given on standard input on the host, as bash, with
 # the arguments as "$1" "$2" …; quoting survives whatever the paths contain.
