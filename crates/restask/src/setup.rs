@@ -1,5 +1,6 @@
 //! Setup wizard (§13.2): composes the vault scaffold (with the Obsidian plugin installed
-//! and enabled in it), the fresh TODO.md creation (any pre-existing file is renamed to the
+//! and enabled in it — and loaded by an Obsidian that has the vault open, [`ObsidianApp`]),
+//! the fresh TODO.md creation (any pre-existing file is renamed to the
 //! timestamped backup), machine-config records, the typed inbox binding, the first full
 //! reconcile, and the install of the vault's one daemon ([`DaemonHost`]): as a systemd
 //! user unit on this machine, or — over ssh, with the credentials typed here — on the
@@ -312,7 +313,7 @@ fn vault_is_set_up(vault: &Path) -> Result<bool, RestaskError> {
     Ok(std::fs::read_to_string(vault.join(&cfg.inbox_file)).is_ok_and(|inbox| is_view(&inbox)))
 }
 
-/// What one setup run did (§13.2 step 7 summary inputs).
+/// What one setup run did (§13.2 step 8 summary inputs).
 #[derive(Debug, Clone)]
 pub struct SetupSummary {
     /// Vault directory.
@@ -326,9 +327,12 @@ pub struct SetupSummary {
     pub backup: Option<String>,
     /// Collections ensured (created or verified) before the first sync.
     pub collections: Vec<String>,
-    /// Human note about the Obsidian plugin install (§13.2 step 1); `None` when it failed
-    /// (a warning was logged).
-    pub plugin: Option<String>,
+    /// What the Obsidian plugin install left in the vault (§13.2 step 1); `None` when
+    /// it failed (a warning was logged), and for a join, which installs none.
+    pub plugin: Option<PluginInstall>,
+    /// How the plugin got into an Obsidian that was running (§13.2 step 7); set by
+    /// [`SetupSummary::load_plugin`].
+    pub plugin_load: PluginLoad,
     /// Human note about the daemon (§13.2 step 6): the unit that was enabled, the node
     /// it runs on, or that it is installed by hand elsewhere. `None` when the environment
     /// cannot host a unit or its install failed.
@@ -338,6 +342,27 @@ pub struct SetupSummary {
     pub synced: bool,
     /// The first full reconcile's report (all zero when [`SetupSummary::synced`] is not).
     pub report: ReconcileReport,
+}
+
+impl SetupSummary {
+    /// Step 7 (§13.2), after everything else is in place: when this run put something
+    /// new of the plugin into the vault and an Obsidian on this computer has the vault
+    /// open, that Obsidian is made to load it ([`load_obsidian_plugin`]). `ask` is the
+    /// wizard's yes/no question, for the restart; an unattended run passes `None`.
+    pub fn load_plugin(&mut self, app: &dyn ObsidianApp, ask: Option<Confirm<'_>>) {
+        if self
+            .plugin
+            .is_some_and(|install| install.listed && install.changed)
+        {
+            self.plugin_load = load_obsidian_plugin(app, &self.vault, ask);
+        }
+    }
+
+    /// The summary line about the Obsidian plugin, when it was installed.
+    pub fn plugin_note(&self) -> Option<String> {
+        self.plugin
+            .map(|install| plugin_note(install, self.plugin_load))
+    }
 }
 
 /// Executes the non-interactive setup plan (§13.2): scaffold the vault and install the
@@ -367,7 +392,8 @@ pub async fn run_setup<C: CaldavPort>(
 /// ([`DaemonFlags::ask`]; a server is connected to as soon as it is named, so ssh asks
 /// what it needs there): the password typed once goes to this machine's password file when
 /// the daemon runs here, and to the node — and nowhere on this machine — when it runs
-/// there.
+/// there. When all is in place, an Obsidian that has the vault open is made to load the
+/// plugin, through `app` ([`SetupSummary::load_plugin`]; `None` leaves it alone).
 pub async fn run_interactive(
     vault: PathBuf,
     config_path: PathBuf,
@@ -375,6 +401,7 @@ pub async fn run_interactive(
     daemon: DaemonFlags,
     clock: Arc<dyn Clock>,
     installer: Option<&dyn DaemonInstaller>,
+    app: Option<&dyn ObsidianApp>,
 ) -> Result<(), RestaskError> {
     let known = vault.join("restask.toml").is_file() || vault.join(".restask").is_dir();
     if !known && !crate::tui::confirm(&format!("Use {} as the vault?", vault.display()))? {
@@ -472,7 +499,10 @@ pub async fn run_interactive(
         daemon,
         password: Some(Secret::new(password)),
     };
-    let summary = prepare_and_sync(args, client, clock, installer).await?;
+    let mut summary = prepare_and_sync(args, client, clock, installer).await?;
+    if let Some(app) = app {
+        summary.load_plugin(app, Some(&mut |message| crate::tui::confirm_yes(message)));
+    }
     print_summary(&summary);
     Ok(())
 }
@@ -530,7 +560,7 @@ async fn prepare_and_sync<C: CaldavPort>(
     // The vault is set: put the Obsidian plugin in it. Best-effort like the daemon unit —
     // the plugin is a convenience (§15) and a vault nobody opens in Obsidian loses nothing.
     let plugin = match install_obsidian_plugin(&vault, &cfg) {
-        Ok(note) => Some(note),
+        Ok(install) => Some(install),
         Err(error) => {
             tracing::warn!(%error, "obsidian plugin install failed; see INSTALL.md to add it by hand");
             None
@@ -599,6 +629,7 @@ async fn prepare_and_sync<C: CaldavPort>(
         backup,
         collections,
         plugin,
+        plugin_load: PluginLoad::default(),
         daemon,
         synced: true,
         report,
@@ -801,6 +832,7 @@ async fn join_and_sync<C: CaldavPort>(
         backup: None,
         collections: Vec::new(),
         plugin: None,
+        plugin_load: PluginLoad::default(),
         daemon,
         synced,
         report,
@@ -845,24 +877,43 @@ const OBSIDIAN_PLUGIN_FILES: [(&str, &str); 3] = [
     ("styles.css", include_str!("../assets/obsidian/styles.css")),
 ];
 
+/// What [`install_obsidian_plugin`] left in a vault: the input of the summary line, and
+/// of the step that gets the plugin into an Obsidian that is already running
+/// ([`SetupSummary::load_plugin`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginInstall {
+    /// Whether the vault's list of enabled plugins names the plugin. `false`: the list
+    /// is not one restask can read, and was left as it is.
+    pub listed: bool,
+    /// Whether this run wrote something Obsidian reads when it opens the vault — a file
+    /// of the plugin, or its entry in the list. An Obsidian that has the vault open has
+    /// not seen it.
+    pub changed: bool,
+}
+
 /// Installs the Obsidian plugin into `<vault>/.obsidian/plugins/restask/` and lists it in
 /// `.obsidian/community-plugins.json` (§13.2 step 1), so the vault opens in Obsidian with
-/// the plugin ready — on every device the vault is synced to. Returns the summary note.
+/// the plugin on — on every device the vault is synced to.
 ///
 /// Re-running refreshes the three plugin files and nothing else: the user's plugin
 /// settings and every other enabled plugin are kept, and a file that already has the
 /// right content is not rewritten. A plugin folder or file that is a symlink is managed
 /// by hand (a development checkout) and left alone. A `community-plugins.json` that is
-/// not a JSON list is never overwritten; the note then asks to enable the plugin by hand.
-pub fn install_obsidian_plugin(vault: &Path, cfg: &VaultConfig) -> Result<String, RestaskError> {
+/// not a JSON list is never overwritten; the summary then asks to enable the plugin by
+/// hand.
+pub fn install_obsidian_plugin(
+    vault: &Path,
+    cfg: &VaultConfig,
+) -> Result<PluginInstall, RestaskError> {
     let obsidian = vault.join(".obsidian");
     let plugin_dir = obsidian.join("plugins").join(OBSIDIAN_PLUGIN_ID);
+    let mut changed = false;
     if !is_symlink(&plugin_dir) {
         std::fs::create_dir_all(&plugin_dir)?;
         for (name, contents) in OBSIDIAN_PLUGIN_FILES {
             let path = plugin_dir.join(name);
             if !is_symlink(&path) {
-                fsio::write_if_changed(&path, contents)?;
+                changed |= fsio::write_if_changed(&path, contents)?;
             }
         }
         // The plugin moves completed lines under its own `doneHeading` setting, which
@@ -877,24 +928,23 @@ pub fn install_obsidian_plugin(vault: &Path, cfg: &VaultConfig) -> Result<String
         }
     }
 
-    let location = format!(".obsidian/plugins/{OBSIDIAN_PLUGIN_ID}");
-    Ok(if enable_obsidian_plugin(&obsidian)? {
-        format!(
-            "obsidian plugin: installed in {location} and enabled (reload Obsidian if this \
-             vault is open)"
-        )
-    } else {
-        format!(
-            "obsidian plugin: installed in {location}; .obsidian/community-plugins.json is \
-             not a list, so enable \"{OBSIDIAN_PLUGIN_ID}\" under Community plugins by hand"
-        )
+    Ok(match enable_obsidian_plugin(&obsidian)? {
+        None => PluginInstall {
+            listed: false,
+            changed,
+        },
+        Some(added) => PluginInstall {
+            listed: true,
+            changed: changed || added,
+        },
     })
 }
 
 /// Adds the plugin id to `.obsidian/community-plugins.json`, keeping every other entry in
-/// place. `Ok(false)` means the file holds something other than a JSON list and was left
-/// untouched; a file that already lists the plugin is not rewritten.
-fn enable_obsidian_plugin(obsidian: &Path) -> Result<bool, RestaskError> {
+/// place. `Ok(None)` means the file holds something other than a JSON list and was left
+/// untouched; `Ok(Some(added))` says whether the entry was written by this call — a file
+/// that already lists the plugin is not rewritten.
+fn enable_obsidian_plugin(obsidian: &Path) -> Result<Option<bool>, RestaskError> {
     let path = obsidian.join("community-plugins.json");
     let current = match std::fs::read_to_string(&path) {
         Ok(current) => current,
@@ -906,23 +956,473 @@ fn enable_obsidian_plugin(obsidian: &Path) -> Result<bool, RestaskError> {
     } else {
         match serde_json::from_str::<Vec<serde_json::Value>>(&current) {
             Ok(enabled) => enabled,
-            Err(_) => return Ok(false),
+            Err(_) => return Ok(None),
         }
     };
     if enabled
         .iter()
         .any(|id| id.as_str() == Some(OBSIDIAN_PLUGIN_ID))
     {
-        return Ok(true);
+        return Ok(Some(false));
     }
     enabled.push(serde_json::Value::from(OBSIDIAN_PLUGIN_ID));
     fsio::write_atomic(&path, &format!("{:#}", serde_json::Value::Array(enabled)))?;
-    Ok(true)
+    Ok(Some(true))
 }
 
 /// Whether `path` itself is a symbolic link (not followed).
 fn is_symlink(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// A yes/no question put to the user, as the wizard asks it on the terminal.
+pub type Confirm<'a> = &'a mut dyn FnMut(&str) -> Result<bool, RestaskError>;
+
+/// The Obsidian app of this computer, as far as setup deals with it (§13.2 step 7): the
+/// one that may have the vault open while setup installs the plugin. Obsidian reads a
+/// vault's plugins when it opens the vault and never again, so a plugin installed under
+/// a running Obsidian is not on until Obsidian is told, or started again. A port so
+/// tests record instead of reaching for the user's app.
+pub trait ObsidianApp {
+    /// Whether an Obsidian that is running on this computer has `vault` open.
+    fn has_open(&self, vault: &Path) -> bool;
+
+    /// Sends one command of Obsidian's command line interface (`plugin:enable`,
+    /// `reload`, …) to the window of `vault` and returns the answer. `Ok(None)`: the
+    /// interface is switched off in that Obsidian (its Settings → General).
+    fn command(&self, vault: &Path, args: &[&str]) -> Result<Option<String>, RestaskError>;
+
+    /// Closes Obsidian and starts it again the way it was started; it then opens the
+    /// vaults it had open by itself.
+    fn restart(&self) -> Result<(), RestaskError>;
+}
+
+/// How the plugin a setup run installed got into an Obsidian that was already running
+/// (§13.2 step 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PluginLoad {
+    /// Nothing was done, and as far as setup can tell nothing had to be: the run wrote
+    /// nothing new, or no running Obsidian has the vault open — Obsidian loads the
+    /// plugin when it opens the vault.
+    #[default]
+    NotNeeded,
+    /// Obsidian loaded the plugin when asked, through its command line interface.
+    Loaded,
+    /// Obsidian reloaded the vault's window when asked, through its command line
+    /// interface, and read the vault's plugins again.
+    Reloaded,
+    /// Obsidian was closed and started again, with the user's consent.
+    Restarted,
+    /// The vault is in restricted mode on this computer: Obsidian loads no community
+    /// plugin there until the user turns it off. Setup does not decide that for them.
+    Restricted,
+    /// Obsidian has the vault open and still runs without the plugin: the restart was
+    /// declined, could not be asked for, or failed.
+    Pending,
+}
+
+/// The answer Obsidian gives to every command while its command line interface is off.
+const OBSIDIAN_CLI_OFF: &str = "Command line interface is not enabled";
+
+/// Gets the plugin setup just installed into an Obsidian that has `vault` open (§13.2
+/// step 7). Through Obsidian's own command line interface when that is on — nothing
+/// closes. Otherwise `ask` is asked whether Obsidian may be restarted; without an `ask`
+/// (an unattended run) Obsidian is left running. Nothing here fails setup: what could
+/// not be done is [`PluginLoad::Pending`].
+pub fn load_obsidian_plugin(
+    app: &dyn ObsidianApp,
+    vault: &Path,
+    ask: Option<Confirm<'_>>,
+) -> PluginLoad {
+    if !app.has_open(vault) {
+        return PluginLoad::NotNeeded;
+    }
+    match app.command(vault, &["plugins:restrict"]) {
+        Ok(Some(restricted)) => load_through_cli(app, vault, &restricted),
+        Ok(None) => load_by_restart(app, ask),
+        Err(error) => {
+            tracing::warn!(%error, "obsidian did not answer; restart it to load the plugin");
+            PluginLoad::Pending
+        }
+    }
+}
+
+/// [`load_obsidian_plugin`] with the command line interface on. `restricted` is the
+/// answer to `plugins:restrict` (`on` / `off`). The gentlest command that works is the
+/// one used: reload the plugin (it was on, its files are new), enable it (Obsidian knows
+/// its folder, it was off), reload the window (the folder is new to this Obsidian).
+fn load_through_cli(app: &dyn ObsidianApp, vault: &Path, restricted: &str) -> PluginLoad {
+    if restricted.trim() == "on" {
+        return PluginLoad::Restricted;
+    }
+    let id = format!("id={OBSIDIAN_PLUGIN_ID}");
+    let says = |args: &[&str], done: &str| matches!(app.command(vault, args), Ok(Some(answer)) if answer.trim_start().starts_with(done));
+    if says(&["plugin:reload", &id], "Reloaded")
+        || says(&["plugin:enable", &id, "filter=community"], "Enabled")
+    {
+        PluginLoad::Loaded
+    } else if says(&["reload"], "Reloading") {
+        PluginLoad::Reloaded
+    } else {
+        PluginLoad::Pending
+    }
+}
+
+/// [`load_obsidian_plugin`] with the command line interface off: Obsidian has to start
+/// again, and that closes the user's windows — so only when `ask` says yes.
+fn load_by_restart(app: &dyn ObsidianApp, ask: Option<Confirm<'_>>) -> PluginLoad {
+    let Some(ask) = ask else {
+        return PluginLoad::Pending;
+    };
+    let agreed = ask(
+        "Obsidian has this vault open, and it loads a new plugin only when it starts. \
+         Restart Obsidian now?",
+    );
+    if !matches!(agreed, Ok(true)) {
+        return PluginLoad::Pending;
+    }
+    match app.restart() {
+        Ok(()) => PluginLoad::Restarted,
+        Err(error) => {
+            println!("Obsidian was not restarted: {error}");
+            PluginLoad::Pending
+        }
+    }
+}
+
+/// The summary line about the plugin: where it is, and whether an Obsidian that was
+/// running has it by now.
+fn plugin_note(install: PluginInstall, load: PluginLoad) -> String {
+    let location = format!(".obsidian/plugins/{OBSIDIAN_PLUGIN_ID}");
+    if !install.listed {
+        return format!(
+            "obsidian plugin: installed in {location}; .obsidian/community-plugins.json is \
+             not a list, so enable \"{OBSIDIAN_PLUGIN_ID}\" under Community plugins by hand"
+        );
+    }
+    let running = match load {
+        PluginLoad::NotNeeded if install.changed => " (restart Obsidian if this vault is open)",
+        PluginLoad::NotNeeded => "",
+        PluginLoad::Loaded => "; the Obsidian that has this vault open loaded it",
+        PluginLoad::Reloaded => "; Obsidian reloaded this vault's window and loaded it",
+        PluginLoad::Restarted => "; Obsidian was restarted and loaded it",
+        PluginLoad::Restricted => {
+            "; Obsidian is in restricted mode for this vault and loads no community plugin: \
+             turn that off under Settings → Community plugins"
+        }
+        PluginLoad::Pending => {
+            "; Obsidian has this vault open and loads the plugin when it is restarted"
+        }
+    };
+    format!("obsidian plugin: installed in {location} and enabled{running}")
+}
+
+/// Real [`ObsidianApp`]: the Obsidian of this user, found through the list of vaults it
+/// keeps in its own configuration folder and the socket its command line interface
+/// listens on while it runs. Restarting it is done on Linux only.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemObsidian;
+
+impl ObsidianApp for SystemObsidian {
+    fn has_open(&self, vault: &Path) -> bool {
+        obsidian_window(vault).is_some()
+    }
+
+    fn command(&self, vault: &Path, args: &[&str]) -> Result<Option<String>, RestaskError> {
+        let Some((id, socket)) = obsidian_window(vault) else {
+            return Err(obsidian_error("no running Obsidian has this vault open"));
+        };
+        let answer = obsidian_cli_request(&socket, &id, vault, args)?;
+        Ok(Some(answer).filter(|answer| !answer.starts_with(OBSIDIAN_CLI_OFF)))
+    }
+
+    fn restart(&self) -> Result<(), RestaskError> {
+        #[cfg(target_os = "linux")]
+        {
+            // Obsidian is started again in this terminal's environment: one that is
+            // not in the desktop session (ssh) could close it, but not show it again.
+            let in_session = ["WAYLAND_DISPLAY", "DISPLAY"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+            if !in_session {
+                return Err(obsidian_error(
+                    "this terminal is not in the desktop session Obsidian runs in",
+                ));
+            }
+            let pid = obsidian_pid()?;
+            println!("restarting Obsidian …");
+            restart_process(pid).map(|_| ())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(obsidian_error(
+                "restarting Obsidian is not supported on this system",
+            ))
+        }
+    }
+}
+
+/// An error of the dealings with the running Obsidian.
+fn obsidian_error(reason: impl Into<String>) -> RestaskError {
+    RestaskError::Validation {
+        field: "obsidian",
+        reason: reason.into(),
+    }
+}
+
+/// The id under which the Obsidian whose list of vaults is `list` (the text of its
+/// `obsidian.json`) has `vault` open in a window. `None`: it does not know the folder,
+/// or has no window on it. (The mark also survives a quit, for the next start; whether
+/// that Obsidian runs is the caller's question.)
+pub fn open_vault_id(list: &str, vault: &Path) -> Option<String> {
+    let list: serde_json::Value = serde_json::from_str(list).ok()?;
+    let same = |path: &str| {
+        let path = Path::new(path);
+        path == vault || std::fs::canonicalize(path).is_ok_and(|path| path == vault)
+    };
+    list.get("vaults")?
+        .as_object()?
+        .iter()
+        .find(|(_, entry)| {
+            entry.get("open").and_then(serde_json::Value::as_bool) == Some(true)
+                && entry
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(same)
+        })
+        .map(|(id, _)| id.clone())
+}
+
+/// Where an Obsidian install keeps its list of vaults (`obsidian.json` in the first
+/// path) and where it listens for its command line interface (the second): the app
+/// installed the ordinary way, and on Linux the Flatpak.
+fn obsidian_homes() -> Vec<(PathBuf, PathBuf)> {
+    let dir = |name: &str| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let Some(home) = dir("HOME") else {
+        return Vec::new();
+    };
+    const SOCKET: &str = ".obsidian-cli.sock";
+    if cfg!(target_os = "macos") {
+        return vec![(
+            home.join("Library/Application Support/obsidian"),
+            home.join(SOCKET),
+        )];
+    }
+    let runtime = dir("XDG_RUNTIME_DIR");
+    let mut homes = vec![(
+        xdg_config_home().join("obsidian"),
+        runtime.clone().unwrap_or_else(|| home.clone()).join(SOCKET),
+    )];
+    if let Some(runtime) = runtime {
+        const FLATPAK: &str = "md.obsidian.Obsidian";
+        homes.push((
+            home.join(".var/app").join(FLATPAK).join("config/obsidian"),
+            runtime
+                .join(".flatpak")
+                .join(FLATPAK)
+                .join("xdg-run")
+                .join(SOCKET),
+        ));
+    }
+    homes
+}
+
+/// The running Obsidian that has `vault` open: the id it knows the vault by and the
+/// socket of its command line interface. It runs if the socket takes a connection.
+fn obsidian_window(vault: &Path) -> Option<(String, PathBuf)> {
+    #[cfg(unix)]
+    {
+        let vault = std::fs::canonicalize(vault).ok()?;
+        obsidian_homes().into_iter().find_map(|(config, socket)| {
+            let list = std::fs::read_to_string(config.join("obsidian.json")).ok()?;
+            let id = open_vault_id(&list, &vault)?;
+            std::os::unix::net::UnixStream::connect(&socket).ok()?;
+            Some((id, socket))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = vault;
+        None
+    }
+}
+
+/// How long Obsidian is given to answer a command, in seconds.
+const OBSIDIAN_ANSWER_SECS: u64 = 15;
+
+/// Sends one command line to the Obsidian listening on `socket`, for its vault `id`, and
+/// returns what it answers. This is what Obsidian's own `obsidian` command sends: one
+/// JSON line (`argv`, `tty`, `cwd`), answered with text until the connection closes.
+/// The vault is named in the first argument: without it Obsidian takes the window that
+/// had the focus last, which may be another vault.
+pub fn obsidian_cli_request(
+    socket: &Path,
+    id: &str,
+    vault: &Path,
+    args: &[&str],
+) -> Result<String, RestaskError> {
+    #[cfg(unix)]
+    {
+        use std::io::{Read as _, Write as _};
+        let timeout = Some(std::time::Duration::from_secs(OBSIDIAN_ANSWER_SECS));
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+        stream.set_read_timeout(timeout)?;
+        stream.set_write_timeout(timeout)?;
+        let mut argv = vec![format!("vault={id}")];
+        argv.extend(args.iter().map(|arg| arg.to_string()));
+        let request = serde_json::json!({ "argv": argv, "tty": false, "cwd": vault });
+        stream.write_all(format!("{request}\n").as_bytes())?;
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer)?;
+        Ok(answer.trim().to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket, id, vault, args);
+        Err(obsidian_error(
+            "Obsidian's command line interface is not reachable on this system",
+        ))
+    }
+}
+
+/// Whether a process is Obsidian itself — its executable is called `obsidian` — and not
+/// one of the helper processes it starts from the same executable (`--type=renderer`,
+/// `--type=gpu-process`, …).
+pub fn is_obsidian_main(exe: &Path, argv: &[String]) -> bool {
+    exe.file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("obsidian"))
+        && !argv.iter().any(|arg| arg.starts_with("--type="))
+}
+
+/// The one Obsidian this user runs. Other users' processes cannot be looked at and are
+/// passed over; two Obsidians (an ordinary install and a sandboxed one) are an error —
+/// setup does not guess which one to close.
+#[cfg(target_os = "linux")]
+fn obsidian_pid() -> Result<u32, RestaskError> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let Some(pid) = entry
+            .ok()
+            .and_then(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        let (Ok(exe), Ok(argv)) = (
+            std::fs::read_link(proc.join("exe")),
+            nul_separated(&proc.join("cmdline")),
+        ) else {
+            continue;
+        };
+        let argv: Vec<String> = argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        if is_obsidian_main(&exe, &argv) {
+            found.push(pid);
+        }
+    }
+    match found[..] {
+        [pid] => Ok(pid),
+        [] => Err(obsidian_error("no running Obsidian found")),
+        _ => Err(obsidian_error("more than one Obsidian is running")),
+    }
+}
+
+/// The entries of a `/proc/<pid>/cmdline` file.
+#[cfg(target_os = "linux")]
+fn nul_separated(path: &Path) -> std::io::Result<Vec<std::ffi::OsString>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    Ok(std::fs::read(path)?
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| std::ffi::OsString::from_vec(entry.to_vec()))
+        .collect())
+}
+
+/// How long a process is given to close after it was asked to, in seconds. It is never
+/// killed: one that does not close keeps running, and is not started a second time.
+#[cfg(target_os = "linux")]
+const RESTART_GRACE_SECS: u64 = 15;
+
+/// Whether process `pid` has ended (a process that ended and was not collected by its
+/// parent yet counts).
+#[cfg(target_os = "linux")]
+fn has_ended(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // "<pid> (<name>) <state> …": the name may hold anything, the state follows
+        // its last parenthesis.
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+        Err(_) => true,
+    }
+}
+
+/// Asks process `pid` to close (`SIGTERM`, the request a desktop sends at logout), waits
+/// until it has, and starts it again as it was started: the same program, arguments and
+/// working directory, detached from this terminal. Returns the new process id.
+///
+/// The environment is this process's own: the one the program was started with cannot
+/// be read back from an app like Obsidian, which blanks it. Whether the program can be
+/// started again is checked first — one whose program is not a file here (it runs in a
+/// sandbox), or is a file that goes away with the process (an AppImage's mount), is
+/// left running.
+#[cfg(target_os = "linux")]
+pub fn restart_process(pid: u32) -> Result<u32, RestaskError> {
+    use std::os::unix::process::CommandExt as _;
+    let proc = PathBuf::from(format!("/proc/{pid}"));
+    let argv = nul_separated(&proc.join("cmdline"))?;
+    let started_as = |path: PathBuf| {
+        Some(path).filter(|path| {
+            path.is_absolute() && path.is_file() && !path.starts_with("/tmp/.mount_")
+        })
+    };
+    let program = argv
+        .first()
+        .and_then(|program| started_as(PathBuf::from(program)))
+        .or_else(|| started_as(std::fs::read_link(proc.join("exe")).ok()?))
+        .ok_or_else(|| {
+            obsidian_error(
+                "its program is not a file this session can start again (an AppImage or a \
+                 sandboxed install?); restart it by hand",
+            )
+        })?;
+    let cwd = std::fs::read_link(proc.join("cwd")).ok();
+
+    run("kill", &["-TERM", &pid.to_string()])?;
+    let asked = std::time::Instant::now();
+    while !has_ended(pid) {
+        if asked.elapsed().as_secs() >= RESTART_GRACE_SECS {
+            return Err(obsidian_error(format!(
+                "it did not close within {RESTART_GRACE_SECS} s, and was left as it is"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let mut command = Command::new(&program);
+    command
+        .args(argv.iter().skip(1))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // Its own process group: a Ctrl-C in this terminal is not for it.
+        .process_group(0);
+    if let Some(cwd) = cwd.filter(|cwd| cwd.is_dir()) {
+        command.current_dir(cwd);
+    }
+    let child = command.spawn().map_err(|error| {
+        obsidian_error(format!(
+            "it closed, but {} could not be started again ({error}); start it by hand",
+            program.display()
+        ))
+    })?;
+    Ok(child.id())
 }
 
 /// Installs the vault's daemon (§13.2 step 6): the machine-local systemd user unit that
@@ -1374,7 +1874,7 @@ fn write_secret(path: &Path, password: &str) -> Result<(), RestaskError> {
     }
 }
 
-/// Prints the §13.2 step-7 summary (backup, config, client wiring, next steps) to stdout.
+/// Prints the §13.2 step-8 summary (backup, config, client wiring, next steps) to stdout.
 pub fn print_summary(summary: &SetupSummary) {
     if summary.joined {
         println!(
@@ -1395,7 +1895,7 @@ pub fn print_summary(summary: &SetupSummary) {
             summary.report.scanned_files, summary.report.registered, summary.report.pushes
         );
     }
-    if let Some(note) = &summary.plugin {
+    if let Some(note) = summary.plugin_note() {
         println!("{note}");
     }
     if let Some(note) = &summary.daemon {

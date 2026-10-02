@@ -113,8 +113,8 @@ in the commit message.
 - File writes go through `fsio` only. `std::fs` reads are for the adapters (`vault`,
   `store`, `sync::engine`, `setup`, `cli`, `config`).
 - Network goes through `CaldavPort` only. The port stays stateless.
-- `std::process::Command` is allowed only in `setup.rs` (the systemd unit install, and
-  `contrib/node.sh` for the daemon on a node).
+- `std::process::Command` is allowed only in `setup.rs` (the systemd unit install,
+  `contrib/node.sh` for the daemon on a node, and the restart of Obsidian).
 - Async only where it already is (caldav, engine, daemon, cli).
 
 **Rust** (crate `restask`, edition 2021)

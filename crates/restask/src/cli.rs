@@ -229,6 +229,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
                     daemon,
                     Arc::new(SystemClock),
                     Some(&setup::SystemInstaller::default()),
+                    Some(&setup::SystemObsidian),
                 )
                 .await?;
                 return Ok(0);
@@ -278,13 +279,15 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
                 )?
             };
             let caldav = CaldavClient::new(&args.url, args.username.clone(), Some(password))?;
-            let summary = setup::run_setup(
+            let mut summary = setup::run_setup(
                 args,
                 caldav,
                 Arc::new(SystemClock),
                 Some(&setup::SystemInstaller::default()),
             )
             .await?;
+            // Unattended: Obsidian is told when it can be, and never restarted.
+            summary.load_plugin(&setup::SystemObsidian, None);
             setup::print_summary(&summary);
             Ok(0)
         }
@@ -451,8 +454,9 @@ pub async fn run_with<C: CaldavPort>(
                 node_dir,
             };
             if !non_interactive {
-                // Hermetic dispatch: never touch the host's systemd session or a node.
-                setup::run_interactive(vault, config_path, join, daemon, clock, None).await?;
+                // Hermetic dispatch: never touch the host's systemd session, a node or
+                // the user's Obsidian.
+                setup::run_interactive(vault, config_path, join, daemon, clock, None, None).await?;
                 return Ok(0);
             }
             let args = setup::SetupArgs {

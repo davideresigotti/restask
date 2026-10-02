@@ -30,3 +30,15 @@ pub fn confirm(message: &str) -> Result<bool, RestaskError> {
         }
     }
 }
+
+/// Yes/no confirmation for a step the wizard recommends; empty input means yes.
+pub fn confirm_yes(message: &str) -> Result<bool, RestaskError> {
+    loop {
+        let answer = prompt(&format!("{message} [Y/n]"))?;
+        match answer.as_str() {
+            "" | "y" | "Y" | "yes" | "Yes" => return Ok(true),
+            "n" | "N" | "no" | "No" => return Ok(false),
+            _ => {}
+        }
+    }
+}

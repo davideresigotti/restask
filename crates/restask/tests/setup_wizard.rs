@@ -1,5 +1,6 @@
 //! Setup wizard tests (§13.2): the fresh TODO.md creation with rename-to-backup, the
-//! typed inbox binding, the Obsidian plugin install, the non-interactive full setup
+//! typed inbox binding, the Obsidian plugin install and how a running Obsidian comes to
+//! load it, the non-interactive full setup
 //! against the in-memory CalDAV mock, joining a vault that is already set up, and where
 //! the vault's one daemon is put — this machine, or a node that is handed the
 //! credentials.
@@ -16,9 +17,10 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::setup::{
-    daemon_unit_content, install_obsidian_plugin, is_loopback, joins, match_collection,
-    node_link_args, parse_collections, run_setup, DaemonFlags, DaemonHost, DaemonInstaller,
-    NodeAccess, NodeTarget, SetupArgs,
+    daemon_unit_content, install_obsidian_plugin, is_loopback, is_obsidian_main, joins,
+    match_collection, node_link_args, open_vault_id, parse_collections, run_setup, DaemonFlags,
+    DaemonHost, DaemonInstaller, NodeAccess, NodeTarget, ObsidianApp, PluginInstall, PluginLoad,
+    SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -1315,7 +1317,19 @@ async fn setup_installs_and_enables_the_obsidian_plugin() {
         "[\n  \"restask\"\n]"
     );
     assert!(!plugin_dir(vault.path()).join("data.json").exists());
-    assert!(summary.plugin.as_deref().unwrap().contains("enabled"));
+    assert_eq!(
+        summary.plugin,
+        Some(PluginInstall {
+            listed: true,
+            changed: true
+        })
+    );
+    // No Obsidian was looked for: the line says what to do if one has the vault open.
+    assert_eq!(
+        summary.plugin_note().unwrap(),
+        "obsidian plugin: installed in .obsidian/plugins/restask and enabled (restart \
+         Obsidian if this vault is open)"
+    );
 }
 
 #[test]
@@ -1377,9 +1391,15 @@ fn plugin_install_is_a_no_op_on_an_installed_vault() {
     };
     let before = modified(&tracked);
 
-    let note = install_obsidian_plugin(vault.path(), &cfg).unwrap();
+    let install = install_obsidian_plugin(vault.path(), &cfg).unwrap();
 
-    assert!(note.contains("enabled"), "{note}");
+    assert_eq!(
+        install,
+        PluginInstall {
+            listed: true,
+            changed: false
+        }
+    );
     assert_eq!(
         modified(&tracked),
         before,
@@ -1408,10 +1428,10 @@ fn plugin_install_never_overwrites_a_plugin_list_it_cannot_read() {
     for unreadable in ["[\"dataview\", ", "{\"dataview\": true}"] {
         std::fs::write(&enabled, unreadable).unwrap();
 
-        let note = install_obsidian_plugin(vault.path(), &VaultConfig::default()).unwrap();
+        let install = install_obsidian_plugin(vault.path(), &VaultConfig::default()).unwrap();
 
         assert_eq!(std::fs::read_to_string(&enabled).unwrap(), unreadable);
-        assert!(note.contains("by hand"), "{note}");
+        assert!(!install.listed);
         assert!(plugin_dir(vault.path()).join("main.js").is_file());
     }
 }
@@ -1478,4 +1498,403 @@ fn plugin_install_leaves_a_symlinked_development_install_alone() {
             "[\n  \"restask\"\n]"
         );
     }
+}
+
+/// An [`ObsidianApp`] that records what it was asked instead of reaching for the user's
+/// Obsidian: whether it has the vault open, what its command line interface answers
+/// (`None`: switched off), whether a restart works.
+#[derive(Default)]
+struct RecordingObsidian {
+    open: bool,
+    /// Answers by the command's first word; a command not listed is refused the way
+    /// Obsidian refuses it.
+    cli: Option<Vec<(&'static str, &'static str)>>,
+    fail_restart: bool,
+    /// One line per call: `open?`, the command line, `restart`.
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingObsidian {
+    fn with_cli(answers: &[(&'static str, &'static str)]) -> Self {
+        Self {
+            open: true,
+            cli: Some(answers.to_vec()),
+            ..Self::default()
+        }
+    }
+
+    fn without_cli() -> Self {
+        Self {
+            open: true,
+            ..Self::default()
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ObsidianApp for RecordingObsidian {
+    fn has_open(&self, _vault: &Path) -> bool {
+        self.calls.lock().unwrap().push("open?".to_string());
+        self.open
+    }
+
+    fn command(&self, _vault: &Path, args: &[&str]) -> Result<Option<String>, RestaskError> {
+        self.calls.lock().unwrap().push(args.join(" "));
+        Ok(self.cli.as_ref().map(|answers| {
+            answers
+                .iter()
+                .find(|(command, _)| *command == args[0])
+                .map_or("Error: Plugin \"restask\" not found.", |(_, answer)| answer)
+                .to_string()
+        }))
+    }
+
+    fn restart(&self) -> Result<(), RestaskError> {
+        self.calls.lock().unwrap().push("restart".to_string());
+        if self.fail_restart {
+            return Err(RestaskError::Validation {
+                field: "obsidian",
+                reason: "injected failure".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A fresh setup of a vault, as far as its summary: the plugin is new in the vault.
+async fn set_up_summary() -> (TempDir, restask::setup::SetupSummary) {
+    let vault = legacy_vault();
+    let summary = run_setup(args(&vault), MockCaldav::new(), clock(), None)
+        .await
+        .unwrap();
+    (vault, summary)
+}
+
+/// What Obsidian's command line answers, what setup makes of it, the calls it took, and
+/// a part of the summary line.
+type Case = (
+    &'static [(&'static str, &'static str)],
+    PluginLoad,
+    &'static [&'static str],
+    &'static str,
+);
+
+#[tokio::test]
+async fn an_obsidian_that_has_the_vault_open_loads_the_plugin_when_setup_ends() {
+    // The owner's run: Obsidian was open on the vault, read its plugins hours before,
+    // and setup's entry in the list changed nothing in it. With Obsidian's command line
+    // interface on, setup asks Obsidian itself — the gentlest command that works.
+    const RELOAD: &str = "plugin:reload id=restask";
+    const ENABLE: &str = "plugin:enable id=restask filter=community";
+    let cases: [Case; 4] = [
+        // The plugin was on (an earlier setup): its new files are loaded.
+        (
+            &[
+                ("plugins:restrict", "off"),
+                ("plugin:reload", "Reloaded: restask"),
+            ],
+            PluginLoad::Loaded,
+            &["open?", "plugins:restrict", RELOAD],
+            "the Obsidian that has this vault open loaded it",
+        ),
+        // Obsidian knows the folder, the plugin was off: it is turned on.
+        (
+            &[
+                ("plugins:restrict", "off"),
+                ("plugin:reload", "Error: Plugin \"restask\" is not enabled."),
+                ("plugin:enable", "Enabled: restask"),
+            ],
+            PluginLoad::Loaded,
+            &["open?", "plugins:restrict", RELOAD, ENABLE],
+            "the Obsidian that has this vault open loaded it",
+        ),
+        // The folder is new to this Obsidian: the vault's window is reloaded.
+        (
+            &[("plugins:restrict", "off"), ("reload", "Reloading...")],
+            PluginLoad::Reloaded,
+            &["open?", "plugins:restrict", RELOAD, ENABLE, "reload"],
+            "Obsidian reloaded this vault's window and loaded it",
+        ),
+        // Restricted mode is the user's decision: nothing is loaded behind it.
+        (
+            &[
+                ("plugins:restrict", "on"),
+                ("plugin:enable", "Enabled: restask"),
+            ],
+            PluginLoad::Restricted,
+            &["open?", "plugins:restrict"],
+            "restricted mode",
+        ),
+    ];
+    for (answers, expected, calls, note) in cases {
+        let (_vault, mut summary) = set_up_summary().await;
+        let app = RecordingObsidian::with_cli(answers);
+        let mut asked = 0;
+
+        summary.load_plugin(
+            &app,
+            Some(&mut |_| {
+                asked += 1;
+                Ok(true)
+            }),
+        );
+
+        assert_eq!(summary.plugin_load, expected);
+        assert_eq!(app.calls(), calls, "{expected:?}");
+        assert_eq!(asked, 0, "nothing closes, so nothing is asked");
+        let line = summary.plugin_note().unwrap();
+        assert!(line.contains(note), "{line}");
+    }
+}
+
+#[tokio::test]
+async fn obsidian_is_restarted_only_when_the_wizard_is_told_to() {
+    // Obsidian's command line interface is off (its default): the plugin is loaded by
+    // starting Obsidian again, which closes the user's windows — their call.
+    let (_vault, mut summary) = set_up_summary().await;
+    let app = RecordingObsidian::without_cli();
+    let mut questions = Vec::new();
+    summary.load_plugin(
+        &app,
+        Some(&mut |question| {
+            questions.push(question.to_string());
+            Ok(true)
+        }),
+    );
+    assert_eq!(summary.plugin_load, PluginLoad::Restarted);
+    assert_eq!(app.calls(), ["open?", "plugins:restrict", "restart"]);
+    assert_eq!(questions.len(), 1, "{questions:?}");
+    assert!(
+        questions[0].ends_with("Restart Obsidian now?"),
+        "{questions:?}"
+    );
+    assert_eq!(
+        summary.plugin_note().unwrap(),
+        "obsidian plugin: installed in .obsidian/plugins/restask and enabled; Obsidian was \
+         restarted and loaded it"
+    );
+
+    // Declined: Obsidian keeps running, and the summary says what is left to do.
+    let (_vault, mut summary) = set_up_summary().await;
+    let app = RecordingObsidian::without_cli();
+    summary.load_plugin(&app, Some(&mut |_| Ok(false)));
+    assert_eq!(summary.plugin_load, PluginLoad::Pending);
+    assert_eq!(app.calls(), ["open?", "plugins:restrict"]);
+    assert!(summary
+        .plugin_note()
+        .unwrap()
+        .ends_with("loads the plugin when it is restarted"));
+
+    // An unattended run has nobody to ask, and never restarts.
+    let (_vault, mut summary) = set_up_summary().await;
+    let app = RecordingObsidian::without_cli();
+    summary.load_plugin(&app, None);
+    assert_eq!(summary.plugin_load, PluginLoad::Pending);
+    assert_eq!(app.calls(), ["open?", "plugins:restrict"]);
+
+    // A restart that fails is not a failed setup.
+    let (_vault, mut summary) = set_up_summary().await;
+    let app = RecordingObsidian {
+        fail_restart: true,
+        ..RecordingObsidian::without_cli()
+    };
+    summary.load_plugin(&app, Some(&mut |_| Ok(true)));
+    assert_eq!(summary.plugin_load, PluginLoad::Pending);
+}
+
+#[tokio::test]
+async fn an_obsidian_with_nothing_new_to_load_is_left_alone() {
+    // The vault is not open in any running Obsidian: it reads the list when it opens it.
+    let (vault, mut summary) = set_up_summary().await;
+    let closed = RecordingObsidian {
+        cli: Some(Vec::new()),
+        ..RecordingObsidian::default()
+    };
+    summary.load_plugin(&closed, Some(&mut |_| Ok(true)));
+    assert_eq!(summary.plugin_load, PluginLoad::NotNeeded);
+    assert_eq!(closed.calls(), ["open?"]);
+
+    // A second run wrote nothing of the plugin: Obsidian is not even looked for, and
+    // the line asks for no restart.
+    let mut again = run_setup(args(&vault), MockCaldav::new(), later_clock(), None)
+        .await
+        .unwrap();
+    let open = RecordingObsidian::without_cli();
+    again.load_plugin(&open, Some(&mut |_| Ok(true)));
+    assert_eq!(again.plugin_load, PluginLoad::NotNeeded);
+    assert!(open.calls().is_empty(), "{:?}", open.calls());
+    assert_eq!(
+        again.plugin_note().unwrap(),
+        "obsidian plugin: installed in .obsidian/plugins/restask and enabled"
+    );
+
+    // A join installs no plugin, so it has nothing to load either.
+    let (vault, mock) = set_up_vault().await;
+    let machine = tempfile::tempdir().unwrap();
+    let mut joined = run_setup(join_args(&vault, &machine), mock, clock(), None)
+        .await
+        .unwrap();
+    let open = RecordingObsidian::without_cli();
+    joined.load_plugin(&open, Some(&mut |_| Ok(true)));
+    assert!(open.calls().is_empty(), "{:?}", open.calls());
+    assert_eq!(joined.plugin_note(), None);
+}
+
+#[test]
+fn the_vault_is_found_in_obsidians_own_list_of_vaults() {
+    // `obsidian.json` as Obsidian 1.13 writes it: `open` marks the vaults with a window.
+    let vault = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let here = std::fs::canonicalize(vault.path()).unwrap();
+    let list = |open: &str| {
+        format!(
+            "{{\"vaults\":{{\"414bc3a5585fc108\":{{\"path\":{:?},\"ts\":1790970393634{open}}},\
+             \"ce52333f47bdb282\":{{\"path\":{:?},\"ts\":1790863924616,\"open\":true}}}}}}",
+            here.display().to_string(),
+            other.path().display().to_string(),
+        )
+    };
+
+    assert_eq!(
+        open_vault_id(&list(",\"open\":true"), &here).as_deref(),
+        Some("414bc3a5585fc108")
+    );
+    // Known to Obsidian, but no window on it.
+    assert_eq!(open_vault_id(&list(""), &here), None);
+    // Not a vault of this Obsidian; a subfolder of one is not the vault.
+    assert_eq!(
+        open_vault_id(&list(",\"open\":true"), Path::new("/nowhere")),
+        None
+    );
+    assert_eq!(
+        open_vault_id(&list(",\"open\":true"), &here.join("sub")),
+        None
+    );
+    assert_eq!(open_vault_id("not json", &here), None);
+    assert_eq!(open_vault_id("{}", &here), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_command_reaches_obsidian_the_way_its_own_command_line_sends_it() {
+    use std::io::{BufRead as _, Write as _};
+    // A listener that only records the request and answers, in Obsidian's place.
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("cli.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let obsidian = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut request)
+            .unwrap();
+        stream.write_all(b"Enabled: restask\n").unwrap();
+        request
+    });
+
+    let answer = restask::setup::obsidian_cli_request(
+        &socket,
+        "ce52333f47bdb282",
+        Path::new("/home/me/My Vault"),
+        &["plugin:enable", "id=restask", "filter=community"],
+    )
+    .unwrap();
+
+    assert_eq!(answer, "Enabled: restask");
+    // One JSON line; the vault is named, so Obsidian does not fall back to the window
+    // that had the focus; never a terminal session.
+    assert_eq!(
+        obsidian.join().unwrap(),
+        "{\"argv\":[\"vault=ce52333f47bdb282\",\"plugin:enable\",\"id=restask\",\
+         \"filter=community\"],\"cwd\":\"/home/me/My Vault\",\"tty\":false}\n"
+    );
+}
+
+#[test]
+fn obsidian_itself_is_told_from_its_helper_processes() {
+    let exe = Path::new("/home/me/.local/lib/obsidian/obsidian");
+    let argv = |args: &[&str]| -> Vec<String> { args.iter().map(|arg| arg.to_string()).collect() };
+    assert!(is_obsidian_main(
+        exe,
+        &argv(&[
+            "/home/me/.local/lib/obsidian/obsidian",
+            "--ozone-platform=wayland"
+        ])
+    ));
+    assert!(!is_obsidian_main(
+        exe,
+        &argv(&[
+            "/home/me/.local/lib/obsidian/obsidian",
+            "--type=gpu-process",
+            "--ozone-platform=wayland"
+        ])
+    ));
+    assert!(!is_obsidian_main(
+        exe,
+        &argv(&["/home/me/.local/lib/obsidian/obsidian", "--type=zygote"])
+    ));
+    assert!(!is_obsidian_main(
+        Path::new("/home/me/.local/lib/obsidian/obsidian-cli"),
+        &argv(&["obsidian-cli", "reload"])
+    ));
+    assert!(!is_obsidian_main(
+        Path::new("/usr/bin/bash"),
+        &argv(&["bash", "obsidian"])
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restarted_program_is_closed_and_started_again_as_it_was() {
+    // A stand-in program (a shell loop, not Obsidian): each start writes one line with
+    // what it was started with, into the file its first argument names.
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("obsidian");
+    let log = dir.path().join("starts");
+    std::fs::write(
+        &script,
+        "log=$1\nshift\necho \"$(pwd -P)|$*\" >> \"$log\"\nwhile :; do sleep 1; done\n",
+    )
+    .unwrap();
+    let starts = |count: usize| -> Vec<String> {
+        for _ in 0..100 {
+            let lines: Vec<String> = std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= count {
+                return lines;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the program did not start {count} time(s)");
+    };
+    let mut first = std::process::Command::new("/bin/sh")
+        .arg(&script)
+        .arg(&log)
+        .args(["--flag", "two words"])
+        .current_dir(dir.path())
+        .spawn()
+        .unwrap();
+    starts(1);
+
+    let second = restask::setup::restart_process(first.id()).unwrap();
+
+    // The first one was asked to close, not left running beside the new one.
+    assert!(!first.wait().unwrap().success());
+    assert_ne!(second, first.id());
+    let lines = starts(2);
+    let _ = std::process::Command::new("kill")
+        .arg(second.to_string())
+        .status();
+    // Same arguments and working directory.
+    let cwd = std::fs::canonicalize(dir.path()).unwrap();
+    assert_eq!(
+        lines,
+        vec![format!("{}|--flag two words", cwd.display()); 2]
+    );
 }

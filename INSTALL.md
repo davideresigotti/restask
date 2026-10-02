@@ -28,6 +28,8 @@ Then it does the rest by itself:
 
 Without a server the daemon is installed on this computer instead (a systemd user unit, started now and at login) and the password is stored in `~/.config/restask/radicale.passwd` (mode `0600`).
 
+**If Obsidian is open on the vault while setup runs**, the plugin is turned on in it at the end. Obsidian reads a vault's plugins only when it opens the vault, so setup either tells it — when Obsidian's command line interface is on (Settings → General → Command line interface, Obsidian 1.12 or later), nothing closes — or asks `Restart Obsidian now? [Y/n]` and, on Enter, closes Obsidian and starts it again with the vaults it had open (Linux; elsewhere, and from an AppImage or a Flatpak, it asks you to restart it yourself). A vault in restricted mode stays that way: turn it off under Settings → Community plugins and the plugin is on.
+
 ### What the server needs
 
 - `ssh <host>` works from this computer (a host from `~/.ssh/config`, or `user@address`), with a key or with a password you type when setup connects.
@@ -38,7 +40,7 @@ Setup checks all three before it changes anything. It then waits until the file 
 
 ### What the phone needs
 
-Obsidian, with the vault from the same file sync (`.obsidian/` included). The plugin is already in it. A vault that has community plugins turned off asks you to turn them on once; reload Obsidian if the vault was open during setup.
+Obsidian, with the vault from the same file sync (`.obsidian/` included). The plugin is already in it. A vault that has community plugins turned off asks you to turn them on once; if Obsidian was open on the phone during setup, close and reopen it there — setup reaches the Obsidian of the computer it runs on only.
 
 ## 2. What runs where, and why only one daemon
 

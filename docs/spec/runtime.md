@@ -95,7 +95,8 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    `doneHeading` (§15.4). A plugin folder or file that is a symlink is a hand-managed
    development install and is left alone. A `community-plugins.json` that is not a JSON
    list is left untouched and the summary asks to enable the plugin by hand. Any failure
-   here is a warning — never a failed setup.
+   here is a warning — never a failed setup. The result (`PluginInstall`: listed or
+   not, and whether this run wrote any of it) is what step 7 works from.
 2. **TODO.md** (every run): an existing inbox file is **renamed** to
    `<stem>.pre-restask-YYYYMMDD-HHMMSS.md` and a fresh §7 scaffold is written. Its lines
    are not migrated: unsynced captures stay in the backup. So that the vanished lines are
@@ -153,7 +154,46 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    none). The installer is an injectable port (`DaemonInstaller`:
    `install`, `connect_node`, `prepare_node`, `install_node`; the real one is
    `SystemInstaller`); tests record instead.
-7. **Summary.**
+7. **The plugin in a running Obsidian** (`SetupSummary::load_plugin`,
+   `load_obsidian_plugin`). Obsidian reads a vault's plugins when it opens the vault
+   and never again, and it writes the list back from memory when a plugin is switched
+   in its settings: under an Obsidian that has the vault open, step 1 alone leaves the
+   plugin off. So when step 1 wrote something (a plugin file, the entry in the list)
+   and an Obsidian on this computer has the vault open, that Obsidian is made to load
+   it — last, when the vault is converged:
+   - *Is it open?* The vault's entry in Obsidian's own `obsidian.json` (in its
+     configuration folder; also the Flatpak's) is marked `open`, and the socket of
+     Obsidian's command line interface (`$XDG_RUNTIME_DIR/.obsidian-cli.sock`) takes
+     a connection. No such Obsidian: nothing is done — it reads the list when it
+     opens the vault.
+   - *Its command line interface is on* (Obsidian ≥ 1.12, Settings → General):
+     setup sends what Obsidian's own `obsidian` command sends — one JSON line
+     (`argv`, `tty: false`, `cwd`) with the vault named by its id — and nothing
+     closes. `plugins:restrict` first: in restricted mode nothing is loaded, the
+     summary says how to turn it off (that decision is the user's). Then the
+     gentlest command that works: `plugin:reload id=restask` (it was on; its new
+     files are loaded), `plugin:enable id=restask filter=community` (Obsidian knows
+     the folder, it was off), `reload` (the folder is new to this Obsidian: the
+     vault's window is reloaded and reads the list).
+   - *It is off* (the default): Obsidian must start again. The interactive wizard
+     asks — `Restart Obsidian now? [Y/n]`, Enter is yes — because every window of
+     the user's closes; a non-interactive run never restarts. On Linux the restart
+     is: `SIGTERM` to Obsidian's main process (executable `obsidian`, no `--type=`
+     argument; exactly one of this user's), wait up to 15 s for it to end — it is
+     never killed —, then the same program with the same arguments and working
+     directory, in the wizard's environment, in a process group of its own;
+     Obsidian reopens the vaults it had open. Not restarted, with the reason in the
+     output: a terminal outside the desktop session (no `WAYLAND_DISPLAY` /
+     `DISPLAY`), an AppImage or sandboxed install (its program is not a file that
+     can be started again), two Obsidians, another system than Linux.
+
+   Nothing here fails setup; what was not done is in the summary (`PluginLoad`:
+   `NotNeeded`, `Loaded`, `Reloaded`, `Restarted`, `Restricted`, `Pending`). A join
+   installs no plugin and does none of this. The app is an injectable port
+   (`ObsidianApp`: `has_open`, `command`, `restart`; the real one is
+   `SystemObsidian`); tests record instead. Other devices are out of reach: a phone
+   loads the plugin when Obsidian starts there.
+8. **Summary.**
 
 Non-interactive: `--url`, `--username`, a password source (`--password-env <VAR>`, or
 `--password-stdin`: one line on standard input, stored in the machine's password file
