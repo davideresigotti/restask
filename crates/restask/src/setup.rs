@@ -961,7 +961,9 @@ impl DaemonInstaller for SystemInstaller {
         access: NodeAccess<'_>,
     ) -> Result<String, RestaskError> {
         let script = node_script()?;
-        let vault = vault.display().to_string();
+        // The script works from the sources' directory: a vault given relative to this
+        // process's working directory would name another folder there.
+        let vault = std::path::absolute(vault)?.display().to_string();
         // The script reads the three values from its standard input, one per line: the
         // password is in no argument list and no file.
         let input = format!(
