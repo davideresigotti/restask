@@ -34,12 +34,17 @@ export function isStamped(raw: string): boolean {
 	return /✅[ \t]+\d{4}-\d{2}-\d{2}/u.test(raw);
 }
 
-/** Inserts `✅ <today>` in canonical tail position: before ➕/🆔 when present (§6.1). */
+/** Inserts `✅ <today>` in canonical tail position: before ➕/📁/🆔 when present (§6.1). */
 export function withCompletedToken(raw: string, today: string): string {
 	if (isStamped(raw)) return raw;
 	const insertion = `✅ ${today}`;
-	const plus = raw.search(/➕[ \t]+\d{4}-\d{2}-\d{2}/u);
-	const anchor = plus >= 0 ? plus : raw.search(/🆔[ \t]+(?:restask|taskres)-/u);
+	// The calendar token only where it is part of the tail: right before the UID, or last.
+	const anchors = [
+		/➕[ \t]+\d{4}-\d{2}-\d{2}/u,
+		/📁[ \t]+[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*(?=[ \t]*(?:🆔|$))/u,
+		/🆔[ \t]+(?:restask|taskres)-/u,
+	];
+	const anchor = anchors.map((token) => raw.search(token)).find((at) => at >= 0) ?? -1;
 	if (anchor >= 0) {
 		return `${raw.slice(0, anchor).replace(/[ \t]+$/, "")} ${insertion} ${raw.slice(anchor)}`;
 	}

@@ -373,6 +373,40 @@ describe("§7.4 the section a task is typed in", () => {
 	});
 });
 
+describe("§7.5 a line of the view names its calendar", () => {
+	// The same lines as crates/restask/tests/sync_engine.rs
+	// (`the_calendar_of_a_line_is_settled_on_the_device…`, `a_line_of_todo_md_lives_in_the_calendar_it_names`).
+	it("keeps the calendar the last thing before the UID, as its slug", () => {
+		expect(registeredLine("- [ ] for work 📁 Work", TODAY, uid)).toBe(`- [ ] for work 📁 work 🆔 ${U}`);
+		expect(registeredLine("- [ ] for work 📁 work  ", TODAY, uid, "highest")).toBe(`- [ ] for work 🔺 📁 work 🆔 ${U}`);
+		expect(registeredLine("- [ ] for work 🔽 📁 work", TODAY, uid, "highest")).toBe(`- [ ] for work 🔽 📁 work 🆔 ${U}`);
+		// A token that is not the end of the line stays where it was typed.
+		expect(registeredLine("- [ ] 📁 work for work", TODAY, uid)).toBe(`- [ ] 📁 work for work 🆔 ${U}`);
+	});
+
+	it("is registered in the section it was typed in, calendar kept", () => {
+		const before = view("## 🔺 Highest Priority", "- [ ] for work 📁 work", "", "## Done", "");
+		expect(settled(before, 6, VIEW, TODAY, uid)?.lines).toEqual(
+			view("## 🔺 Highest Priority", `- [ ] for work 🔺 📁 work 🆔 ${U}`, "", "## Done", ""),
+		);
+	});
+
+	it("is completed and reopened with its calendar", () => {
+		const before = view("## 🔺 Highest Priority", `- [x] Update restask README 🔺 📁 work ${A}`, "", "## Done", "");
+		const done = view("## Done", `- [x] Update restask README 🔺 ✅ ${TODAY} 📁 work ${A}`, "");
+		expect(settled(before, 6, VIEW, TODAY, uid)?.lines).toEqual(done);
+		const reopened = view("## Done", `- [ ] Update restask README 🔺 ✅ ${TODAY} 📁 work ${A}`, "");
+		expect(settled(reopened, 6, VIEW, TODAY, uid)?.lines).toEqual(
+			view("## 🔺 Highest Priority", `- [ ] Update restask README 🔺 📁 work ${A}`, "", "## Done", ""),
+		);
+	});
+
+	it("is written in the canonical tail", () => {
+		const draft = parseLine(`- [ ] a 📁 Work ${A} ➕ 2026-09-01 📅 2026-09-03`)?.draft;
+		expect(draft && canonicalLine("", "-", { ...draft, priority: "medium" })).toBe(`- [ ] a 🔼 📅 2026-09-03 ➕ 2026-09-01 📁 work ${A}`);
+	});
+});
+
 describe("§7.4 a line moved to another section", () => {
 	const moved = (lines: string[], idx: number) => settled(lines, idx, VIEW, TODAY, uid, false, true);
 	const M = "[[Home#TODO|Home]]";

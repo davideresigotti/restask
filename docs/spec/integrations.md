@@ -35,6 +35,7 @@ series forward (§11.6).
 | `due` / `start` / `scheduled` | `📅 ` / `🛫 ` / `⏳ ` |
 | `repeat` | `🔁 every ` (then type the rule: `week on Monday`, `month on the 15th`, …) |
 | `created` | `➕` — bare; the date is written when the line is settled (§6.4) |
+| `calendar` | `📁 ` (then type the calendar's name: a task of TODO.md lives there, §7.5) |
 | `today` / `tomorrow` | `📅 <date>` |
 
 - `suggestionsFor(fragment, today)`: entries whose keyword starts with the fragment;
@@ -47,7 +48,8 @@ series forward (§11.6).
 
 `toggleDone(doc, line, today, doneHeading)`, a pure document transformation:
 
-- completing: flip the box, insert `✅ <today>` in canonical position, move the line —
+- completing: flip the box, insert `✅ <today>` in canonical position (ahead of a dated
+  `➕`, of a calendar token `📁` that is part of the tail, of `🆔`), move the line —
   un-indented — directly under the done heading (creating `### <heading>` at the end of
   the file if missing);
 - reopening: flip the box, remove `✅`, move the line to the bottom of the active list;
@@ -163,7 +165,13 @@ daemon's job.
    random bits, monotonic like §3.1). To the engine this is a registered line it has not
    seen: pushed (§11 R2), not rewritten. In the TODO.md view, a line that names no
    priority and stands under a priority section's heading gets that section's emoji,
-   ahead of the two tokens (`sectionPriority`, §7.4).
+   ahead of the two tokens (`sectionPriority`, §7.4). A calendar token the line ends
+   in (`📁 Work`, §7.5) stays the last thing before the UID and is written as the
+   engine writes it — the slug, behind the section's emoji — so that a line typed
+   `- [ ] call them 📁 Work` under `## 🔺 Highest Priority` is
+   `- [ ] call them 🔺 📁 work 🆔 <uid>` on the device as after the daemon's pass. The
+   plugin files a line of the view by its priority and never by its calendar; which
+   calendar a line belongs to is read by the engine alone (server work).
 2. *A copied line* (§6.4). When other task lines of the same note carry the line's UID,
    the first occurrence keeps it and the others get fresh ones. Copies in other notes
    are the daemon's to find: only it sees the whole vault at one instant.

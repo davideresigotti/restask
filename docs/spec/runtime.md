@@ -33,7 +33,7 @@ Event names used as messages: `scan_complete`, `task_registered`, `task_complete
 `todo_rendered`,
 `collection_created`, `collection_reset`, `caldav_push`, `caldav_delete`, `caldav_pull`,
 `conflict_resolved`, `sync_lag_deferred`, `vault_divergence`, `orphan_subtask`,
-`auth_warning`, `server_changed`.
+`auth_warning`, `server_changed`, `config_reloaded`.
 
 ## §13 Runtime
 
@@ -47,7 +47,8 @@ poll timer (caldav.poll_secs, 300) ──┘
 
 - A burst of file events — an editor saving, file sync delivering a batch — coalesces
   into **one** pass; whatever happened, one pass covers it.
-- Only events that can change a scan wake the loop: tracked notes and directories.
+- Only events that can change a scan wake the loop: tracked notes, directories and
+  `restask.toml`.
   Events on hidden paths (§5.1: `.restask/`, a file sync's version archive), on ignored
   paths, on temp files, on setup backups and on conflict copies do not — so the engine's own state writes never re-trigger it, and its
   note writes cause at most one follow-up pass, which is a no-op.
@@ -65,6 +66,12 @@ poll timer (caldav.poll_secs, 300) ──┘
   The default is 2 s: the look is one small request, and the interval is the whole of
   the daemon's share in how long a server-side change takes to show (the rest is the
   other client's upload and the file sync's own delay, INSTALL *Latency*).
+- **The vault config is a file of the vault.** `restask.toml` is read again before
+  every pass (`refresh_config`, logged as `config_reloaded` when it differs), so a
+  change made on another device — a calendar added to `todo_lists` — takes effect when
+  the file sync delivers it, without a restart. A config that cannot be read or parsed
+  changes nothing: the pass runs with the last good one. `track` / `ignore` are followed
+  by the scan at once and by the event filter after a restart.
 - The first poll tick is immediate (reconcile on start); later ticks are the net under
   the two watches — a missed file event, a server without change tags.
 - A failed pass is logged (`auth_warning` for rejected credentials) and never ends the
@@ -108,9 +115,13 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    referenced via an env var — never to `config.toml`. On an editing machine (step 6)
    it is kept nowhere: it is used for this run's requests, handed to the node's
    installer, and a password file an earlier setup left beside the config is removed.
-4. **Inbox binding**: the server's calendars are listed; the user types the one TODO.md
-   binds to (case-insensitive; a miss re-prompts; no calendars at all aborts). Its slug
-   becomes `vault.inbox_list`. Every other list is declared in notes (§5).
+4. **The calendars of TODO.md** (§7.5): the server's calendars are listed and two
+   things are asked. *Which calendars TODO.md shows* — names separated by commas,
+   case-insensitive, Enter for all that can hold tasks; a name the server does not have
+   re-prompts; no calendars at all aborts (`select_collections`). *Which of them new
+   tasks go to* — asked when more than one was chosen: a line typed in TODO.md without
+   a calendar belongs to it. Its slug becomes `vault.inbox_list`, the others
+   `vault.todo_lists`. Lists that live in notes are declared there (§5).
 5. **First sync** — from this machine, also when the daemon goes elsewhere: the vault
    leaves it converged, and the node's first pass finds nothing to do in it.
 6. **The daemon** (`SetupArgs::daemon`, a `DaemonHost`). The interactive wizard asks
@@ -199,6 +210,8 @@ Non-interactive: `--url`, `--username`, a password source (`--password-env <VAR>
 `--password-stdin`: one line on standard input, stored in the machine's password file
 when the daemon runs here), `--collection name=collection` (repeatable;
 `inbox=<calendar>` sets the inbox binding, any other pair just creates that collection),
+`--todo-list <calendar>` (repeatable: a further calendar TODO.md shows; created when the
+server has none of that name; without the flag `vault.todo_lists` stays as it is),
 `--non-interactive`. `--node` (then `--node-vault` is required), `--node-dir` and
 `--no-daemon` apply to interactive and non-interactive runs, and to a join.
 
@@ -223,7 +236,7 @@ the vault). What the first sync does is what any pass does (§11). Order: `PROPF
 config is written only after the sync succeeded, so a failed join leaves the machine
 without one and the next run joins again. Non-interactive: `--join --non-interactive
 --url … --username … --password-env …` (or `--password-stdin`, which is how the node's
-container is joined); `--collection` is refused with `--join`.
+container is joined); `--collection` and `--todo-list` are refused with `--join`.
 
 A join with `--node` or `--no-daemon` joins an *editing machine*: step 5 is skipped —
 the pass is the sync node's (§1.1) — and nothing but the credentials check reaches the
@@ -242,7 +255,7 @@ set up, or to finish a setup whose node step failed: `prepare_node`, `PROPFIND`,
 | `restask done \| undone (--uid ID \| --file F --line N)` | complete / reopen in the source file, then a pass — on an editing machine, then the local work | optional |
 | `restask settle [--file F]` | the local work of a pass and nothing else: phase 1 of §11.1 and the render (`Engine::settle`). What editor integrations run on save (§16) | never contacted |
 | `restask status [--json]` | active per list / priority, done today, pending sync, last sync | none |
-| `restask lists` | routed lists: slug, active count, home note, collection URL | none |
+| `restask lists` | routed lists: slug, active count, home note (TODO.md for the calendars it shows or one of its lines names, §7.5), collection URL | none |
 | `restask doctor` | config, routing, scan (duplicates, conflict copies), TODO.md is a restask view, server reachability and auth | probed |
 | `restask rebuild` | drop index, base snapshots and remembered render (tombstones stay) | none |
 

@@ -97,7 +97,7 @@ pub async fn run_with<C: CaldavPort>(
         reason: error.to_string(),
     })?;
     let server = caldav.clone();
-    let engine = Engine::new(&vault, cfg, machine, caldav, clock);
+    let mut engine = Engine::new(&vault, cfg, machine, caldav, clock);
 
     if dc.once {
         engine.reconcile().await?;
@@ -136,6 +136,7 @@ pub async fn run_with<C: CaldavPort>(
             // Whatever happened to the vault since the last pass, one reconcile covers
             // it. A failed pass (e.g. the server is down) must not kill the daemon; the
             // next event or poll tick retries.
+            refresh_config(&vault, &mut engine);
             match engine.reconcile().await {
                 Ok(report) => tracing::debug!(?report, "reconciled"),
                 Err(
@@ -316,6 +317,23 @@ pub(crate) fn build_client(machine: &MachineConfig) -> Result<CaldavClient, Rest
             reason: error.to_string(),
         })?;
     CaldavClient::new(&url, username, password)
+}
+
+/// Gives `engine` the vault config as it is on disk now, when it changed since the
+/// engine got its own (§13.1): `restask.toml` rides the file sync, so the calendars
+/// TODO.md shows can be changed on any device and reach the daemon as a file. A config
+/// that cannot be read or parsed — half delivered, or mistyped — changes nothing: the
+/// pass runs with the one the engine has. `track` and `ignore` still take a restart to
+/// change which file events wake the daemon; the scan follows them at once.
+fn refresh_config<C: CaldavPort>(vault: &Path, engine: &mut Engine<C>) {
+    match load_vault_config(vault) {
+        Ok(cfg) if cfg != *engine.config() => {
+            tracing::info!("config_reloaded");
+            engine.set_config(cfg);
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "restask.toml not usable; keeping the last one"),
+    }
 }
 
 /// Loads `<vault>/restask.toml`, mapping config failures to [`RestaskError::Config`].

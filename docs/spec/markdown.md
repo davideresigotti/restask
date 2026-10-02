@@ -26,6 +26,7 @@ Metadata tokens may appear anywhere in `body`, in any order:
 | Completed | `✅[ \t]+(\d{4}-\d{2}-\d{2})` | `completed_on` |
 | Created | `➕[ \t]+(\d{4}-\d{2}-\d{2})` | `created` |
 | Created, asked for | a `➕` as a standalone word with no date behind it | `wants_created` |
+| Calendar | `📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)` — a calendar's name as one word, lowercased to its slug | `list` |
 | UID | `🆔[ \t]+((?:restask\|taskres)-[0-9a-z]{26})` | `uid` |
 
 `text` = body with every matched token removed, whitespace runs collapsed, trimmed.
@@ -38,7 +39,11 @@ spelling whenever its line is rewritten.
 A bare `➕` is the request for the task's creation date (§6.4). It is not part of the
 text; until it is answered it is written back, bare, in the created token's place.
 
-**Canonical tail order** (what the mutator writes): `<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`.
+A `📁` not followed by such a name is ordinary text. The token is read on every task
+line and written back wherever its line is rewritten; it *means* something only in the
+inbox file (§7.5).
+
+**Canonical tail order** (what the mutator writes): `<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 📁 🆔`.
 
 ### 6.2 File-level rules
 
@@ -54,7 +59,7 @@ text; until it is answered it is written back, bare, in the created token's plac
   region have no parent — completed records are a flat log.
 
 ```rust
-pub struct TaskDraft { uid, text, checked, priority, due, start, scheduled, created, completed_on, recurrence }
+pub struct TaskDraft { uid, text, checked, priority, due, start, scheduled, created, completed_on, recurrence, list }
 pub struct ParsedTask { line_no, indent_chars, raw, draft, in_done_region, heading }
 pub struct ParsedFile { tasks: Vec<ParsedTask>, done_heading_line: Option<usize> }
 pub fn parse(contents: &str, cfg: &VaultConfig) -> ParsedFile;        // never fails
@@ -135,7 +140,8 @@ next pass):
   So checking a box in any editor completes the task properly.
 - In the **inbox file** only identity is repaired (register, duplicates); placement is the
   render's job (§7). A line registered there under a priority section's heading also
-  takes that priority (§7.4).
+  takes that priority (§7.4). A line there that names a calendar (`📁`) is a task of
+  that calendar (§7.5).
 - Syncthing conflict copies (`*.sync-conflict-*`) and setup backups (`*.pre-restask-*`)
   are never scanned; `restask doctor` reports the former. Neither is anything hidden
   (§5.1) — a file sync's version archive among it.
@@ -146,7 +152,7 @@ The inbox file is engine-owned: it is **fully regenerated** by every render. It 
 kinds of lines.
 
 - **Inbox lines** — tasks whose source *is* this file (quick captures, tasks created in
-  the inbox calendar): full canonical lines.
+  the inbox calendar or in another calendar the file shows, §7.5): full canonical lines.
 - **Mirror lines** — views of prioritized tasks that live in notes:
   `- [ ] <text> <priority> <🔁?><🛫?><⏳?><📅?> [[<stem>#<heading>|<stem>]] 🆔 <uid>`
   (`#<heading>` omitted when the task has none; a stem containing `[`, `]`, `|` or `#` is
@@ -161,6 +167,7 @@ restask-render: 9c1f0e2a7b3d4f56
 
 ## 🔺 Highest Priority
 - [ ] Renew the certificate 🔺 [[Home Lab#Tasks|Home Lab]] 🆔 restask-01jz…
+- [ ] Update restask README 🔺 📁 work 🆔 restask-01jz…
 
 ## 🔽 Low Priority
 - [ ] Sort the cables 🔽 🆔 restask-01jz…
@@ -316,12 +323,49 @@ inbox file itself). Once applied, the line's emoji differs from the render and t
 is not seen again. A sealed view (§7.2) holds no moves. The plugin does both on the
 device (§15.6).
 
+### 7.5 Tasks of other calendars
+
+TODO.md is the organizer for every calendar the user wants in it, not for one. It is
+*bound* to one calendar, `vault.inbox_list`, and *shows* the further ones named in
+`vault.todo_lists` (§14.1; `restask setup` asks for both, §13.2).
+
+- **A line of the view's own says which calendar it lives in.** With a calendar token
+  (`📁 work`, §6.1) the task belongs to that list; without one, to `inbox_list`. The
+  line is the evidence, not the sync state: with the state gone (`restask rebuild`) an
+  unmarked line of another calendar would be read as a task of the bound one and moved
+  there on the server.
+- **The render** writes the token on every line of the view's own whose list is not
+  `inbox_list` (`inbox_line`), as the last thing before `🆔`, and never on a line of
+  the bound calendar — naming that one on a line is the same as naming none, and the
+  render drops it. Sections, order and seal are as in §7: a task of another calendar is
+  filed by its priority like any line of the view's own, and under `## Done` when
+  completed.
+- **A task created on the server** in a calendar of `todo_lists` gets its line in
+  TODO.md, with the token — unless a note routes to that calendar: then it goes to the
+  note that is the list's home (§5.4), as before, and reaches TODO.md as a mirror line
+  when it has a priority. A calendar that is neither bound, nor in `todo_lists`, nor
+  routed by a note is not looked at.
+- **Typing the token** on a new line creates the task in that calendar; **changing**
+  it moves the task there (§11 R9: same UID, the server copy moves between
+  collections); **removing** it moves the task to the bound calendar. A name that is no
+  calendar yet is a new list, created like a routed note's (§5.4). The token routes
+  whether or not its calendar is in `todo_lists`: the vault says where a task lives,
+  `todo_lists` only says what is brought *into* the view.
+- **Taking a calendar out of `todo_lists`** removes nothing: its lines stay, still
+  name it and still sync with it; new tasks made there on the server no longer come in.
+- **Only in the inbox file.** On a line of a note the token is kept where the line is
+  rewritten and decides nothing: a note's tasks live in the list the note routes to. A
+  mirror line carries the link to its note instead and no token.
+- The whole of it is local work (invariant 12): the token is read by the scan and
+  written by the render with no server, and the plugin keeps it in its place when it
+  registers, stamps or files a line (§15.6).
+
 ```rust
 pub fn section_priority(heading: &str) -> Option<Priority>;
 pub fn is_view(contents: &str) -> bool;
 pub fn is_sealed(contents: &str) -> bool;
 pub fn render(tasks: &BTreeMap<TaskUid, Task>, cfg: &VaultConfig) -> String;
 pub fn mirror_line(task: &Task) -> String;
-pub fn inbox_line(task: &Task) -> String;
+pub fn inbox_line(task: &Task, cfg: &VaultConfig) -> String;   // with `📁` for another calendar
 pub fn mirror_edits(current, rendered, local, cfg, today) -> BTreeMap<String, Vec<Mutation>>;
 ```

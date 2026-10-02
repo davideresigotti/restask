@@ -13,7 +13,7 @@ cd /path/to/your/vault && restask setup
 `restask setup` is the whole installation — for the computer, the server and the phone. It asks, once:
 
 1. **The Radicale URL, username and password.** Use the address the server has on your network (`http://192.168.1.10:5232`), not `localhost`.
-2. **Which calendar `TODO.md` binds to** — it lists the server's calendars; type one (e.g. `inbox`).
+2. **Which calendars `TODO.md` shows** — it lists the server's calendars; type the ones you want, separated by commas (e.g. `personal, work`), or press Enter for all of them. When you chose more than one it asks **which of them new tasks go to**: a task typed in `TODO.md` without a calendar belongs to that one, a task of another carries `📁 <calendar>` on its line. Every task of the chosen calendars is brought into the vault — completed ones under `Done` — and stays the task its app created.
 3. **The ssh host of your always-on server**, if one holds a copy of the vault. Press Enter if there is none: this computer then keeps the vault in sync itself. Setup connects to the server at once: if it logs you in with a password (or your key has a passphrase), ssh asks for it here, once — restask does not keep it.
 4. **The vault's folder on that server** (only when you named one).
 
@@ -143,6 +143,10 @@ On the computer, `doctor` says which machine runs the daemon and how to read its
       --url http://192.168.1.10:5232 --username me --password-env RESTASK_CALDAV_PASSWORD \
       --collection inbox=inbox --node myserver --node-vault /srv/sync/vault
   ```
+
+  `--todo-list work` (repeatable) names a further calendar `TODO.md` shows.
+
+- **Another calendar in `TODO.md`, later.** No new setup: add it to `restask.toml` in the vault — `todo_lists = ["work"]`, next to `inbox_list` — and let the file sync carry the file. The daemon reads the change by itself and brings that calendar's tasks into `TODO.md`.
 
 - **Coming from an earlier install.** If the computer ran the daemon, or kept the server's password, run the command of *The server step failed* above: it installs the daemon on the server, rewrites this computer's config without credentials and removes its password file. Then stop the old unit: `systemctl --user disable --now restask`.
 

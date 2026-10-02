@@ -160,6 +160,54 @@ async fn the_daemon_reconciles_on_start_and_on_vault_events() {
     worker.await.unwrap().unwrap();
 }
 
+/// §7.5, §13.1: which calendars TODO.md shows is said in `restask.toml`, a file of the
+/// vault. Changed on another device, it reaches the daemon through the file sync and
+/// takes effect there without a restart.
+#[tokio::test]
+async fn a_changed_vault_config_takes_effect_while_the_daemon_runs() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    mock.seed_resource(
+        "work",
+        "5417861935824551742",
+        &TASKS_ORG_BODY.replace("Made in Tasks.org", "Update restask README"),
+    );
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            watch_ms: 0,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    wait_until(|| mock.resource_names("home").len() == 1).await;
+    let todo = || std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
+    assert!(!todo().contains("Update restask README"));
+
+    // A config that does not parse changes nothing and stops nothing.
+    write_vault_file(&dir, "restask.toml", "todo_lists = [\"work\"\n");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!todo().contains("Update restask README"));
+
+    let config = std::fs::read_to_string(dir.path().join("restask.toml")).unwrap();
+    assert!(config.contains("[\"work\""));
+    write_vault_file(
+        &dir,
+        "restask.toml",
+        "done_heading = \"Done\"\ntodo_lists = [\"work\"]\n",
+    );
+    wait_until(|| todo().contains("- [ ] Update restask README \u{1F4C1} work \u{1F194}")).await;
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
 const TASKS_ORG_BODY: &str =
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:+//IDN tasks.org//android//EN\r\n\
 BEGIN:VTODO\r\nDTSTAMP:20260922T101500Z\r\nUID:5417861935824551742\r\n\
@@ -301,7 +349,13 @@ fn only_events_that_can_change_a_scan_wake_the_daemon() {
     use restask::config::VaultConfig;
     use restask::vault::is_relevant_event;
     let matchers = VaultConfig::default().matchers().unwrap();
-    for relevant in ["TODO.md", "notes/home.md", "notes", "2. Areas/Home Lab"] {
+    for relevant in [
+        "TODO.md",
+        "notes/home.md",
+        "notes",
+        "2. Areas/Home Lab",
+        "restask.toml",
+    ] {
         assert!(is_relevant_event(relevant, &matchers), "{relevant}");
     }
     for ignored in [
@@ -322,6 +376,7 @@ fn only_events_that_can_change_a_scan_wake_the_daemon() {
         "TODO.pre-restask-20260922-101500.md",
         "notes/home.sync-conflict-20260922-101500-ABCDEFG.md",
         "notes/picture.png",
+        "notes/restask.toml",
     ] {
         assert!(!is_relevant_event(ignored, &matchers), "{ignored}");
     }

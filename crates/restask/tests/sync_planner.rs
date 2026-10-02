@@ -1024,6 +1024,70 @@ fn r5_foreign_tasks_are_adopted_only_where_the_vault_has_a_place_for_them() {
 }
 
 #[test]
+fn r5_a_list_the_inbox_file_shows_adopts_into_it_unless_a_note_is_its_home() {
+    // §7.5: `family` has no note; TODO.md is told to show it.
+    let mut world = World::new();
+    world.s.todo_lists.insert(slug("family"));
+    world.s.remote.insert(
+        slug("family"),
+        vec![foreign(
+            "family",
+            "x",
+            &["UID:x@other", "SUMMARY:for the view"],
+        )],
+    );
+    let p = world.plan();
+    assert_eq!(p.adopted.len(), 1);
+    assert!(p.mutations.is_empty());
+    assert_eq!(p.inbox_inserts.len(), 1);
+    assert_eq!(p.inbox_inserts[0].list, slug("family"));
+    assert_eq!(p.inbox_inserts[0].source.path, "TODO.md");
+    assert_eq!(p.puts[0].task.list, slug("family"));
+
+    // A list with a note of its own keeps adopting into that note.
+    let mut world = World::new().remote(
+        foreign("home", "x", &["UID:x@other", "SUMMARY:for the note"]),
+        "home",
+    );
+    world.s.todo_lists.insert(slug("home"));
+    let p = world.plan();
+    assert!(p.inbox_inserts.is_empty());
+    assert_eq!(mutations_for(&p, "notes/home.md").len(), 1);
+}
+
+#[test]
+fn r5_a_task_in_the_vault_stays_tied_to_its_resource_when_its_list_lost_its_place() {
+    // Adopted into TODO.md while `family` was shown there; `family` is shown no more.
+    let seed = foreign("family", "x", &["UID:x@other", "SUMMARY:kept"]);
+    let adopted = TaskUid::derived("x@other", seed.task.created_at);
+    let mut line = task(1, "family", "kept");
+    line.uid = adopted.clone();
+    line.created = None;
+    line.source.path = "TODO.md".to_string();
+    let linked = foreign(
+        "family",
+        "x",
+        &[
+            "UID:x@other",
+            "SUMMARY:kept",
+            &format!("X-RESTASK-UID:{adopted}"),
+            "X-RESTASK-SOURCE:TODO.md",
+        ],
+    );
+    let etag = linked.etag.clone();
+    let mut world = World::new().local(&line).settled(&line, &etag);
+    world.s.remote.insert(slug("family"), vec![linked]);
+    let p = world.plan();
+    assert!(p.mutations.is_empty(), "{:?}", p.mutations);
+    assert!(p.deletes.is_empty() && p.tombstones.is_empty());
+
+    // What is not in the vault is not taken in.
+    let mut world = World::new();
+    world.s.remote.insert(slug("family"), vec![seed]);
+    assert!(world.plan().is_noop());
+}
+
+#[test]
 fn r5_a_foreign_family_keeps_its_hierarchy_parents_first() {
     let parent = TaskUid::derived("p@tasks.org", None);
     let child = TaskUid::derived("c@tasks.org", None);

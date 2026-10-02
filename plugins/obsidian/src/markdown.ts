@@ -26,7 +26,7 @@ const PRIORITY_BY_EMOJI: ReadonlyMap<string, Priority> = new Map(
 );
 
 /** Canonical metadata tail order (§6.1): `<priority>` (first of the five present), then these. */
-export const CANONICAL_TAIL_ORDER: readonly string[] = ["🔁", "🛫", "⏳", "📅", "✅", "➕", "🆔"];
+export const CANONICAL_TAIL_ORDER: readonly string[] = ["🔁", "🛫", "⏳", "📅", "✅", "➕", "📁", "🆔"];
 
 /** Default `done_heading` (§6.2, vault config default). */
 export const DEFAULT_DONE_HEADING = "Done";
@@ -49,6 +49,8 @@ export interface TaskDraft {
 	completedOn: string | undefined;
 	/** `🔁` rule in the vault spelling, as written (e.g. `every 2 weeks on Monday`). */
 	recurrence: string | undefined;
+	/** `📁` value as a list slug: the calendar the line names (§6.1). It says where a task of the TODO.md view lives (§7.5). */
+	list: string | undefined;
 }
 
 /** A single line matched by the §6.1 grammar. */
@@ -94,6 +96,8 @@ const CREATED_RE = /➕[ \t]+(\d{4}-\d{2}-\d{2})/gu;
 // A `➕` on its own, no date behind it: the request for the creation date.
 export const BARE_CREATED_RE = /(^|[ \t])➕(?=$|[ \t])(?![ \t]+\d{4}-\d{2}-\d{2})/gu;
 const UID_RE = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
+// A calendar's name: one word of letters and digits with single hyphens inside.
+const LIST_RE = /📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)/gu;
 
 // `restask-` and the legacy `taskres-` prefix are both 8 characters long.
 const UID_PREFIX_LENGTH = "restask-".length;
@@ -179,6 +183,7 @@ function emptyDraft(): TaskDraft {
 		wantsCreated: false,
 		completedOn: undefined,
 		recurrence: undefined,
+		list: undefined,
 	};
 }
 
@@ -294,6 +299,7 @@ export function parseLine(line: string): TaskLine | undefined {
 	const created = collect(body, CREATED_RE, 1);
 	const bareCreated = collect(body, BARE_CREATED_RE, 0);
 	const uid = collect(body, UID_RE, 1);
+	const list = collect(body, LIST_RE, 1);
 	const priority = collect(body, PRIORITY_RE, 2);
 	const recurrence = collectRecurrence(body);
 
@@ -328,6 +334,7 @@ export function parseLine(line: string): TaskLine | undefined {
 					...created.spans,
 					...bareCreated.spans,
 					...uid.spans,
+					...list.spans,
 					...priority.spans,
 					...recurrence.spans,
 				]),
@@ -341,6 +348,8 @@ export function parseLine(line: string): TaskLine | undefined {
 			wantsCreated: bareCreated.spans.length > 0,
 			completedOn: completedValue,
 			recurrence: recurrence.value,
+			// The shape the token has is a slug's but for its case.
+			list: list.value?.toLowerCase(),
 		},
 	};
 }

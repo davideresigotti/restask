@@ -169,7 +169,8 @@ re-planned from fresh snapshots in the next pass.
    (`restask-list`, `restask-list-root`). Of an unrouted note only the frontmatter block
    is ever read; it is never parsed, modified or synced.
 5. **Lists are collections.** List `Home Lab` ⇄ collection `home-lab`. The inbox file
-   routes to `vault.inbox_list`.
+   routes to `vault.inbox_list`; a line in it that names another calendar (`📁 work`)
+   lives in that one, and the line — not the state — is what says so (§7.5).
 6. **Other clients' data is not ours to lose.** `VEVENT`s are never touched. Everything in
    a `VTODO` that restask does not manage (description, reminders, recurrence, tags,
    vendor properties) is written back verbatim on every push.

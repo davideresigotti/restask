@@ -213,6 +213,11 @@ pub struct SetupArgs {
     /// Interactive setup always sets it; non-interactive setup derives it from a
     /// `--collection inbox=<calendar>` flag.
     pub inbox_collection: Option<String>,
+    /// Further calendars whose tasks TODO.md shows, recorded as `vault.todo_lists`
+    /// (§7.5, §14.1). Interactive setup always sets it (to none, when one calendar was
+    /// chosen); non-interactive setup takes it from `--todo-list` flags. `None` leaves
+    /// what the vault's `restask.toml` says.
+    pub todo_collections: Option<Vec<String>>,
     /// Further `name=collection` pairs from `--collection` flags (repeatable): each
     /// collection is created up front with `name` as its display name. Routing itself
     /// is declared in the notes (§5), never here.
@@ -269,11 +274,34 @@ impl SetupArgs {
             password_env,
             password_file: None,
             inbox_collection,
+            todo_collections: None,
             collections,
             join,
             daemon: DaemonHost::Here,
             password: None,
         })
+    }
+
+    /// Adds the calendars of the repeatable `--todo-list` flag (§13.2): the further
+    /// calendars whose tasks TODO.md shows. None given leaves the vault's choice as it
+    /// is. A join takes none: the vault it joins already says which.
+    pub fn showing(mut self, calendars: Vec<String>) -> Result<Self, RestaskError> {
+        if calendars.is_empty() {
+            return Ok(self);
+        }
+        if self.join {
+            return Err(RestaskError::Validation {
+                field: "todo-list",
+                reason: "--todo-list has no meaning when joining a vault that is already \
+                         set up: its restask.toml names the calendars TODO.md shows"
+                    .to_string(),
+            });
+        }
+        for calendar in &calendars {
+            ListSlug::from_name(calendar)?;
+        }
+        self.todo_collections = Some(calendars);
+        Ok(self)
     }
 }
 
@@ -450,6 +478,7 @@ pub async fn run_interactive(
             username,
             password_env: None,
             inbox_collection: None,
+            todo_collections: None,
             collections: Vec::new(),
             join: true,
             daemon,
@@ -460,9 +489,10 @@ pub async fn run_interactive(
         return Ok(());
     }
 
-    // Step 4 (§13.2): the one required binding — TODO.md (the inbox) is bound to a
-    // calendar chosen by name from the server's list. Other lists are declared by hand
-    // with `restask-list` frontmatter in the notes; no per-list wizard probing happens.
+    // Step 4 (§13.2): the calendars TODO.md shows, chosen by name from the server's
+    // list, and the one of them a task typed there without a calendar goes to. Lists
+    // that live in notes are declared by hand with `restask-list` frontmatter; no
+    // per-list wizard probing happens.
     let server_collections = client.list_collections().await?;
     if server_collections.is_empty() {
         return Err(RestaskError::Validation {
@@ -477,13 +507,42 @@ pub async fn run_interactive(
         .map(|collection| collection.slug.as_str())
         .collect();
     println!("Server calendars: {}", names.join(", "));
-    let inbox = loop {
-        let typed = crate::tui::prompt("Bind TODO.md to (insert one of the calendars above):")?;
-        match match_collection(&typed, &server_collections) {
-            Some(collection) => break collection.slug.clone(),
-            None => println!("`{typed}` is not one of: {}", names.join(", ")),
+    let shown = loop {
+        let typed = crate::tui::prompt(
+            "Calendars TODO.md shows (comma-separated, Enter for all of them):",
+        )?;
+        match select_collections(&typed, &server_collections) {
+            Ok(shown) => break shown,
+            Err(miss) => println!("`{miss}` is not one of: {}", names.join(", ")),
         }
     };
+    let inbox = match shown.as_slice() {
+        [only] => only.slug.clone(),
+        _ => {
+            let shown_names: Vec<&str> = shown
+                .iter()
+                .map(|collection| collection.slug.as_str())
+                .collect();
+            loop {
+                let typed = crate::tui::prompt(&format!(
+                    "New tasks typed in TODO.md go to (one of: {}):",
+                    shown_names.join(", ")
+                ))?;
+                match shown
+                    .iter()
+                    .find(|collection| collection.slug.eq_ignore_ascii_case(typed.trim()))
+                {
+                    Some(collection) => break collection.slug.clone(),
+                    None => println!("`{typed}` is not one of: {}", shown_names.join(", ")),
+                }
+            }
+        }
+    };
+    let others: Vec<String> = shown
+        .iter()
+        .filter(|collection| collection.slug != inbox)
+        .map(|collection| collection.slug.clone())
+        .collect();
 
     let daemon = daemon.ask(installer, &mut |message| crate::tui::prompt(message))?;
     let args = SetupArgs {
@@ -494,6 +553,7 @@ pub async fn run_interactive(
         username,
         password_env: None,
         inbox_collection: Some(inbox),
+        todo_collections: Some(others),
         collections: Vec::new(),
         join: false,
         daemon,
@@ -518,6 +578,38 @@ pub fn match_collection<'a>(
     collections
         .iter()
         .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
+}
+
+/// The calendars TODO.md shows, as typed in step 4 of the wizard (§13.2): names of the
+/// server's calendars separated by commas, matched like [`match_collection`], each once
+/// and in the order typed; nothing typed means all of them that can hold tasks. `Err`
+/// carries the first name that is not a calendar of the server, and the wizard asks
+/// again.
+pub fn select_collections<'a>(
+    typed: &str,
+    collections: &'a [CollectionInfo],
+) -> Result<Vec<&'a CollectionInfo>, String> {
+    let all = || {
+        collections
+            .iter()
+            .filter(|collection| collection.supports_vtodo)
+            .collect()
+    };
+    let mut chosen: Vec<&CollectionInfo> = Vec::new();
+    for name in typed
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let found = match_collection(name, collections).ok_or_else(|| name.to_string())?;
+        if !chosen.iter().any(|held| held.slug == found.slug) {
+            chosen.push(found);
+        }
+    }
+    if chosen.is_empty() {
+        return Ok(all());
+    }
+    Ok(chosen)
 }
 
 /// Shared setup body: vault scaffold, Obsidian plugin, fresh TODO.md, machine config,
@@ -551,6 +643,22 @@ async fn prepare_and_sync<C: CaldavPort>(
         let slug = ListSlug::from_name(inbox_collection)?;
         if cfg.inbox_list != slug.as_str() {
             cfg.inbox_list = slug.as_str().to_string();
+            cfg.save(&config_path)
+                .map_err(|error| config_error(&config_path, &error))?;
+        }
+    }
+    // The further calendars TODO.md shows (§7.5) travel the same way, as slugs, each
+    // once and without the one the file is bound to.
+    if let Some(calendars) = &args.todo_collections {
+        let mut shown: Vec<String> = Vec::new();
+        for calendar in calendars {
+            let slug = ListSlug::from_name(calendar)?.as_str().to_string();
+            if slug != cfg.inbox_list && !shown.contains(&slug) {
+                shown.push(slug);
+            }
+        }
+        if cfg.todo_lists != shown {
+            cfg.todo_lists = shown;
             cfg.save(&config_path)
                 .map_err(|error| config_error(&config_path, &error))?;
         }
@@ -603,6 +711,14 @@ async fn prepare_and_sync<C: CaldavPort>(
             .ensure_collection(&slug, &slug.display_name())
             .await?;
         collections.push(slug.as_str().to_string());
+    }
+    if args.todo_collections.is_some() {
+        for slug in crate::vault::todo_lists(&cfg)? {
+            caldav
+                .ensure_collection(&slug, &slug.display_name())
+                .await?;
+            collections.push(slug.as_str().to_string());
+        }
     }
     for (name, collection) in &args.collections {
         let slug = ListSlug::from_name(collection)?;

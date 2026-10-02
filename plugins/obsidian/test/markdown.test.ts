@@ -38,6 +38,7 @@ function draft(text: string): TaskDraft {
 		wantsCreated: false,
 		completedOn: undefined,
 		recurrence: undefined,
+		list: undefined,
 	};
 }
 
@@ -440,5 +441,34 @@ describe("§6.1 recurrence token", () => {
 			const length = recurrenceLength(text);
 			expect(length === undefined ? undefined : text.slice(0, length), text).toBe(rule);
 		}
+	});
+});
+
+describe("§6.1 the calendar token", () => {
+	// The same cases as crates/restask/tests/markdown_parser.rs.
+	it("names a list and is not text", () => {
+		const t = mustParse("- [ ] Update restask README 🔺 📁 work");
+		expect(t.draft.text).toBe("Update restask README");
+		expect(t.draft.priority).toBe("highest");
+		expect(t.draft.list).toBe("work");
+
+		const anywhere = mustParse("- [ ] 📁 Home-Lab fix the rack 📁 other");
+		expect(anywhere.draft.text).toBe("fix the rack");
+		expect(anywhere.draft.list).toBe("home-lab");
+
+		const tabbed = mustParse(`- [ ] a 📁\twork2 🆔 ${UID}`);
+		expect(tabbed.draft.list).toBe("work2");
+		expect(tabbed.draft.uid).toBe(UID);
+	});
+
+	it("is text without a name", () => {
+		for (const line of ["- [ ] tidy the 📁", "- [ ] tidy the 📁 -x", "- [ ] 📁work"]) {
+			const t = mustParse(line);
+			expect(t.draft.list, line).toBeUndefined();
+			expect(t.draft.text, line).toContain("📁");
+		}
+		const t = mustParse("- [ ] a 📁 work, then more");
+		expect(t.draft.list).toBe("work");
+		expect(t.draft.text).toBe("a , then more");
 	});
 });

@@ -39,6 +39,14 @@ describe("§15.3 completing", () => {
 		expect(out?.doc).toBe(`\n## Fatto\n- [x] a ✅ ${TODAY}\n`);
 	});
 
+	it("puts the stamp ahead of a calendar token in the tail, and nowhere else (§7.5)", () => {
+		const view = (line: string): string => ["## No Priority", line, "", "## Done", ""].join("\n");
+		expect(toggle(view(`- [ ] A 📁 work ${A}`), 1).doc).toBe(["## No Priority", "", "## Done", `- [x] A ✅ ${TODAY} 📁 work ${A}`, ""].join("\n"));
+		expect(toggle(view("- [ ] A 📁 work"), 1).doc).toBe(["## No Priority", "", "## Done", `- [x] A ✅ ${TODAY} 📁 work`, ""].join("\n"));
+		// A token in the middle of the text is not the tail.
+		expect(toggle(view(`- [ ] 📁 work A ${A}`), 1).doc).toBe(["## No Priority", "", "## Done", `- [x] 📁 work A ✅ ${TODAY} ${A}`, ""].join("\n"));
+	});
+
 	it("a subtask leaves its indentation behind", () => {
 		const doc = [`- [ ] parent ${A}`, `    - [ ] child ${B}`, "## Done"].join("\n");
 		const out = toggle(doc, 1);

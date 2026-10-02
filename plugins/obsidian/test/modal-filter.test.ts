@@ -98,6 +98,13 @@ describe("§15.2 created keyword", () => {
 	});
 });
 
+describe("§15.2 calendar keyword", () => {
+	it("ca suggests the calendar token: its name is typed behind it (§7.5)", () => {
+		expect(suggestionsFor("ca", TODAY)).toEqual([{ keyword: "calendar", insert: "📁 " }]);
+		expect(triggerAt("- [ ] update the readme cal", TODAY)).toEqual({ start: 24, query: "cal" });
+	});
+});
+
 describe("§15.2 repeat keyword", () => {
 	it("re suggests the repeat rule opener", () => {
 		expect(suggestionsFor("re", TODAY)).toEqual([{ keyword: "repeat", insert: "🔁 every " }]);

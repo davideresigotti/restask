@@ -117,15 +117,22 @@ export function uidGenerator(now: () => number, randomBytes: (count: number) => 
  * nothing to register: not a task line, no text yet, or a `🆔` already on the line — a
  * malformed one included, which is the daemon's to repair. `section` is the priority of
  * the view section the line was typed in (§7.4): a line that names no priority gets its
- * emoji, ahead of the UID.
+ * emoji, ahead of the UID. A calendar token the line ends in (§7.5) stays the last thing
+ * before the UID, written as the engine writes it: the calendar's slug.
  */
 export function registeredLine(line: string, today: string, uid: () => string, section?: Priority): string | undefined {
 	const task = parseLine(line);
 	if (task === undefined || task.draft.text === "" || line.includes("🆔")) return undefined;
 	const ranked = section !== undefined && task.draft.priority === undefined ? ` ${PRIORITY_EMOJI[section]}` : "";
-	const dated = task.draft.wantsCreated && task.draft.created === undefined ? withCreated(line, today) : line;
-	return `${dated.replace(/[ \t]+$/, "")}${ranked} 🆔 ${uid()}`;
+	const dated = (task.draft.wantsCreated && task.draft.created === undefined ? withCreated(line, today) : line).replace(/[ \t]+$/, "");
+	const calendar = TRAILING_CALENDAR.exec(dated);
+	const head = calendar === null ? dated : dated.slice(0, calendar.index);
+	const named = calendar === null ? "" : ` 📁 ${calendar[1].toLowerCase()}`;
+	return `${head}${ranked}${named} 🆔 ${uid()}`;
 }
+
+// A calendar token (§6.1) at the end of a line, with the blanks in front of it.
+const TRAILING_CALENDAR = /[ \t]+📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)$/u;
 
 /** `line` with `date` written behind its first bare `➕` (§6.4); further bare ones are left for the daemon to drop. */
 function withCreated(line: string, date: string): string {
@@ -558,7 +565,7 @@ function fmtWhen(w: When): string {
 	return w.kind === "date" ? w.date : `${w.date} ${w.time}`;
 }
 
-/** A task line in canonical form (§6.1): text, then `<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`. */
+/** A task line in canonical form (§6.1): text, then `<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 📁 🆔`. */
 export function canonicalLine(indent: string, marker: string, draft: TaskDraft): string {
 	const parts = [`${indent}${marker} [${draft.checked ? "x" : " "}]`];
 	if (draft.text !== "") parts.push(draft.text);
@@ -571,6 +578,7 @@ export function canonicalLine(indent: string, marker: string, draft: TaskDraft):
 	if (draft.created !== undefined) parts.push(`➕ ${draft.created}`);
 	// A request the daemon has not answered yet stays on the line.
 	else if (draft.wantsCreated) parts.push("➕");
+	if (draft.list !== undefined) parts.push(`📁 ${draft.list}`);
 	if (draft.uid !== undefined) parts.push(`🆔 ${draft.uid}`);
 	return parts.join(" ");
 }

@@ -26,6 +26,8 @@ local FIELDS = {
 	{ keyword = "repeat", insert = "🔁 every " },
 	-- Bare: the date is written when the line is settled (§6.4).
 	{ keyword = "created", insert = "➕" },
+	-- The calendar a task of TODO.md lives in (§7.5); its name is typed behind it.
+	{ keyword = "calendar", insert = "📁 " },
 }
 
 --- `date` (`YYYY-MM-DD`) moved by `days` calendar days; returned as it is when it is no

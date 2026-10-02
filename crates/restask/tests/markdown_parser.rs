@@ -2,7 +2,7 @@
 //! non-tasks, unknown emoji, token extraction and text normalization.
 
 use restask::config::VaultConfig;
-use restask::domain::{LocalDate, LocalDateTime, Priority, TaskUid, When};
+use restask::domain::{ListSlug, LocalDate, LocalDateTime, Priority, TaskUid, When};
 use restask::markdown::parser::{
     link_parents, parse as parse_file, parse_line, ParsedTask, TaskDraft, TaskLine,
 };
@@ -492,4 +492,35 @@ fn a_dated_created_token_is_no_request_and_a_glued_one_is_text() {
     assert_eq!(t.draft.text, "2➕2 and a➕");
 
     assert!(!parse("- [ ] Buy milk").draft.wants_created);
+}
+
+// ---- the calendar token (§6.1, §7.5) ----
+
+#[test]
+fn calendar_token_names_a_list_and_is_not_text() {
+    let t = parse("- [ ] Update restask README 🔺 📁 work");
+    assert_eq!(t.draft.text, "Update restask README");
+    assert_eq!(t.draft.priority, Some(Priority::Highest));
+    assert_eq!(t.draft.list, Some(ListSlug::from_name("work").unwrap()));
+
+    // Anywhere in the body, any case; hyphens inside a name; the first one wins.
+    let t = parse("- [ ] 📁 Home-Lab fix the rack 📁 other");
+    assert_eq!(t.draft.text, "fix the rack");
+    assert_eq!(t.draft.list, Some(ListSlug::from_name("home-lab").unwrap()));
+    let t = parse(&format!("- [ ] a 📁\twork2 🆔 {UID}"));
+    assert_eq!(t.draft.list.unwrap().as_str(), "work2");
+    assert_eq!(t.draft.uid.unwrap().as_str(), UID);
+}
+
+#[test]
+fn a_calendar_emoji_without_a_name_is_text() {
+    for line in ["- [ ] tidy the 📁", "- [ ] tidy the 📁 -x", "- [ ] 📁work"] {
+        let t = parse(line);
+        assert_eq!(t.draft.list, None, "{line}");
+        assert!(t.draft.text.contains('📁'), "{line}");
+    }
+    // The name ends where the word of letters, digits and inner hyphens ends.
+    let t = parse("- [ ] a 📁 work, then more");
+    assert_eq!(t.draft.list.unwrap().as_str(), "work");
+    assert_eq!(t.draft.text, "a , then more");
 }

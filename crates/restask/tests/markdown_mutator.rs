@@ -280,6 +280,23 @@ fn canonical_tail_order_full_rewrite() {
 }
 
 #[test]
+fn the_calendar_token_is_kept_and_written_before_the_uid() {
+    let contents =
+        "- [ ] A 📁 Work 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb ➕ 2026-09-01 📅 2026-09-03\n";
+    let out = run(
+        contents,
+        &[Mutation::SetPriority {
+            uid: uid(UID1),
+            priority: Some(Priority::Medium),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [ ] A 🔼 📅 2026-09-03 ➕ 2026-09-01 📁 work 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb\n"
+    );
+}
+
+#[test]
 fn non_targeted_lines_and_text_preserved() {
     let contents = concat!(
         "# Title\n",

@@ -32,7 +32,8 @@ fn fixed_time() -> DateTime<Utc> {
 fn task(uid: &str, text: &str) -> Task {
     Task {
         uid: TaskUid::parse(uid).unwrap(),
-        list: ListSlug::from_name("home").unwrap(),
+        // The calendar unmarked lines of the view belong to (§7.5).
+        list: ListSlug::from_name("inbox").unwrap(),
         text: text.to_string(),
         status: Status::Active,
         priority: None,
@@ -315,13 +316,78 @@ fn inbox_line_full_canonical() {
     };
     full.created = Some(date("2026-09-01"));
     assert_eq!(
-        inbox_line(&full),
+        inbox_line(&full, &VaultConfig::default()),
         "- [x] Plan week 🔼 🛫 2026-09-21 ⏳ 2026-09-22 08:00 📅 2026-09-23 17:30 ✅ 2026-09-20 ➕ 2026-09-01 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpb"
     );
 
     assert_eq!(
-        inbox_line(&task(U2, "Buy milk")),
+        inbox_line(&task(U2, "Buy milk"), &VaultConfig::default()),
         "- [ ] Buy milk 🆔 restask-01jzq4tsvg2c9xkw7n5m8rhdpc"
+    );
+}
+
+#[test]
+fn a_line_of_the_view_names_its_calendar_unless_it_is_the_views_own() {
+    // §7.5: the view is bound to `inbox`; `work` is another calendar it shows.
+    let cfg = VaultConfig::default();
+    let mut tasks = BTreeMap::new();
+    let mut readme = task(U1, "Update restask README");
+    readme.list = ListSlug::from_name("work").unwrap();
+    readme.priority = Some(Priority::Highest);
+    let mut review = task(U2, "Ask for review");
+    review.list = ListSlug::from_name("work").unwrap();
+    let mut shipped = task(U4, "Ship it");
+    shipped.list = ListSlug::from_name("work").unwrap();
+    shipped.status = Status::Completed {
+        on: date("2026-09-20"),
+    };
+    let milk = task(U3, "Buy milk");
+    // A note task of that calendar is a mirror line like any other: its link says
+    // where it lives.
+    let mut noted = vault_task(U5, "From a note", "Notes/Work.md", 3);
+    noted.list = ListSlug::from_name("work").unwrap();
+    noted.priority = Some(Priority::Highest);
+    for task in [readme.clone(), review, shipped, milk.clone(), noted] {
+        tasks.insert(task.uid.clone(), task);
+    }
+
+    assert_eq!(
+        inbox_line(&readme, &cfg),
+        format!("- [ ] Update restask README 🔺 📁 work 🆔 {U1}")
+    );
+    assert_eq!(inbox_line(&milk, &cfg), format!("- [ ] Buy milk 🆔 {U3}"));
+    let out = render(&tasks, &cfg);
+    let body = out.split_once("# TODO\n\n").unwrap().1;
+    assert_eq!(
+        body,
+        format!(
+            "## 🔺 Highest Priority\n\
+             - [ ] From a note 🔺 [[Work|Work]] 🆔 {U5}\n\
+             - [ ] Update restask README 🔺 📁 work 🆔 {U1}\n\
+             \n\
+             ## No Priority\n\
+             - [ ] Ask for review 📁 work 🆔 {U2}\n\
+             - [ ] Buy milk 🆔 {U3}\n\
+             \n\
+             ## Done\n\
+             - [x] Ship it ✅ 2026-09-20 📁 work 🆔 {U4}\n"
+        )
+    );
+    assert!(out.starts_with("---\nrestask-list: inbox\nrestask-render: "));
+    assert!(is_sealed(&out));
+
+    // Bound to `work`, the same tasks are marked the other way round.
+    let bound = VaultConfig {
+        inbox_list: "work".to_string(),
+        ..VaultConfig::default()
+    };
+    assert_eq!(
+        inbox_line(&readme, &bound),
+        format!("- [ ] Update restask README 🔺 🆔 {U1}")
+    );
+    assert_eq!(
+        inbox_line(&milk, &bound),
+        format!("- [ ] Buy milk 📁 inbox 🆔 {U3}")
     );
 }
 
@@ -344,7 +410,10 @@ fn lines_with_empty_text_have_no_double_spaces() {
     let mut empty = vault_task(U1, "", "Notes/A.md", 1);
     empty.priority = Some(Priority::High);
     assert_eq!(mirror_line(&empty), format!("- [ ] ⏫ [[A|A]] 🆔 {U1}"));
-    assert_eq!(inbox_line(&task(U2, "")), format!("- [ ] 🆔 {U2}"));
+    assert_eq!(
+        inbox_line(&task(U2, ""), &VaultConfig::default()),
+        format!("- [ ] 🆔 {U2}")
+    );
 }
 
 // ---- mirror edits: TODO.md is a two-way view ----

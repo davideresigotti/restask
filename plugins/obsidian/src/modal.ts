@@ -31,6 +31,8 @@ const DATE_FIELD_SUGGESTIONS: readonly Suggestion[] = [
 	// Bare: the date is written when the line is settled — today for a new task, the
 	// server's creation date for one that exists (§6.4).
 	{ keyword: "created", insert: "➕" },
+	// The calendar a task of TODO.md lives in (§7.5); its name is typed behind it.
+	{ keyword: "calendar", insert: "📁 " },
 ];
 
 /** Suggestion threshold: nothing matches until ≥ 2 letters are typed (§15.2). */

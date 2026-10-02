@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use crate::config::VaultConfig;
-use crate::domain::{LocalDate, Priority, Recurrence, TaskUid, When};
+use crate::domain::{ListSlug, LocalDate, Priority, Recurrence, TaskUid, When};
 
 /// The §6.1 task-line regex, verbatim: single-line unordered-list checkbox.
 const TASK_LINE_PATTERN: &str =
@@ -35,6 +35,10 @@ const CREATED_PATTERN: &str = r"➕[ \t]+(\d{4}-\d{2}-\d{2})";
 /// alphanumerics.
 const UID_PATTERN: &str = r"🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})";
 
+/// Calendar token (§6.1): `📁` plus a calendar's name as one word of letters and digits,
+/// with single hyphens inside — the shape of a list slug, in either case.
+const LIST_PATTERN: &str = r"📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)";
+
 /// ATX heading (§6.2): 1–6 `#`, one space, text with an optional closing hash sequence.
 const HEADING_PATTERN: &str = r"^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$";
 
@@ -48,6 +52,7 @@ struct Patterns {
     completed: Regex,
     created: Regex,
     uid: Regex,
+    list: Regex,
     heading: Regex,
 }
 
@@ -63,6 +68,7 @@ fn patterns() -> Option<&'static Patterns> {
                 completed: Regex::new(COMPLETED_PATTERN)?,
                 created: Regex::new(CREATED_PATTERN)?,
                 uid: Regex::new(UID_PATTERN)?,
+                list: Regex::new(LIST_PATTERN)?,
                 heading: Regex::new(HEADING_PATTERN)?,
             })
         })
@@ -96,6 +102,9 @@ pub struct TaskDraft {
     pub completed_on: Option<LocalDate>,
     /// `🔁` rule.
     pub recurrence: Option<Recurrence>,
+    /// `📁` value: the calendar the line names (§6.1). It decides where a task of the
+    /// inbox file lives (§7.5); on a line of a note it is kept and decides nothing.
+    pub list: Option<ListSlug>,
 }
 
 impl From<&crate::domain::Task> for TaskDraft {
@@ -117,6 +126,8 @@ impl From<&crate::domain::Task> for TaskDraft {
             wants_created: false,
             completed_on,
             recurrence: task.recurrence.clone(),
+            // Whether a line names its calendar depends on the file it is in (§7.5).
+            list: None,
         }
     }
 }
@@ -187,6 +198,10 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
     spans.extend(uid_spans);
     let uid = uid.and_then(|v| TaskUid::parse(&v).ok());
 
+    let (list_spans, list) = scan_token(&patterns.list, body);
+    spans.extend(list_spans);
+    let list = list.and_then(|v| ListSlug::from_name(&v).ok());
+
     let recurrence = scan_recurrence(body).map(|(span, rule)| {
         spans.push(span);
         rule
@@ -208,6 +223,7 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
             wants_created,
             completed_on,
             recurrence,
+            list,
         },
     })
 }

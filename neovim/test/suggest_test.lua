@@ -48,6 +48,7 @@ eq(offered("tomorrow"), "tomorrow=📅 2026-09-24", "tomorrow")
 eq(offered("to"), "today=📅 " .. TODAY .. ",tomorrow=📅 2026-09-24", "to: today and tomorrow")
 eq(offered("zz"), "", "no match")
 eq(offered("cr"), "created=➕", "created: the bare token")
+eq(offered("ca"), "calendar=📁 ", "calendar: the token, its name is typed behind it")
 eq(offered("re"), "repeat=🔁 every ", "repeat")
 
 -- Calendar arithmetic.
@@ -62,6 +63,7 @@ eq(trigger("- [ ] buy milk hi"), "15:hi", "a fragment at the end of a task line"
 eq(trigger("  * [x] call tom"), "13:tom", "indented, checked")
 eq(trigger("- [ ] du"), "6:du", "right after the checkbox")
 eq(trigger("- [ ] buy milk cre"), "15:cre", "created")
+eq(trigger("- [ ] update the readme cal"), "24:cal", "calendar")
 eq(trigger("- [ ] caffè 🔺 hi"), "18:hi", "the column is in bytes")
 eq(trigger("plain prose hi"), nil, "prose")
 eq(trigger("- not a checkbox hi"), nil, "a list item without a box")

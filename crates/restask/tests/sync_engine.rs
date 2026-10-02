@@ -2551,3 +2551,354 @@ async fn a_machine_that_is_not_the_sync_node_settles_and_sends_nothing() {
     assert_eq!(mtime(&dir, "notes/home.md"), note_at);
     assert_eq!(mtime(&dir, "TODO.md"), todo_at);
 }
+
+// ---- §7.5: TODO.md holds the tasks of several calendars ----
+
+const CALENDAR: &str = "\u{1F4C1}";
+
+/// A vault whose TODO.md also shows the calendars `lists` (a TOML array body), bound to
+/// `inbox` like every test vault.
+fn vault_showing(lists: &str) -> TempDir {
+    let dir = temp_vault();
+    write_vault_file(
+        &dir,
+        "restask.toml",
+        &format!("done_heading = \"Done\"\ntodo_lists = [{lists}]\n"),
+    );
+    dir
+}
+
+/// `Update restask README`, made in Tasks.org, without a priority.
+fn work_task() -> String {
+    TASKS_ORG_BODY
+        .replace("Made in Tasks.org", "Update restask README")
+        .replace("PRIORITY:1\r\n", "")
+}
+
+#[tokio::test]
+async fn a_task_of_another_calendar_lives_in_todo_md() {
+    let dir = vault_showing("\"work\"");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("work", TASKS_ORG_NAME, &work_task());
+    let engine = engine(&dir, &mock);
+
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (report.adoptions, report.inserts, report.deletes),
+        (1, 1, 0)
+    );
+    let adopted = uid_of(&dir, "TODO.md", "Update restask README");
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## No Priority\n- [ ] Update restask README {CALENDAR} work {ID} {adopted}\n"
+        )),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo));
+    // It stays the task its client made, in the calendar it was made in.
+    assert_eq!(mock.resource_names("work"), vec![TASKS_ORG_NAME]);
+    assert!(mock.resource_names("inbox").is_empty());
+    let linked = body(&mock, "work", TASKS_ORG_NAME);
+    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains("DESCRIPTION:with a note\r\n"), "{linked}");
+
+    // Quiet.
+    let (counters, files) = (mock.counters(), snapshot(&dir));
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.moves, again.inserts), (0, 0, 0));
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(snapshot(&dir), files);
+
+    // A priority given on the server moves the line to that section, calendar kept.
+    mock.seed_resource(
+        "work",
+        TASKS_ORG_NAME,
+        &linked.replace("SUMMARY:", "PRIORITY:1\r\nSUMMARY:"),
+    );
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53A} Highest Priority\n- [ ] Update restask README \u{1F53A} {CALENDAR} work {ID} {adopted}\n"
+        )),
+        "{todo}"
+    );
+
+    // Checked in TODO.md, it is completed in its own calendar.
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &todo.replace("- [ ] Update restask README", "- [x] Update restask README"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.pushes, report.moves, report.deletes), (1, 0, 0));
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## Done\n- [x] Update restask README \u{1F53A} \u{2705} {} {CALENDAR} work {ID} {adopted}\n",
+            today()
+        )),
+        "{todo}"
+    );
+    assert!(body(&mock, "work", TASKS_ORG_NAME).contains("STATUS:COMPLETED\r\n"));
+    assert_eq!(mock.resource_names("work"), vec![TASKS_ORG_NAME]);
+    assert!(mock.resource_names("inbox").is_empty());
+}
+
+#[tokio::test]
+async fn a_line_of_todo_md_lives_in_the_calendar_it_names() {
+    let dir = vault_showing("\"work\"");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!(
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## No Priority\n- [ ] for work {CALENDAR} Work\n- [ ] for me\n\n## Done\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.pushes), (2, 2));
+    let (work, mine) = (
+        uid_of(&dir, "TODO.md", "for work"),
+        uid_of(&dir, "TODO.md", "for me"),
+    );
+    assert_eq!(mock.resource_names("work"), vec![work.clone()]);
+    assert_eq!(mock.resource_names("inbox"), vec![mine.clone()]);
+    let todo = read(&dir, "TODO.md");
+    // The calendar is written as its slug; the default one is not written at all.
+    assert!(
+        todo.contains(&format!(
+            "## No Priority\n- [ ] for work {CALENDAR} work {ID} {work}\n- [ ] for me {ID} {mine}\n"
+        )),
+        "{todo}"
+    );
+    assert!(body(&mock, "work", &work).contains("SUMMARY:for work\r\n"));
+
+    // Another name moves the task — to a calendar TODO.md was not told to show, too.
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &todo.replace(&format!("{CALENDAR} work"), &format!("{CALENDAR} family")),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.moves, report.registered), (1, 0));
+    assert!(mock.resource_names("work").is_empty());
+    assert_eq!(mock.resource_names("family"), vec![work.clone()]);
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!("- [ ] for work {CALENDAR} family {ID} {work}\n")),
+        "{todo}"
+    );
+
+    // No name: the calendar TODO.md is bound to. Naming that one is the same.
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &todo
+            .replace(&format!(" {CALENDAR} family"), "")
+            .replace("for me", &format!("for me {CALENDAR} inbox")),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.moves, 1);
+    assert!(mock.resource_names("family").is_empty());
+    let mut both = vec![work.clone(), mine.clone()];
+    both.sort();
+    assert_eq!(mock.resource_names("inbox"), both);
+    let todo = read(&dir, "TODO.md");
+    assert!(!todo.contains(CALENDAR), "{todo}");
+
+    let (counters, files) = (mock.counters(), snapshot(&dir));
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.moves), (0, 0));
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(snapshot(&dir), files);
+}
+
+/// The line itself says where its task lives: with the sync state gone (`restask
+/// rebuild`), nothing is moved to the calendar TODO.md is bound to.
+#[tokio::test]
+async fn a_task_of_another_calendar_stays_there_when_the_state_is_dropped() {
+    let dir = vault_showing("\"work\"");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("work", TASKS_ORG_NAME, &work_task());
+    engine(&dir, &mock).reconcile().await.unwrap();
+    engine(&dir, &mock)
+        .add("mine", None, None, None)
+        .await
+        .unwrap();
+    let todo = read(&dir, "TODO.md");
+    let stored = body(&mock, "work", TASKS_ORG_NAME);
+
+    std::fs::remove_dir_all(dir.path().join(".restask")).unwrap();
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (
+            report.moves,
+            report.deletes,
+            report.inserts,
+            report.adoptions
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(read(&dir, "TODO.md"), todo);
+    assert_eq!(mock.resource_names("work"), vec![TASKS_ORG_NAME]);
+    assert_eq!(mock.resource_names("inbox").len(), 1);
+    assert_eq!(body(&mock, "work", TASKS_ORG_NAME), stored);
+}
+
+#[tokio::test]
+async fn a_calendar_todo_md_was_not_told_to_show_is_not_looked_at() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("work", TASKS_ORG_NAME, &work_task());
+    let before = mock.resource("work", TASKS_ORG_NAME).unwrap().etag;
+
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!((report.adoptions, report.inserts, report.pushes), (0, 0, 0));
+    assert_eq!(mock.counters(), (0, 0, 1), "one listing: the inbox");
+    assert_eq!(mock.resource("work", TASKS_ORG_NAME).unwrap().etag, before);
+    assert!(!read(&dir, "TODO.md").contains("Update restask README"));
+}
+
+#[tokio::test]
+async fn a_calendar_that_is_no_longer_shown_or_gone_takes_no_line_with_it() {
+    let dir = vault_showing("\"work\"");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("work", TASKS_ORG_NAME, &work_task());
+    engine(&dir, &mock).reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(todo.contains("Update restask README"), "{todo}");
+
+    // Taken out of `todo_lists`: the line still names its calendar and still syncs
+    // with it; only new tasks of that calendar stop coming in.
+    write_vault_file(&dir, "restask.toml", "done_heading = \"Done\"\n");
+    mock.seed_resource(
+        "work",
+        "second",
+        &work_task()
+            .replace("UID:5417861935824551742", "UID:second@tasks.org")
+            .replace("Update restask README", "Second one"),
+    );
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (report.deletes, report.markdown_mutations, report.adoptions),
+        (0, 0, 0)
+    );
+    assert_eq!(read(&dir, "TODO.md"), todo);
+    assert_eq!(mock.resource_names("work").len(), 2);
+
+    // A server that has no such calendar (and may not be given one) proves nothing.
+    let elsewhere = MockCaldav::new();
+    elsewhere.seed_collection("inbox", "Inbox");
+    let report = engine_with(&dir, elsewhere.clone(), false)
+        .reconcile()
+        .await
+        .unwrap();
+    assert_eq!((report.deletes, report.markdown_mutations), (0, 0));
+    assert_eq!(read(&dir, "TODO.md"), todo);
+    // One that lost the calendar wholesale gets the task again, the line stays.
+    let report = engine(&dir, &elsewhere).reconcile().await.unwrap();
+    assert_eq!(report.markdown_mutations, 0);
+    assert_eq!(read(&dir, "TODO.md"), todo);
+    assert_eq!(elsewhere.resource_names("work").len(), 1);
+}
+
+#[tokio::test]
+async fn a_calendar_with_a_note_of_its_own_keeps_its_tasks_in_that_note() {
+    let dir = vault_showing("\"home\", \"work\"");
+    home_note(&dir, "");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("home", TASKS_ORG_NAME, &work_task());
+    engine(&dir, &mock).reconcile().await.unwrap();
+
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains("- [ ] Update restask README \u{1F194}"),
+        "{note}"
+    );
+    assert!(!note.contains(CALENDAR), "{note}");
+    // Without a priority it is not mirrored, as before.
+    assert!(!read(&dir, "TODO.md").contains("Update restask README"));
+}
+
+#[tokio::test]
+async fn the_calendar_of_a_line_is_settled_on_the_device_and_the_pass_writes_no_file() {
+    let dir = vault_showing("\"work\"");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!(
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{1F53A} Highest Priority\n- [ ] for work {CALENDAR} work\n\n## Done\n"
+        ),
+    );
+    let offline = engine_with(&dir, Offline, true);
+    assert_eq!(offline.settle().await.unwrap().registered, 1);
+    let registered = uid_of(&dir, "TODO.md", "for work");
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## \u{1F53A} Highest Priority\n- [ ] for work \u{1F53A} {CALENDAR} work {ID} {registered}\n"
+        )),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo));
+
+    let at = mtime(&dir, "TODO.md");
+    let mock = MockCaldav::new();
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.pushes),
+        (0, 0, 1)
+    );
+    assert_eq!(mock.resource_names("work"), vec![registered]);
+    assert_eq!(mtime(&dir, "TODO.md"), at);
+}
+
+#[tokio::test]
+async fn a_recurring_task_of_another_calendar_rolls_forward_in_that_calendar() {
+    let dir = vault_showing("\"work\"");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!(
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## No Priority\n- [ ] stand-up {REPEAT} every day {CALENDAR} work\n\n## Done\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let series = uid_of(&dir, "TODO.md", "stand-up");
+
+    engine.set_done(&uid(&series), true).await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "## No Priority\n- [ ] stand-up {REPEAT} every day {DUE} {} {CALENDAR} work {ID} {series}\n",
+            day(1)
+        )),
+        "{todo}"
+    );
+    assert!(todo.contains("## Done\n- [x] stand-up \u{2705}"), "{todo}");
+    assert_eq!(
+        todo.matches(&format!("{CALENDAR} work")).count(),
+        2,
+        "{todo}"
+    );
+    assert_eq!(mock.resource_names("work").len(), 2);
+    assert!(mock.resource_names("inbox").is_empty());
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.moves, again.inserts), (0, 0, 0));
+}

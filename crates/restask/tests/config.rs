@@ -57,6 +57,34 @@ fn vault_config_round_trip() {
 }
 
 #[test]
+fn the_calendars_todo_md_shows_are_written_only_when_there_are_some() {
+    // A vault set up before the key existed keeps its file as it is.
+    let cfg = VaultConfig::default();
+    assert!(cfg.todo_lists.is_empty());
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("restask.toml");
+    cfg.save(&path).unwrap();
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("todo_lists"));
+
+    let cfg =
+        VaultConfig::from_str("inbox_list = \"personal\"\ntodo_lists = [\"work\", \"Home Lab\"]\n")
+            .unwrap();
+    assert_eq!(cfg.todo_lists, vec!["work", "Home Lab"]);
+    cfg.save(&path).unwrap();
+    assert_eq!(VaultConfig::load(&path).unwrap(), cfg);
+    // As slugs, without the calendar the file is bound to.
+    let lists = restask::vault::todo_lists(&VaultConfig {
+        todo_lists: vec!["Work".into(), "personal".into(), "Home Lab".into()],
+        ..cfg
+    })
+    .unwrap();
+    let names: Vec<&str> = lists.iter().map(|list| list.as_str()).collect();
+    assert_eq!(names, vec!["home-lab", "work"]);
+}
+
+#[test]
 fn vault_load_missing_file_is_error() {
     let dir = tempdir().unwrap();
     let err = VaultConfig::load(&dir.path().join("absent.toml")).unwrap_err();

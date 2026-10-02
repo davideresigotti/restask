@@ -61,6 +61,11 @@ pub enum Command {
         /// Bind a list to a collection as `list=collection` (repeatable).
         #[arg(long = "collection")]
         collections: Vec<String>,
+        /// With `--non-interactive`: a further calendar whose tasks TODO.md shows, next
+        /// to the one it is bound to (`--collection inbox=<calendar>`); repeatable. The
+        /// interactive wizard asks for them.
+        #[arg(long = "todo-list", value_name = "CALENDAR", conflicts_with = "join")]
+        todo_lists: Vec<String>,
         /// Fail instead of prompting.
         #[arg(long)]
         non_interactive: bool,
@@ -213,6 +218,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             password_env,
             password_stdin,
             collections,
+            todo_lists,
         } => {
             let join = setup::joins(&vault, &config_path, join)?;
             let daemon = setup::DaemonFlags {
@@ -277,6 +283,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
                     setup::parse_collections(&collections)?,
                     join,
                 )?
+                .showing(todo_lists)?
             };
             let caldav = CaldavClient::new(&args.url, args.username.clone(), Some(password))?;
             let mut summary = setup::run_setup(
@@ -445,6 +452,7 @@ pub async fn run_with<C: CaldavPort>(
             password_env,
             password_stdin: _,
             collections,
+            todo_lists,
         } => {
             let join = setup::joins(&vault, &config_path, join)?;
             let daemon = setup::DaemonFlags {
@@ -470,6 +478,7 @@ pub async fn run_with<C: CaldavPort>(
                     setup::parse_collections(&collections)?,
                     join,
                 )?
+                .showing(todo_lists)?
             };
             // Hermetic dispatch: never touch the host's systemd session or a node.
             let summary = setup::run_setup(args, caldav, clock, None).await?;
@@ -1193,6 +1202,16 @@ fn print_lists(
     let inbox = vault::inbox_list(&cfg)?;
     let mut homes = scan.homes.clone();
     homes.insert(inbox, cfg.inbox_file.clone());
+    // The inbox file is also the home of the further calendars it shows and of any
+    // calendar one of its lines names, where no note is (§7.5).
+    let named = scan
+        .local
+        .values()
+        .filter(|task| task.source.path == cfg.inbox_file)
+        .map(|task| task.list.clone());
+    for list in vault::todo_lists(&cfg)?.into_iter().chain(named) {
+        homes.entry(list).or_insert_with(|| cfg.inbox_file.clone());
+    }
     // On a machine that only edits, the endpoint is the one its sync node talks to.
     let node = machine.node.as_ref();
     let endpoint = (

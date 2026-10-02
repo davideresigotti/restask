@@ -124,6 +124,18 @@ impl<C: CaldavPort> Engine<C> {
         }
     }
 
+    /// The vault config the engine works from.
+    pub fn config(&self) -> &VaultConfig {
+        &self.cfg
+    }
+
+    /// Replaces the vault config for the passes that follow: `restask.toml` is a file
+    /// of the vault and changes like one — edited by hand, or arriving through the file
+    /// sync — while the daemon runs (§13.1).
+    pub fn set_config(&mut self, cfg: VaultConfig) {
+        self.cfg = cfg;
+    }
+
     /// Performs one full reconciliation (§13.1). When the server cannot be reached the
     /// local phase and the TODO.md render still happen, and the error is returned after.
     pub async fn reconcile(&self) -> Result<ReconcileReport, RestaskError> {
@@ -390,7 +402,10 @@ impl<C: CaldavPort> Engine<C> {
         report: &mut ReconcileReport,
     ) -> Result<(), RestaskError> {
         let inbox_list = vault::inbox_list(&self.cfg)?;
-        let (remote, created) = self.remote_snapshot(scan, index, &inbox_list).await?;
+        let todo_lists = vault::todo_lists(&self.cfg)?;
+        let (remote, created) = self
+            .remote_snapshot(scan, index, &inbox_list, &todo_lists)
+            .await?;
         let snapshots = Snapshots {
             local: scan.local.clone(),
             base: self.load_base(index)?,
@@ -403,6 +418,7 @@ impl<C: CaldavPort> Engine<C> {
             unreadable: scan.unreadable.clone(),
             inbox_file: self.cfg.inbox_file.clone(),
             inbox_list: Some(inbox_list),
+            todo_lists,
         };
         let plan = progress.plan.insert(planner::plan(&snapshots));
 
@@ -483,8 +499,9 @@ impl<C: CaldavPort> Engine<C> {
         }
     }
 
-    /// Lists every collection in scope with one `REPORT` each: the inbox list, every list
-    /// a note routes to, and every list the index still references (so moves and
+    /// Lists every collection in scope with one `REPORT` each: the inbox list and the
+    /// further lists the inbox file shows (§7.5), every list a note routes to or a line
+    /// of the inbox file names, and every list the index still references (so moves and
     /// deletions see the old copy). A routed list without a collection is created when
     /// `caldav.allow_create_lists` is set; otherwise its tasks simply wait.
     async fn remote_snapshot(
@@ -492,9 +509,12 @@ impl<C: CaldavPort> Engine<C> {
         scan: &Scan,
         index: &Index,
         inbox_list: &ListSlug,
+        todo_lists: &BTreeSet<ListSlug>,
     ) -> Result<(BTreeMap<ListSlug, Vec<RemoteResource>>, BTreeSet<ListSlug>), RestaskError> {
         let mut routed: BTreeSet<ListSlug> = scan.notes.values().cloned().collect();
         routed.insert(inbox_list.clone());
+        routed.extend(todo_lists.iter().cloned());
+        routed.extend(scan.local.values().map(|task| task.list.clone()));
         let mut scope = routed.clone();
         scope.extend(index.entries.values().map(|entry| entry.list.clone()));
 

@@ -9,8 +9,12 @@
 ```toml
 done_heading = "Done"      # heading text that starts a note's completed region
 inbox_file   = "TODO.md"   # the engine-managed inbox + view (§7)
-inbox_list   = "inbox"     # the list (= collection slug) the inbox file routes to;
+inbox_list   = "inbox"     # the list (= collection slug) the inbox file routes to:
+                           # where a task typed there without a calendar goes;
                            # setup records the calendar you chose
+todo_lists   = ["work"]    # further calendars whose tasks live in the inbox file,
+                           # each line naming its own (📁 work, §7.5); default: none,
+                           # and the key is then not written
 track  = ["**/*.md"]       # globs of files that may be notes
 ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```

@@ -18,9 +18,9 @@ use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::setup::{
     daemon_unit_content, install_obsidian_plugin, is_loopback, is_obsidian_main, joins,
-    match_collection, node_link_args, open_vault_id, parse_collections, run_setup, DaemonFlags,
-    DaemonHost, DaemonInstaller, NodeAccess, NodeTarget, ObsidianApp, PluginInstall, PluginLoad,
-    SetupArgs,
+    match_collection, node_link_args, open_vault_id, parse_collections, run_setup,
+    select_collections, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess, NodeTarget,
+    ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -67,6 +67,7 @@ fn args(vault: &TempDir) -> SetupArgs {
         password_env: Some("RESTASK_TEST_PASS".to_string()),
         password_file: None,
         inbox_collection: None,
+        todo_collections: None,
         collections: vec![("Home".to_string(), "home".to_string())],
         join: false,
         daemon: DaemonHost::Here,
@@ -467,6 +468,142 @@ async fn inbox_binding_retargets_todo_md_to_the_chosen_calendar() {
 
     let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert!(index.entries.is_empty());
+}
+
+/// §7.5, §13.2 step 4: the calendars TODO.md shows are recorded in `restask.toml`, and
+/// the first sync brings their tasks into TODO.md, each line naming its calendar.
+#[tokio::test]
+async fn the_calendars_todo_md_shows_are_recorded_and_their_tasks_come_in() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    mock.seed_resource(
+        "work",
+        "from-phone",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:from-phone@tasks.org\r\n\
+         CREATED:20260921T081233Z\r\nLAST-MODIFIED:20260922T101400Z\r\n\
+         SUMMARY:Update restask README\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    );
+    let mut setup_args = args(&vault);
+    setup_args.inbox_collection = Some("Personal".to_string());
+    // The bound calendar named again, a name twice, a display spelling: one entry each.
+    setup_args.todo_collections = Some(vec![
+        "Work".to_string(),
+        "personal".to_string(),
+        "Family Stuff".to_string(),
+        "work".to_string(),
+    ]);
+
+    let summary = run_setup(setup_args, mock.clone(), clock(), None)
+        .await
+        .unwrap();
+
+    let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
+    assert_eq!(cfg.inbox_list, "personal");
+    assert_eq!(cfg.todo_lists, vec!["work", "family-stuff"]);
+    assert_eq!(
+        summary.collections,
+        vec!["personal", "family-stuff", "work", "home"]
+    );
+    for calendar in ["personal", "family-stuff", "work"] {
+        assert!(mock.collection_names().iter().any(|slug| slug == calendar));
+    }
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(
+        todo.contains("## No Priority\n- [ ] Update restask README 📁 work 🆔 restask-"),
+        "{todo}"
+    );
+    assert_eq!(mock.resource_names("work"), vec!["from-phone"]);
+    assert!(mock.resource_names("personal").is_empty());
+
+    // A run that says nothing about them leaves the choice as it is; one that names
+    // none clears it.
+    let mut again = args(&vault);
+    again.inbox_collection = Some("Personal".to_string());
+    run_setup(again.clone(), mock.clone(), clock(), None)
+        .await
+        .unwrap();
+    let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
+    assert_eq!(cfg.todo_lists, vec!["work", "family-stuff"]);
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(todo.contains("Update restask README 📁 work"), "{todo}");
+    again.todo_collections = Some(Vec::new());
+    run_setup(again, mock.clone(), clock(), None).await.unwrap();
+    let cfg = VaultConfig::load(&vault.path().join("restask.toml")).unwrap();
+    assert!(cfg.todo_lists.is_empty());
+    assert_eq!(mock.resource_names("work"), vec!["from-phone"]);
+}
+
+#[test]
+fn the_calendars_todo_md_shows_are_chosen_from_the_servers_by_name() {
+    let server: Vec<restask::caldav::CollectionInfo> =
+        ["personal", "work", "birthdays", "home-lab"]
+            .iter()
+            .map(|slug| restask::caldav::CollectionInfo {
+                href: format!("/me/{slug}/"),
+                slug: slug.to_string(),
+                display_name: None,
+                // `birthdays` holds events only.
+                supports_vtodo: *slug != "birthdays",
+                ctag: None,
+            })
+            .collect();
+    let chosen = |typed: &str| {
+        select_collections(typed, &server).map(|found| {
+            found
+                .iter()
+                .map(|collection| collection.slug.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    // Enter: all that can hold tasks, in the server's order.
+    assert_eq!(chosen("").unwrap(), vec!["personal", "work", "home-lab"]);
+    assert_eq!(chosen(" , ").unwrap(), vec!["personal", "work", "home-lab"]);
+    // In the order typed, any case, each once.
+    assert_eq!(
+        chosen("Work, personal,work ,").unwrap(),
+        vec!["work", "personal"]
+    );
+    assert_eq!(chosen("home-lab").unwrap(), vec!["home-lab"]);
+    // A name the server does not have is asked for again.
+    assert_eq!(chosen("work, wrok").unwrap_err(), "wrok");
+    // One that was typed is taken at the user's word.
+    assert_eq!(chosen("birthdays").unwrap(), vec!["birthdays"]);
+}
+
+#[test]
+fn the_todo_list_flags_are_refused_on_a_join_and_checked() {
+    let flags = |join: bool| {
+        SetupArgs::from_flags(
+            PathBuf::from("/vault"),
+            PathBuf::from("/machine.toml"),
+            Some("http://radicale.local:5232".to_string()),
+            Some("me".to_string()),
+            Some("RESTASK_TEST_PASS".to_string()),
+            Vec::new(),
+            join,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        flags(false).showing(Vec::new()).unwrap().todo_collections,
+        None
+    );
+    assert_eq!(
+        flags(false)
+            .showing(vec!["work".to_string()])
+            .unwrap()
+            .todo_collections,
+        Some(vec!["work".to_string()])
+    );
+    assert!(flags(true).showing(Vec::new()).unwrap().join);
+    assert!(matches!(
+        flags(true).showing(vec!["work".to_string()]),
+        Err(RestaskError::Validation {
+            field: "todo-list",
+            ..
+        })
+    ));
+    assert!(flags(false).showing(vec!["***".to_string()]).is_err());
 }
 
 #[test]

@@ -44,6 +44,9 @@ pub struct Snapshots {
     pub inbox_file: String,
     /// The list the inbox file routes to; `None` only in an empty default snapshot.
     pub inbox_list: Option<ListSlug>,
+    /// Further lists whose tasks live in the inbox file when no note is their home
+    /// (`vault.todo_lists`, §7.5).
+    pub todo_lists: BTreeSet<ListSlug>,
 }
 
 /// The mutation plan for one reconciliation pass (§11.1).
@@ -271,7 +274,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             if let Some(roll) = roll_forward(&merged.task, Some(resource)) {
                 // R8r — one occurrence of a recurring task was completed in the vault:
                 // the checked line becomes a record of its own, the series moves on.
-                let (task, extras) = apply_roll(&mut p, local, roll);
+                let (task, extras) = apply_roll(&mut p, local, ctx.mark(local), roll);
                 p.puts.push(PutOp {
                     wire: ctx.wire(&task),
                     task,
@@ -304,7 +307,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
             let (task, extras) = match roll_forward(&merged.task, Some(origin.1)) {
-                Some(roll) => apply_roll(&mut p, local, roll),
+                Some(roll) => apply_roll(&mut p, local, ctx.mark(local), roll),
                 None => (merged.task, origin.1.task.extras.clone()),
             };
             p.moves.push(MoveOp {
@@ -336,7 +339,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             // R2 — the server has never seen it (or lost it wholesale): push. A recurring
             // task that is already checked rolls forward first (R8r).
             let (mut task, extras) = match roll_forward(local, None) {
-                Some(roll) => apply_roll(&mut p, local, roll),
+                Some(roll) => apply_roll(&mut p, local, ctx.mark(local), roll),
                 None => (local.clone(), Vec::new()),
             };
             // The server records when the task was created even though its line does
@@ -385,10 +388,9 @@ impl<'a> Context<'a> {
                     continue;
                 }
                 // Foreign tasks are adopted only where the vault has a place for them.
-                let has_home = s.inbox_list.as_ref() == Some(slug) || s.homes.contains_key(slug);
-                if !has_home {
-                    continue;
-                }
+                let has_home = s.inbox_list.as_ref() == Some(slug)
+                    || s.todo_lists.contains(slug)
+                    || s.homes.contains_key(slug);
                 let seed: &str = if resource.task.raw_uid.is_empty() {
                     &resource.name
                 } else {
@@ -409,6 +411,12 @@ impl<'a> Context<'a> {
                         .cloned()
                         .unwrap_or_else(|| TaskUid::derived(seed, resource.task.created_at)),
                 };
+                // A list that lost its place — taken out of `todo_lists` — takes in
+                // nothing new, but a task whose line is in the vault is still that
+                // resource: unseen here, it would read as deleted on the server (R3).
+                if !has_home && !s.local.contains_key(&uid) {
+                    continue;
+                }
                 aliases.insert(uid.clone(), seed);
                 adopted_uids.insert(seed, uid.clone());
                 managed.entry(uid).or_default().push((slug, resource));
@@ -472,6 +480,13 @@ impl<'a> Context<'a> {
         }
     }
 
+    /// The calendar a line of `task` has to name (`📁`, §7.5): its list, when the task
+    /// lives in the inbox file and belongs to another calendar than unmarked lines do.
+    fn mark(&self, task: &Task) -> Option<ListSlug> {
+        (task.source.path == self.s.inbox_file && self.s.inbox_list.as_ref() != Some(&task.list))
+            .then(|| task.list.clone())
+    }
+
     /// Whether `resource` says which task it is: always for a resource of restask's
     /// own; for another client's, once it carries the link (`X-RESTASK-UID`). A client
     /// that drops the property on its next write has it written again.
@@ -520,7 +535,8 @@ impl<'a> Context<'a> {
 
     /// Where a server-created task goes, and the task as it will exist there: its
     /// `X-RESTASK-SOURCE` note when that note still routes to the list, else the list's
-    /// home note, else the inbox (`None`).
+    /// home note, else the inbox (`None`). The inbox list has no other home than the
+    /// inbox; a list of `todo_lists` goes there only when no note is its home (§7.5).
     fn place(&self, slug: &ListSlug, resource: &RemoteResource) -> (Option<String>, Task) {
         let s = self.s;
         let mut task = resource.task.task.clone();
@@ -628,8 +644,14 @@ fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> 
 }
 
 /// Queues the vault edits and the record's creation for a roll of the vault task
-/// `local`; returns the series write.
-fn apply_roll(p: &mut Plan, local: &Task, roll: Roll) -> (Task, Vec<String>) {
+/// `local`; returns the series write. `mark` is the calendar the series' new line has to
+/// name ([`Context::mark`]).
+fn apply_roll(
+    p: &mut Plan,
+    local: &Task,
+    mark: Option<ListSlug>,
+    roll: Roll,
+) -> (Task, Vec<String>) {
     let uid = &local.uid;
     tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
     let ops = p.mutations.entry(local.source.path.clone()).or_default();
@@ -637,9 +659,11 @@ fn apply_roll(p: &mut Plan, local: &Task, roll: Roll) -> (Task, Vec<String>) {
         uid: uid.clone(),
         new_uid: roll.record.uid.clone(),
     });
-    // The series' new line shows a creation date only if its line did (§6.4).
+    // The series' new line shows a creation date only if its line did (§6.4), and names
+    // its calendar if its line had to (§7.5).
     let mut draft = TaskDraft::from(&roll.series);
     draft.created = local.created;
+    draft.list = mark;
     ops.push(Mutation::Insert { draft, under: None });
     p.puts.push(PutOp {
         name: roll.record.uid.as_str().to_string(),

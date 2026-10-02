@@ -25,6 +25,9 @@ use crate::RestaskError;
 /// Name of the per-vault state directory; hidden, so never scanned (§5.1).
 pub const STATE_DIR: &str = ".restask";
 
+/// Name of the vault config at the vault root (§14.1).
+pub const CONFIG_FILE: &str = "restask.toml";
+
 /// Longest frontmatter block the router looks at (lines). A note whose block is longer is
 /// treated as having none — routing markers belong at the top.
 const FRONTMATTER_MAX_LINES: usize = 512;
@@ -341,7 +344,10 @@ pub fn scan(
         };
         let mtime = file_mtime(&vault.join(&file.path))?;
         for task in tasks.iter().filter(|task| !views.contains(&task.line_no)) {
-            collect(&mut scan, task, None, &file.path, &file.list, mtime, today);
+            // A line of the view's own lives in the calendar it names, else in the one
+            // the file is bound to (§7.5).
+            let list = task.draft.list.as_ref().unwrap_or(&file.list);
+            collect(&mut scan, task, None, &file.path, list, mtime, today);
         }
     }
 
@@ -355,6 +361,24 @@ pub fn inbox_list(cfg: &VaultConfig) -> Result<ListSlug, RestaskError> {
         field: "inbox_list",
         reason: format!("cannot slugify the inbox list name `{}`", cfg.inbox_list),
     })
+}
+
+/// The further calendars whose tasks live in the inbox file (§7.5): `vault.todo_lists`
+/// as slugs, without the inbox list itself. A task created on the server in one of them
+/// gets its line in the inbox file when no note is the home of that list.
+pub fn todo_lists(cfg: &VaultConfig) -> Result<BTreeSet<ListSlug>, RestaskError> {
+    let inbox = inbox_list(cfg)?;
+    let mut lists = BTreeSet::new();
+    for name in &cfg.todo_lists {
+        let slug = ListSlug::from_name(name).map_err(|_| RestaskError::Validation {
+            field: "todo_lists",
+            reason: format!("cannot slugify the calendar name `{name}`"),
+        })?;
+        if slug != inbox {
+            lists.insert(slug);
+        }
+    }
+    Ok(lists)
 }
 
 /// `true` when an inbox-file line is a rendered view of a note task rather than a task of
@@ -614,7 +638,8 @@ fn walk(
 }
 
 /// Whether a file event on a vault-relative path can change what a scan sees: a note the
-/// scan would read, or a directory (renames move notes). Events on hidden paths (the
+/// scan would read, a directory (renames move notes), or the vault config, which says
+/// what the scan reads and which calendars TODO.md shows. Events on hidden paths (the
 /// state directory, a file sync's version archive), on ignored paths, on artifacts and on
 /// atomic-write temp files never do — in particular the engine's own state writes do not
 /// wake the daemon.
@@ -627,5 +652,5 @@ pub fn is_relevant_event(relative: &str, matchers: &VaultMatchers) -> bool {
     if is_artifact(name) || name.ends_with(".restask-tmp") {
         return false;
     }
-    matchers.is_tracked(relative) || !name.contains('.')
+    relative == CONFIG_FILE || matchers.is_tracked(relative) || !name.contains('.')
 }

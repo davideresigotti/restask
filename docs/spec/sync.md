@@ -52,6 +52,7 @@ pub struct Snapshots {
     pub unreadable: BTreeSet<String>,                      // routed files not readable this pass
     pub inbox_file: String,
     pub inbox_list: Option<ListSlug>,
+    pub todo_lists: BTreeSet<ListSlug>,                    // further lists the inbox file shows (§7.5)
 }
 
 pub struct Plan {
@@ -119,7 +120,7 @@ Task **not in the vault**:
 | **R0** | tombstoned | delete every server copy; forget state |
 | **R6** | no server copy | forget state |
 | **Dv** | known (index/base) and a server copy exists | deleted in the vault → delete server copies, tombstone, forget |
-| **R4** | unknown and a server copy exists | created on the server → insert a line: in the note `X-RESTASK-SOURCE` names if it still routes to that list; else the list's home note; else the inbox. Under its parent if the parent is an active task of the same note. The line carries no `➕` (§6.4); the settled task keeps the server's date. Settle. |
+| **R4** | unknown and a server copy exists | created on the server → insert a line: in the note `X-RESTASK-SOURCE` names if it still routes to that list; else the list's home note; else the inbox (the inbox list, and a list of `todo_lists` without a note; its line then names the list, §7.5). Under its parent if the parent is an active task of the same note. The line carries no `➕` (§6.4); the settled task keeps the server's date. Settle. |
 
 Task **in the vault**:
 
@@ -150,6 +151,12 @@ the server copy of the adoption UID `U`:
 2. else the UID the vault, the index or a tombstone already knows that `UID` by (a
    client may drop the property and rewrite `CREATED`);
 3. else `derived(uid, created)` — the resource name stands in for a missing `UID`.
+
+"A home" is the inbox file for the inbox list and the lists of `todo_lists`, the home
+note for a routed list (§5.4). In a list without one, a resource is still the server
+copy of `U` when `U` is a line in the vault — a task adopted while its calendar was
+shown in TODO.md and taken out of `todo_lists` since: left unmatched, its line would
+read as deleted on the server (R3). Nothing new is adopted there.
 
 With that the table above applies as to any task:
 

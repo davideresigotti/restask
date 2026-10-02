@@ -28,6 +28,7 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 ## Main File: [[test-vault/TODO.md|TODO.md]]
 - A single `TODO.md` serves as the central hub.
 - It contains both on-the-fly tasks (inbox) and prioritized tasks gathered from across the vault.
+- It is the organizer for every calendar you choose, not for one: `restask setup` asks which of the server's calendars `TODO.md` shows and which of them new tasks go to. A task of another calendar carries its calendar's name on its line — `- [ ] Update restask README 🔺 📁 work` — and is otherwise a task like any other: file it by priority, check it off, reword it. Type `📁 work` on a new line to create the task in `work`; change the name to move it; a line without one belongs to the calendar new tasks go to. (`calendar` in the suggestions writes the `📁`.)
 - All vault tasks with an assigned priority appear in this file, organized by priority level.
 - On-the-fly tasks without a priority are listed below the priority sections, under `## No Priority`.
 - The section a task is in and its priority emoji always agree. A task typed under a priority's heading gets that priority automatically. Moving a task to another section (cut and paste) gives it that section's priority; moving it under `## No Priority` removes it. Changing the priority emoji of a task moves it to that priority's section; removing it moves the task to `## No Priority`.
@@ -53,9 +54,9 @@ The symbols used for priority, date, and other metadata are inspired by [Tasks](
 - **Route a single note** — frontmatter `restask-list: University` sends that note's tasks to list `University`.
 - **Route a whole folder** — a note carrying `restask-list-root: Home Lab` becomes that folder's *root note* and declares the list for the whole directory, recursively. The nearest enclosing root wins; deeper roots shadow shallower ones.
 - A note may carry both markers: `restask-list` wins for the file, `restask-list-root` still declares the folder.
-- The `TODO.md` inbox is engine-managed and routes to the list recorded in `inbox_list` (`restask.toml`, default `inbox`) — the calendar you bind it to during `restask setup`.
+- The `TODO.md` inbox is engine-managed and routes to the list recorded in `inbox_list` (`restask.toml`, default `inbox`) — the calendar new tasks go to, chosen during `restask setup`. The further calendars it shows are in `todo_lists`; add or remove one there at any time (the daemon picks the change up by itself). Removing one deletes nothing: its tasks stay in `TODO.md` and keep syncing, new ones made in that calendar no longer come in.
 - A list maps to a Radicale collection via its slug (`Home Lab` → `home-lab` → `http://<radicale-host>:5232/<user>/home-lab/`); the collection is created on first sync (`caldav.allow_create_lists`). `restask lists` shows every list with its URL.
-- A task created in Tasks.org or Thunderbird lands in the list's root note (or its first note), or in `TODO.md` for the inbox list. It stays the task that app created: what you change there afterwards — priority, text, dates, done — changes its line, and the other way round.
+- A task created in Tasks.org or Thunderbird lands in the list's root note (or its first note), or in `TODO.md` for the inbox list and for a calendar of `todo_lists` that no note routes to. It stays the task that app created: what you change there afterwards — priority, text, dates, done — changes its line, and the other way round.
 - Moving a task between differently-routed notes keeps its UID and **moves** the VTODO between collections.
 
 `restask doctor` verifies the whole chain (config, routing, vault, server) — see [INSTALL.md](INSTALL.md): three commands on your computer. The setup wizard asks for the server's address and your credentials once and installs everything — the plugin in the vault (so the phone gets it too), the command line on the computer, and the daemon on your always-on server over ssh, the one place it runs.

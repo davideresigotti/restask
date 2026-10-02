@@ -173,6 +173,11 @@ pub struct VaultConfig {
     /// The list the inbox file routes to (§5.2); its slug names the bound CalDAV
     /// collection. `restask setup` records the user-chosen calendar here.
     pub inbox_list: String,
+    /// Further calendars whose tasks live in the inbox file (§7.5): a task created on the
+    /// server in one of them, and that no note is the home of, gets its line there, marked
+    /// with the calendar's name. Empty: the inbox file holds the tasks of `inbox_list` only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub todo_lists: Vec<String>,
     /// Vault-relative globs of files the engine may parse; `ignore` wins over `track`.
     pub track: Vec<String>,
     /// Vault-relative globs excluded even when matched by `track`.
@@ -185,6 +190,7 @@ impl Default for VaultConfig {
             done_heading: default_done_heading(),
             inbox_file: default_inbox_file(),
             inbox_list: default_inbox_list(),
+            todo_lists: Vec::new(),
             track: default_track(),
             ignore: default_ignore(),
         }

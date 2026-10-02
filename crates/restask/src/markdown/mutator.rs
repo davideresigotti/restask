@@ -217,7 +217,7 @@ pub(crate) fn fmt_when(when: When) -> String {
 }
 
 /// Renders a task line: indent + marker + checkbox + text + canonical metadata tail
-/// (`<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 🆔`, §6.1). Only present fields are emitted; a requested
+/// (`<priority> 🔁 🛫 ⏳ 📅 ✅ ➕ 📁 🆔`, §6.1). Only present fields are emitted; a requested
 /// creation date that is not known yet is written as the bare `➕` it was asked with.
 pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
     let mut tail: Vec<String> = Vec::new();
@@ -244,6 +244,9 @@ pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
         // A request nobody has answered yet stays on the line.
         None if draft.wants_created => tail.push("➕".to_string()),
         None => {}
+    }
+    if let Some(list) = &draft.list {
+        tail.push(format!("📁 {}", list.as_str()));
     }
     if let Some(u) = &draft.uid {
         tail.push(format!("🆔 {u}"));

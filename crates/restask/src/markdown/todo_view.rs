@@ -197,9 +197,15 @@ pub fn mirror_line(task: &Task) -> String {
 }
 
 /// Renders a TODO.md-sourced task as a full canonical line without wikilink (§7):
-/// `- [<check>] <text> <priority?> <🛫?><⏳?><📅?><✅?><➕?> 🆔 <uid>`.
-pub fn inbox_line(task: &Task) -> String {
-    canonical_line("", '-', &TaskDraft::from(task))
+/// `- [<check>] <text> <priority?> <🛫?><⏳?><📅?><✅?><➕?><📁?> 🆔 <uid>`. The line names
+/// its calendar (`📁`) when that is not the one unmarked lines belong to,
+/// `cfg.inbox_list` (§7.5).
+pub fn inbox_line(task: &Task, cfg: &VaultConfig) -> String {
+    let mut draft = TaskDraft::from(task);
+    if task.list.as_str() != cfg.inbox_list {
+        draft.list = Some(task.list.clone());
+    }
+    canonical_line("", '-', &draft)
 }
 
 /// The completion date of a task, if completed.
@@ -214,7 +220,7 @@ fn completed_on(task: &Task) -> Option<LocalDate> {
 /// line (with wikilink) for vault-note tasks.
 fn line_for(task: &Task, cfg: &VaultConfig) -> String {
     if task.source.path == cfg.inbox_file {
-        inbox_line(task)
+        inbox_line(task, cfg)
     } else {
         mirror_line(task)
     }

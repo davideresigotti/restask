@@ -42,8 +42,10 @@ For a note at vault-relative path `p` (other than the inbox file):
    note with `restask-list-root: X` → list `slug(X)`. Deeper roots shadow shallower ones.
 3. Else **local-only**.
 
-The inbox file (`vault.inbox_file`, default `TODO.md`) is engine-managed and always routes
-to `vault.inbox_list` (default `inbox`) — the calendar the user bound it to during setup.
+The inbox file (`vault.inbox_file`, default `TODO.md`) is engine-managed and routes to
+`vault.inbox_list` (default `inbox`) — the calendar the user bound it to during setup —
+except for a line that names another calendar itself (`📁 <name>`, §7.5): that task
+lives in the calendar it names.
 
 ```rust
 pub enum NoteRouting { LocalOnly, List(ListSlug) }
@@ -66,6 +68,7 @@ Two different roots declared for the same directory are a hard `ListConflict`
 University.md                      restask-list: University      → university
 Journal.md                         (no marker)                   → local-only, untouched
 TODO.md                            (engine-managed)              → vault.inbox_list
+TODO.md, a line with `📁 work`     (the line says so, §7.5)      → work
 ```
 
 ### 5.4 Lists and collections
@@ -77,9 +80,12 @@ TODO.md                            (engine-managed)              → vault.inbox
   true; otherwise its tasks stay local and a warning is logged each pass.
 - **Home note** of a list: the note that receives tasks created on the server for that
   list — the list's root note if it has one, else its first routed note in path order.
-  The inbox list's home is the inbox file.
-- A pass looks at: the inbox list, every list a note routes to, and every list the index
-  still references (so a move or deletion sees the old copy). Foreign tasks are adopted
-  only in lists that have a home (§11 R5).
+  The inbox list's home is the inbox file. So is the home of a list named in
+  `vault.todo_lists` (§7.5, §14.1) that no note routes to: the further calendars
+  TODO.md shows. A list in `todo_lists` that has notes keeps its note as home.
+- A pass looks at: the inbox list and the lists of `todo_lists`, every list a note
+  routes to or a line of the inbox file names, and every list the index still
+  references (so a move or deletion sees the old copy). Foreign tasks are adopted only
+  in lists that have a home (§11 R5).
 - Moving a task between differently-routed notes keeps its UID and **moves** the `VTODO`
   between collections (§11 R9).
