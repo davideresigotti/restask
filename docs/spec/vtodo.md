@@ -110,6 +110,10 @@ wikilinks travels in a wire form:
   path without `.md`). Both query values are percent-encoded (everything but the RFC 3986
   unreserved characters). *Vault* is `vault.obsidian_vault` (§14.1;
   `WireNames::obsidian_vault`); without it each wikilink is written as its shown text.
+  Obsidian opens such a link only in a vault of that name — the mobile app, given
+  another name, reloads to switch vaults and, finding none, stays on the last note (read
+  in the 1.13.7 bundle: `execCapacitorUrl`) — so the vault must have one name on every
+  device that opens the links.
   An embed (`![[…]]`) and a `[[…]]` that would show nothing are left as written. A text
   without wikilinks is unchanged.
 - **`X-RESTASK-TEXT;VALUE=TEXT:<the vault text>`** — written when that differs from
