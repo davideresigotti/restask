@@ -663,6 +663,7 @@ fn a_task_of_another_client_is_written_under_the_uid_it_was_given() {
     let wire = WireNames {
         uid: Some(remote.raw_uid.clone()),
         parent: Some("parent@tasks.org".to_string()),
+        ..WireNames::default()
     };
     let out = to_vcalendar_as(&task, now(), &remote.extras, &wire);
     assert!(
@@ -703,4 +704,131 @@ fn a_malformed_link_property_is_no_link() {
         .extras
         .iter()
         .any(|line| line.contains("X-RESTASK-UID")));
+}
+
+// ── wikilinks: a title with Markdown links into Obsidian (§8.4) ───────────────────────
+
+fn vault(name: &str) -> WireNames {
+    WireNames {
+        obsidian_vault: Some(name.to_string()),
+        ..WireNames::default()
+    }
+}
+
+fn linked_task(text: &str) -> Task {
+    let mut task = golden_task();
+    task.text = text.to_string();
+    task.source.path = "Projects/YouTube/YouTube.md".to_string();
+    task
+}
+
+/// The logical lines of a serialized calendar (continuations joined).
+fn logical(out: &str) -> Vec<String> {
+    out.replace("\r\n ", "")
+        .split("\r\n")
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=2nd-brain&file=Dual%20HHD%203d%20printed%20caddy)";
+
+#[test]
+fn a_wikilink_is_a_markdown_link_into_obsidian_in_the_title() {
+    let task = linked_task("[[Dual HHD 3d printed caddy]]");
+    let out = to_vcalendar_as(&task, now(), &[], &vault("2nd-brain"));
+    let lines = logical(&out);
+    let at = |prefix: &str| {
+        lines
+            .iter()
+            .position(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no {prefix} in {out}"))
+    };
+    assert_eq!(lines[at("SUMMARY")], format!("SUMMARY:{CADDY}"));
+    assert_eq!(
+        lines[at("X-RESTASK-TEXT")],
+        "X-RESTASK-TEXT;VALUE=TEXT:[[Dual HHD 3d printed caddy]]"
+    );
+    assert_eq!(at("X-RESTASK-TEXT"), at("X-RESTASK-SOURCE") + 1);
+    assert!(!out.contains("DESCRIPTION"), "{out}");
+    for line in out.lines() {
+        assert!(line.len() <= 75, "{line}");
+    }
+
+    // Read back, the task is the vault's line again; nothing of it is an extra.
+    let back = from_vcalendar(&out, &tz_cet(), &list()).unwrap();
+    assert_eq!(back.task.text, task.text);
+    assert_eq!(back.task.thumbprint(), task.thumbprint());
+    assert_eq!(back.summary, CADDY);
+    assert!(back.extras.is_empty(), "{:?}", back.extras);
+    assert_eq!(
+        to_vcalendar_as(&back.task, now(), &back.extras, &vault("2nd-brain")),
+        out
+    );
+}
+
+#[test]
+fn aliases_headings_and_same_note_links_show_what_obsidian_shows() {
+    let task = linked_task(
+        "edit [[Asahi Linux#Install|the Asahi video]], see [[Notes/Ideas#Thumbnails]] and [[#Plan]] ![[cover.png]]",
+    );
+    let out = to_vcalendar_as(&task, now(), &[], &vault("My Vault"));
+    let summary = "SUMMARY:edit [the Asahi video](obsidian://open?vault=My%20Vault&file=Asahi%20Linux)\\, \
+         see [Notes/Ideas > Thumbnails](obsidian://open?vault=My%20Vault&file=Notes%2FIdeas) \
+         and [Plan](obsidian://open?vault=My%20Vault&file=Projects%2FYouTube%2FYouTube) ![[cover.png]]";
+    assert!(logical(&out).contains(&summary.to_string()), "{out}");
+    let back = from_vcalendar(&out, &tz_cet(), &list()).unwrap();
+    assert_eq!(back.task.text, task.text);
+}
+
+#[test]
+fn without_an_obsidian_vault_the_title_shows_the_links_as_text() {
+    let task = linked_task("watch [[Asahi Linux]]");
+    let out = to_vcalendar(&task, now());
+    assert!(out.contains("SUMMARY:watch Asahi Linux\r\n"), "{out}");
+    assert!(!out.contains("obsidian://"), "{out}");
+    let back = from_vcalendar(&out, &tz_cet(), &list()).unwrap();
+    assert_eq!(back.task.text, "watch [[Asahi Linux]]");
+
+    // A text without wikilinks is written as it always was.
+    assert_eq!(
+        to_vcalendar_as(&golden_task(), now(), &[], &vault("v")),
+        GOLDEN
+    );
+}
+
+#[test]
+fn a_title_changed_on_the_server_keeps_the_links_it_still_shows() {
+    let task = linked_task("edit [[Asahi Linux|Asahi]] for [[YouTube]]");
+    let asahi = "[Asahi](obsidian://open?vault=v&file=Asahi%20Linux)";
+    let youtube = "[YouTube](obsidian://open?vault=v&file=YouTube)";
+    let out = to_vcalendar_as(&task, now(), &[], &vault("v"));
+    let retitled = |summary: &str| {
+        let body = out.replace("\r\n ", "").replace(
+            &format!("SUMMARY:edit {asahi} for {youtube}\r\n"),
+            &format!("SUMMARY:{summary}\r\n"),
+        );
+        assert!(body.contains(&format!("SUMMARY:{summary}\r\n")));
+        from_vcalendar(&body, &tz_cet(), &list()).unwrap().task.text
+    };
+    assert_eq!(retitled(&format!("edit {asahi} for {youtube}")), task.text);
+    assert_eq!(
+        retitled(&format!("first edit {asahi} for {youtube} today")),
+        "first edit [[Asahi Linux|Asahi]] for [[YouTube]] today"
+    );
+    assert_eq!(
+        retitled(&format!("edit for {youtube}")),
+        "edit for [[YouTube]]"
+    );
+    // A link typed or renamed in the other client becomes a wikilink to its note.
+    assert_eq!(
+        retitled(&format!(
+            "edit [the Asahi cut](obsidian://open?vault=v&file=Asahi%20Linux) for {youtube}"
+        )),
+        "edit [[Asahi Linux|the Asahi cut]] for [[YouTube]]"
+    );
+    assert_eq!(retitled("something else"), "something else");
+    assert_eq!(retitled("see [[Other]]"), "see [[Other]]");
+    // A title written while the vault had no name for Obsidian.
+    assert_eq!(retitled("edit Asahi for YouTube"), task.text);
 }

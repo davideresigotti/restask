@@ -17,6 +17,7 @@ use crate::domain::priority::Priority;
 use crate::domain::recurrence::Recurrence;
 use crate::domain::task::{ListSlug, SourceRef, Status, Task};
 use crate::domain::uid::TaskUid;
+use crate::vtodo::links::relink;
 use crate::RestaskError;
 
 /// A VTODO resource fetched from a CalDAV collection (§8.2).
@@ -42,13 +43,18 @@ pub struct RemoteTask {
     /// Unfolded content lines of everything inside the `VTODO` that the codec does not
     /// manage, in document order (nested components such as `VALARM` included).
     pub extras: Vec<String>,
+    /// `SUMMARY` as the server holds it, on one line — the title other clients show;
+    /// `task.text` is the vault text it stands for (§8.4).
+    pub summary: String,
+    /// `X-RESTASK-TEXT`: the vault text the title was written from, when they differ.
+    pub vault_text: Option<String>,
 }
 
 /// Placeholder UID for foreign (unmanaged) tasks; the planner replaces it on adoption.
 const PLACEHOLDER_UID: &str = "restask-00000000000000000000000000";
 
 /// Properties the serializer owns; everything else inside the `VTODO` is an extra.
-const MANAGED: [&str; 16] = [
+const MANAGED: [&str; 17] = [
     "UID",
     "DTSTAMP",
     "CREATED",
@@ -65,6 +71,7 @@ const MANAGED: [&str; 16] = [
     "X-RESTASK-SOURCE",
     "X-TASKRES-SOURCE",
     "X-RESTASK-UID",
+    "X-RESTASK-TEXT",
 ];
 
 /// Parses an iCalendar body into a [`RemoteTask`] (§8.2).
@@ -88,6 +95,7 @@ pub fn from_vcalendar<Z: TimeZone>(
     let mut last_modified: Option<DateTime<Utc>> = None;
     let mut created_at: Option<DateTime<Utc>> = None;
     let mut summary: Option<String> = None;
+    let mut vault_text: Option<String> = None;
     let mut completed_status = false;
     let mut completed_at: Option<DateTime<Utc>> = None;
     let mut priority: Option<u8> = None;
@@ -141,6 +149,10 @@ pub fn from_vcalendar<Z: TimeZone>(
             "X-RESTASK-UID" if adopted_as.is_none() => {
                 adopted_as = TaskUid::parse(&prop.value).ok();
             }
+            "X-RESTASK-TEXT" if vault_text.is_none() => {
+                vault_text =
+                    Some(single_line(&unescape_text(&prop.value))).filter(|text| !text.is_empty());
+            }
             "RELATED-TO" if is_parent_relation(&prop) => {
                 if parent_raw.is_none() {
                     parent_raw = Some(prop.value.trim().to_string());
@@ -167,10 +179,15 @@ pub fn from_vcalendar<Z: TimeZone>(
     } else {
         Status::Active
     };
+    let summary = summary.unwrap_or_default();
+    let text = match &vault_text {
+        Some(reference) => relink(&summary, reference, source_path.as_deref().unwrap_or("")),
+        None => summary.clone(),
+    };
     let task = Task {
         uid: uid.clone().unwrap_or_else(placeholder_uid),
         list: collection.clone(),
-        text: summary.unwrap_or_default(),
+        text,
         status,
         priority: priority.and_then(Priority::from_ical),
         due,
@@ -198,6 +215,8 @@ pub fn from_vcalendar<Z: TimeZone>(
         created_at,
         parent_raw,
         extras,
+        summary,
+        vault_text,
     })
 }
 

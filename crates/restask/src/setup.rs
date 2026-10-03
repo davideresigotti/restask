@@ -663,6 +663,19 @@ async fn prepare_and_sync<C: CaldavPort>(
                 .map_err(|error| config_error(&config_path, &error))?;
         }
     }
+    // Obsidian knows a vault by its folder's name; the links that open a task's notes
+    // from another client need it (§8.4), and the sync node sees the folder under
+    // another name. Recorded once, so a name the user corrected stays.
+    if cfg.obsidian_vault.is_none() {
+        let name = std::fs::canonicalize(&vault)?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        if name.is_some() {
+            cfg.obsidian_vault = name;
+            cfg.save(&config_path)
+                .map_err(|error| config_error(&config_path, &error))?;
+        }
+    }
     std::fs::create_dir_all(vault.join(".restask"))?;
 
     // The vault is set: put the Obsidian plugin in it. Best-effort like the daemon unit —

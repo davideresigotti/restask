@@ -52,7 +52,7 @@ Thunderbird.
 | Machine config | `$XDG_CONFIG_HOME/restask/config.toml` (never synced) |
 | Environment prefix | `RESTASK_*` |
 | Task UID | `restask-<ULID>` |
-| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID` |
+| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID`, `X-RESTASK-TEXT` |
 | Systemd unit / container | `restask.service` / `restask` |
 
 The project was called *Taskres* in its first weeks. That name survives only as read-side

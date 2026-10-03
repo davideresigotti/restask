@@ -419,6 +419,7 @@ impl<C: CaldavPort> Engine<C> {
             inbox_file: self.cfg.inbox_file.clone(),
             inbox_list: Some(inbox_list),
             todo_lists,
+            obsidian_vault: self.cfg.obsidian_vault.clone(),
         };
         let plan = progress.plan.insert(planner::plan(&snapshots));
 

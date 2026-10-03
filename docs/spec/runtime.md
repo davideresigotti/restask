@@ -91,7 +91,9 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
 
 1. **Vault**: `--vault`, else `RESTASK_VAULT`, else an upward search for `restask.toml` /
    `.restask/`, else the working directory (confirmed interactively; non-interactive
-   requires a `TODO.md` there). Writes `restask.toml` if missing; creates `.restask/`.
+   requires a `TODO.md` there). Writes `restask.toml` if missing; records the vault
+   folder's name as `obsidian_vault` when the key is absent (§8.4 — a name already
+   there, corrected by the user, stays; a join never writes it); creates `.restask/`.
    Then installs the **Obsidian plugin** (`install_obsidian_plugin`): the bundle compiled
    into the binary (App. C) is written to `.obsidian/plugins/restask/` (`main.js`,
    `manifest.json`, `styles.css`) and `"restask"` is added to

@@ -11,6 +11,7 @@ pub fn to_vcalendar(task: &Task, now_utc: DateTime<Utc>) -> String;
 pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> String;
 pub struct WireNames { pub uid: Option<String>, pub parent: Option<String> }
 pub fn to_vcalendar_as(task: &Task, now_utc: DateTime<Utc>, extras: &[String], wire: &WireNames) -> String;
+// WireNames also carries `obsidian_vault: Option<String>` (§8.4)
 ```
 
 A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
@@ -18,11 +19,13 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 `BEGIN:VCALENDAR`, `VERSION:2.0`, `PRODID:-//restask//restask 0.1.0//EN`, `BEGIN:VTODO`,
 `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`,
 `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, `RRULE`, `RELATED-TO`, `X-RESTASK-SCHEDULED`,
-`X-RESTASK-SOURCE`, `X-RESTASK-UID`, *extras*, `END:VTODO`, `END:VCALENDAR`.
+`X-RESTASK-SOURCE`, `X-RESTASK-TEXT`, `X-RESTASK-UID`, *extras*, `END:VTODO`,
+`END:VCALENDAR`. `X-RESTASK-TEXT` only for a text with wikilinks (§8.4).
 
 - `DTSTAMP` / `LAST-MODIFIED` = `now_utc`. `CREATED` only when the task has a creation
   date (§4).
-- `SUMMARY` with TEXT escaping: `\` → `\\`, `;` → `\;`, `,` → `\,`, newline → `\n`.
+- `SUMMARY` with TEXT escaping: `\` → `\\`, `;` → `\;`, `,` → `\,`, newline → `\n` — the
+  text's wire form (§8.4): its wikilinks as Markdown links into Obsidian.
 - `STATUS:NEEDS-ACTION` + `PERCENT-COMPLETE:0`, or `STATUS:COMPLETED` +
   `PERCENT-COMPLETE:100` + `COMPLETED`.
 - `PRIORITY` per §3.2; `DTSTART` / `DUE` / `X-RESTASK-SCHEDULED` per §4 — each omitted
@@ -56,6 +59,8 @@ pub struct RemoteTask {
     pub created_at: Option<DateTime<Utc>>,  // CREATED as an instant
     pub parent_raw: Option<String>,         // parent relation's UID, possibly foreign
     pub extras: Vec<String>,                // unmanaged content, unfolded, in order
+    pub summary: String,                    // SUMMARY as found, on one line (§8.4)
+    pub vault_text: Option<String>,         // X-RESTASK-TEXT (§8.4)
 }
 pub fn from_vcalendar<Z: TimeZone>(text: &str, tz: &Z, collection: &ListSlug)
     -> Result<RemoteTask, RestaskError>;
@@ -85,9 +90,50 @@ Collections are shared with other clients, so the parser is forgiving:
   `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`,
   `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, parent `RELATED-TO`, `X-RESTASK-*`
   (and their legacy `X-TASKRES-*` spellings).
+- With `X-RESTASK-TEXT`, `task.text` is `relink(SUMMARY, X-RESTASK-TEXT,
+  X-RESTASK-SOURCE)` (§8.4); without it, `SUMMARY`.
 
 Round trip: `parse(serialize(t, now, extras))` yields the same sync fields, creation
 date, parent, source path and extras — and the same `thumbprint` (§9 relies on it).
+
+### 8.4 Wikilinks on the wire (`vtodo::links`)
+
+A vault line links notes (`- [ ] [[Dual HHD caddy]]`). Other clients cannot follow a
+wikilink, but Tasks.org renders Markdown in a title, so the text of a task with
+wikilinks travels in a wire form:
+
+- **`SUMMARY`** (`wire_title`) — each wikilink becomes a Markdown link that opens its
+  note in Obsidian: `[<shown>](obsidian://open?vault=<vault>&file=<note>)`. *Shown* is
+  what Obsidian shows: the alias of `[[Note|alias]]`, else the target with `#` read as
+  ` > ` (`[[Note#Part]]` → `Note > Part`, `[[#Part]]` → `Part`). *Note* is the target
+  without its `#…` part; a same-note link (`[[#Part]]`) opens the task's own note (its
+  path without `.md`). Both query values are percent-encoded (everything but the RFC 3986
+  unreserved characters). *Vault* is `vault.obsidian_vault` (§14.1;
+  `WireNames::obsidian_vault`); without it each wikilink is written as its shown text.
+  An embed (`![[…]]`) and a `[[…]]` that would show nothing are left as written. A text
+  without wikilinks is unchanged.
+- **`X-RESTASK-TEXT;VALUE=TEXT:<the vault text>`** — written when that differs from
+  `SUMMARY`, so the resource can be read back as the line it came from.
+
+`DESCRIPTION` is not touched: it stays the other clients' (an extra).
+
+Read back (§8.2), `relink(title, reference, source)` turns a title into the vault text:
+
+- a title equal to the wire form of `reference` — with links into the vault the title
+  names, or as plain text — gives `reference`;
+- a title that holds a wikilink is taken as written;
+- otherwise, in a title with links into Obsidian, each such link becomes the wikilink of
+  `reference` it shows (same text, same note, in order), else a wikilink to the note it
+  opens (`[[note]]`, or `[[note|shown]]` when the text differs); in a title without such
+  links, each wikilink of `reference` whose shown text the title still contains is put
+  back in its place, in order. A link whose text is gone is dropped.
+
+So an edit of the title in Tasks.org keeps the links it did not touch, and a link typed
+there in the same shape becomes a wikilink in the note. The planner puts a copy again
+when its `SUMMARY` or `X-RESTASK-TEXT` is not what a push would write (§11.3).
+
+Round trip: `parse(serialize(t))` yields `t.text`, the same thumbprint, and the extras
+it was given. The golden contract (no wikilinks) is unchanged.
 
 ### 8.3 Golden contract
 

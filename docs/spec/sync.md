@@ -91,6 +91,12 @@ For each **sync field** (text, status, priority, repeat rule, due, start, schedu
 Timestamps are consulted only in the last row. A file's mtime covers all its tasks and
 moves on any unrelated edit; using it to decide whether *this* task changed loses data.
 
+The remote text compared is the one the codec read (§8.4: the vault spelling from
+`X-RESTASK-TEXT`). A resource another client wrote back without that property holds the
+title only; its text is first relinked against the base (else the local text), so a
+client that drops the property never takes wikilinks out of a line (`relink`), and the
+property is written again.
+
 Not merged:
 
 - `created`: the vault's `➕` when present, else the server's `CREATED` is kept. A line
@@ -105,7 +111,10 @@ Outputs: the merged task; the mutations that turn the vault line into it (a comp
 `SetStatus` + `MoveToDone`, a reopening `RestoreFromDone` + `SetStatus`, the rest
 `EditText` / `SetPriority` / `SetRecurrence` / `SetWhen`); and whether the server copy must be replaced
 (merged ≠ remote in any sync field, parent, creation date or source path). Both can
-happen at once: fields changed on different sides are all kept.
+happen at once: fields changed on different sides are all kept. The planner also puts a
+copy that does not *show* the merged task as a push would (§8.4: its `SUMMARY` and its
+`X-RESTASK-TEXT`) — a resource written before its text had links, before the vault named
+its Obsidian vault, or still holding the text of a link removed since, is written once.
 
 ### 11.4 Rule table (per UID over local ∪ base ∪ index ∪ remote)
 

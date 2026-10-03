@@ -15,6 +15,9 @@ inbox_list   = "inbox"     # the list (= collection slug) the inbox file routes 
 todo_lists   = ["work"]    # further calendars whose tasks live in the inbox file,
                            # each line naming its own (📁 work, §7.5); default: none,
                            # and the key is then not written
+obsidian_vault = "2nd-brain"  # the vault's name in Obsidian: a task's wikilinks reach
+                           # other clients as links that open the note there (§8.4);
+                           # setup records the vault folder's name; absent: plain text
 track  = ["**/*.md"]       # globs of files that may be notes
 ignore = [".restask/**", ".obsidian/**", ".trash/**", ".git/**"]
 ```

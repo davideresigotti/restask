@@ -1,5 +1,6 @@
 //! VTODO codec (§8): iCalendar serialization and parsing. Pure — no I/O.
 
+pub mod links;
 pub mod parse;
 pub mod recurrence;
 pub mod serialize;

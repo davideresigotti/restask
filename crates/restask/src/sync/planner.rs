@@ -10,6 +10,7 @@ use crate::markdown::mutator::Mutation;
 use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
 use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
+use crate::vtodo::links::wire_title;
 use crate::vtodo::recurrence::{consume_count, find_in_extras};
 use crate::vtodo::WireNames;
 
@@ -47,6 +48,9 @@ pub struct Snapshots {
     /// Further lists whose tasks live in the inbox file when no note is their home
     /// (`vault.todo_lists`, §7.5).
     pub todo_lists: BTreeSet<ListSlug>,
+    /// The Obsidian vault the notes linked from a task open in (`vault.obsidian_vault`,
+    /// §8.4); `None` writes no links.
+    pub obsidian_vault: Option<String>,
 }
 
 /// The mutation plan for one reconciliation pass (§11.1).
@@ -274,7 +278,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             if let Some(roll) = roll_forward(&merged.task, Some(resource)) {
                 // R8r — one occurrence of a recurring task was completed in the vault:
                 // the checked line becomes a record of its own, the series moves on.
-                let (task, extras) = apply_roll(&mut p, local, ctx.mark(local), roll);
+                let (task, extras) = apply_roll(&mut p, &ctx, local, roll);
                 p.puts.push(PutOp {
                     wire: ctx.wire(&task),
                     task,
@@ -282,7 +286,10 @@ pub fn plan(s: &Snapshots) -> Plan {
                     extras,
                     if_match: Some(resource.etag.clone()),
                 });
-            } else if merged.push || !ctx.linked(uid, resource) {
+            } else if merged.push
+                || !ctx.linked(uid, resource)
+                || !ctx.shown(&merged.task, resource)
+            {
                 p.puts.push(PutOp {
                     wire: ctx.wire(&merged.task),
                     task: merged.task,
@@ -307,7 +314,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
             let (task, extras) = match roll_forward(&merged.task, Some(origin.1)) {
-                Some(roll) => apply_roll(&mut p, local, ctx.mark(local), roll),
+                Some(roll) => apply_roll(&mut p, &ctx, local, roll),
                 None => (merged.task, origin.1.task.extras.clone()),
             };
             p.moves.push(MoveOp {
@@ -339,7 +346,7 @@ pub fn plan(s: &Snapshots) -> Plan {
             // R2 — the server has never seen it (or lost it wholesale): push. A recurring
             // task that is already checked rolls forward first (R8r).
             let (mut task, extras) = match roll_forward(local, None) {
-                Some(roll) => apply_roll(&mut p, local, ctx.mark(local), roll),
+                Some(roll) => apply_roll(&mut p, &ctx, local, roll),
                 None => (local.clone(), Vec::new()),
             };
             // The server records when the task was created even though its line does
@@ -477,7 +484,19 @@ impl<'a> Context<'a> {
         WireNames {
             uid: alias(&task.uid),
             parent: task.parent.as_ref().and_then(alias),
+            obsidian_vault: self.s.obsidian_vault.clone(),
         }
+    }
+
+    /// Whether `resource` shows `task` the way a push of it would (§8.4): its title,
+    /// with the links into Obsidian, and the vault text beside it. A resource written
+    /// before its text had links — or before the vault named its Obsidian vault, or
+    /// still holding the text of a link since removed — is written again.
+    fn shown(&self, task: &Task, resource: &RemoteResource) -> bool {
+        let vault = self.s.obsidian_vault.as_deref();
+        let title = wire_title(&task.text, vault, &task.source.path);
+        let vault_text = (title != task.text).then_some(&task.text);
+        resource.task.summary == title && resource.task.vault_text.as_ref() == vault_text
     }
 
     /// The calendar a line of `task` has to name (`📁`, §7.5): its list, when the task
@@ -644,14 +663,8 @@ fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> 
 }
 
 /// Queues the vault edits and the record's creation for a roll of the vault task
-/// `local`; returns the series write. `mark` is the calendar the series' new line has to
-/// name ([`Context::mark`]).
-fn apply_roll(
-    p: &mut Plan,
-    local: &Task,
-    mark: Option<ListSlug>,
-    roll: Roll,
-) -> (Task, Vec<String>) {
+/// `local`; returns the series write.
+fn apply_roll(p: &mut Plan, ctx: &Context<'_>, local: &Task, roll: Roll) -> (Task, Vec<String>) {
     let uid = &local.uid;
     tracing::info!(uid = %uid, record = %roll.record.uid, "task_recurred");
     let ops = p.mutations.entry(local.source.path.clone()).or_default();
@@ -663,13 +676,13 @@ fn apply_roll(
     // its calendar if its line had to (§7.5).
     let mut draft = TaskDraft::from(&roll.series);
     draft.created = local.created;
-    draft.list = mark;
+    draft.list = ctx.mark(local);
     ops.push(Mutation::Insert { draft, under: None });
     p.puts.push(PutOp {
         name: roll.record.uid.as_str().to_string(),
+        wire: ctx.wire(&roll.record),
         task: roll.record,
         extras: Vec::new(),
-        wire: WireNames::default(),
         if_match: None,
     });
     (roll.series, roll.extras)

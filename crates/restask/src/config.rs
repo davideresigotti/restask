@@ -178,6 +178,11 @@ pub struct VaultConfig {
     /// with the calendar's name. Empty: the inbox file holds the tasks of `inbox_list` only.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub todo_lists: Vec<String>,
+    /// The vault's name in Obsidian, for the links that open a task's linked notes from
+    /// another client (§8.4). `restask setup` records the vault folder's name; absent, no
+    /// link is written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obsidian_vault: Option<String>,
     /// Vault-relative globs of files the engine may parse; `ignore` wins over `track`.
     pub track: Vec<String>,
     /// Vault-relative globs excluded even when matched by `track`.
@@ -191,6 +196,7 @@ impl Default for VaultConfig {
             inbox_file: default_inbox_file(),
             inbox_list: default_inbox_list(),
             todo_lists: Vec::new(),
+            obsidian_vault: None,
             track: default_track(),
             ignore: default_ignore(),
         }

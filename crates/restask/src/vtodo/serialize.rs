@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::domain::dates::When;
 use crate::domain::task::{Status, Task};
+use crate::vtodo::links::wire_title;
 use crate::vtodo::recurrence::is_rrule;
 
 /// `PRODID` value emitted in every serialized calendar (§8.1).
@@ -26,6 +27,9 @@ pub struct WireNames {
     pub uid: Option<String>,
     /// The `UID` the parent goes by on the server, when it is not the parent's own.
     pub parent: Option<String>,
+    /// The Obsidian vault the task's wikilinks open in (`vault.obsidian_vault`, §8.4);
+    /// without it the title shows them as plain text.
+    pub obsidian_vault: Option<String>,
 }
 
 /// Serializes a task into a complete `VCALENDAR`/`VTODO` (§8.1) with no foreign content.
@@ -54,6 +58,10 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
 /// `wire` names the task and its parent as the server knows them: with `wire.uid` the
 /// `UID` is that one and `X-RESTASK-UID` carries the task's own (after
 /// `X-RESTASK-SOURCE`).
+///
+/// A text with wikilinks is written in its wire form (§8.4): `SUMMARY` shows each as a
+/// Markdown link into the Obsidian vault `wire.obsidian_vault` (as plain text without
+/// one), and `X-RESTASK-TEXT` keeps the vault spelling.
 pub fn to_vcalendar_as(
     task: &Task,
     now_utc: DateTime<Utc>,
@@ -73,7 +81,12 @@ pub fn to_vcalendar_as(
         push_line(&mut out, &format!("CREATED:{}", format_utc_midnight(day.0)));
     }
     push_line(&mut out, &format!("LAST-MODIFIED:{now}"));
-    push_line(&mut out, &format!("SUMMARY:{}", escape_text(&task.text)));
+    let summary = wire_title(
+        &task.text,
+        wire.obsidian_vault.as_deref(),
+        &task.source.path,
+    );
+    push_line(&mut out, &format!("SUMMARY:{}", escape_text(&summary)));
     let (status, percent) = match task.status {
         Status::Active => ("NEEDS-ACTION", 0),
         Status::Completed { .. } => ("COMPLETED", 100),
@@ -112,6 +125,12 @@ pub fn to_vcalendar_as(
             escape_text(&task.source.path)
         ),
     );
+    if summary != task.text {
+        push_line(
+            &mut out,
+            &format!("X-RESTASK-TEXT;VALUE=TEXT:{}", escape_text(&task.text)),
+        );
+    }
     if wire.uid.is_some() {
         push_line(&mut out, &format!("X-RESTASK-UID:{}", task.uid.as_str()));
     }

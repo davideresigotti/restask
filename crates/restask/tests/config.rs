@@ -85,6 +85,22 @@ fn the_calendars_todo_md_shows_are_written_only_when_there_are_some() {
 }
 
 #[test]
+fn the_obsidian_vault_is_written_only_when_it_is_known() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("restask.toml");
+    VaultConfig::default().save(&path).unwrap();
+    assert!(!std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("obsidian_vault"));
+    assert_eq!(VaultConfig::load(&path).unwrap().obsidian_vault, None);
+
+    let cfg = VaultConfig::from_str("obsidian_vault = \"2nd brain\"\n").unwrap();
+    assert_eq!(cfg.obsidian_vault.as_deref(), Some("2nd brain"));
+    cfg.save(&path).unwrap();
+    assert_eq!(VaultConfig::load(&path).unwrap(), cfg);
+}
+
+#[test]
 fn vault_load_missing_file_is_error() {
     let dir = tempdir().unwrap();
     let err = VaultConfig::load(&dir.path().join("absent.toml")).unwrap_err();

@@ -533,6 +533,36 @@ async fn the_calendars_todo_md_shows_are_recorded_and_their_tasks_come_in() {
     assert_eq!(mock.resource_names("work"), vec!["from-phone"]);
 }
 
+#[tokio::test]
+async fn setup_records_the_vaults_name_in_obsidian_once() {
+    let vault = legacy_vault();
+    let mock = MockCaldav::new();
+    run_setup(args(&vault), mock.clone(), clock(), None)
+        .await
+        .unwrap();
+    let path = vault.path().join("restask.toml");
+    let folder = std::fs::canonicalize(vault.path())
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        VaultConfig::load(&path).unwrap().obsidian_vault.as_deref(),
+        Some(folder.as_str())
+    );
+
+    // A name the user corrected is kept by the next run.
+    let mut cfg = VaultConfig::load(&path).unwrap();
+    cfg.obsidian_vault = Some("2nd-brain".to_string());
+    cfg.save(&path).unwrap();
+    run_setup(args(&vault), mock, clock(), None).await.unwrap();
+    assert_eq!(
+        VaultConfig::load(&path).unwrap().obsidian_vault.as_deref(),
+        Some("2nd-brain")
+    );
+}
+
 #[test]
 fn the_calendars_todo_md_shows_are_chosen_from_the_servers_by_name() {
     let server: Vec<restask::caldav::CollectionInfo> =

@@ -2902,3 +2902,221 @@ async fn a_recurring_task_of_another_calendar_rolls_forward_in_that_calendar() {
     let again = engine.reconcile().await.unwrap();
     assert_eq!((again.pushes, again.moves, again.inserts), (0, 0, 0));
 }
+
+// ── wikilinks on the server: the title, and a link into Obsidian (§8.4) ───────────────
+
+/// A vault whose `restask.toml` names its Obsidian vault, with a routed note of links.
+fn youtube_vault(obsidian: Option<&str>) -> TempDir {
+    let dir = temp_vault();
+    let name = obsidian
+        .map(|name| format!("obsidian_vault = \"{name}\"\n"))
+        .unwrap_or_default();
+    write_vault_file(
+        &dir,
+        "restask.toml",
+        &format!("done_heading = \"Done\"\n{name}"),
+    );
+    note(
+        &dir,
+        "Projects/YouTube.md",
+        "YouTube",
+        "- [ ] [[Dual HHD 3d printed caddy]]\n- [ ] edit [[Asahi Linux#Install|Asahi]] video\n- [ ] plain\n",
+    );
+    dir
+}
+
+/// A resource's logical lines (folded continuations joined).
+fn logical_lines(mock: &MockCaldav, list: &str, name: &str) -> Vec<String> {
+    body(mock, list, name)
+        .replace("\r\n ", "")
+        .split("\r\n")
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Rewrites a resource's logical lines the way another client would: `edit` maps each
+/// line to its replacements; `LAST-MODIFIED` is stamped a minute after now.
+fn edit_logical(mock: &MockCaldav, list: &str, name: &str, edit: impl Fn(&str) -> Vec<String>) {
+    let stamp = (Utc::now() + Duration::minutes(1))
+        .format("%Y%m%dT%H%M%SZ")
+        .to_string();
+    let mut out = String::new();
+    for line in logical_lines(mock, list, name) {
+        let replaced = if line.starts_with("LAST-MODIFIED") {
+            vec![format!("LAST-MODIFIED:{stamp}")]
+        } else {
+            edit(&line)
+        };
+        for line in replaced {
+            out.push_str(&line);
+            out.push_str("\r\n");
+        }
+    }
+    mock.seed_resource(list, name, &out);
+}
+
+/// Two more passes write nothing anywhere.
+async fn assert_quiet(dir: &TempDir, engine: &Engine<MockCaldav>, mock: &MockCaldav) {
+    let files = snapshot(dir);
+    let (puts, deletes, _) = mock.counters();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for _ in 0..2 {
+        engine.reconcile().await.unwrap();
+    }
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+    assert_eq!(snapshot(dir), files, "an idempotent pass touches no file");
+}
+
+const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=2nd-brain&file=Dual%20HHD%203d%20printed%20caddy)";
+const ASAHI: &str = "[Asahi](obsidian://open?vault=2nd-brain&file=Asahi%20Linux)";
+
+fn retitle(mock: &MockCaldav, name: &str, title: String) {
+    edit_logical(mock, "youtube", name, |line| {
+        if line.starts_with("SUMMARY") {
+            vec![format!("SUMMARY:{title}")]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_wikilink_reaches_other_clients_as_a_link_into_obsidian() {
+    let dir = youtube_vault(Some("2nd-brain"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let note = read(&dir, "Projects/YouTube.md");
+    assert!(
+        note.contains(&format!("- [ ] [[Dual HHD 3d printed caddy]] {ID} ")),
+        "{note}"
+    );
+    let caddy = uid_of(&dir, "Projects/YouTube.md", "caddy");
+    let lines = logical_lines(&mock, "youtube", &caddy);
+    assert!(lines.contains(&format!("SUMMARY:{CADDY}")), "{lines:?}");
+    assert!(lines.contains(&"X-RESTASK-TEXT;VALUE=TEXT:[[Dual HHD 3d printed caddy]]".to_string()));
+    assert!(!lines.iter().any(|line| line.starts_with("DESCRIPTION")));
+
+    let video = uid_of(&dir, "Projects/YouTube.md", "video");
+    let lines = logical_lines(&mock, "youtube", &video);
+    assert!(
+        lines.contains(&format!("SUMMARY:edit {ASAHI} video")),
+        "{lines:?}"
+    );
+
+    let plain = body(
+        &mock,
+        "youtube",
+        &uid_of(&dir, "Projects/YouTube.md", "plain"),
+    );
+    assert!(plain.contains("SUMMARY:plain\r\n"));
+    assert!(!plain.contains("X-RESTASK-TEXT"));
+
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+#[tokio::test]
+async fn a_title_changed_in_another_client_keeps_the_links_it_still_shows() {
+    let dir = youtube_vault(Some("2nd-brain"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let video = uid_of(&dir, "Projects/YouTube.md", "video");
+
+    retitle(&mock, &video, format!("edit {ASAHI} video tonight"));
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, "Projects/YouTube.md");
+    assert!(
+        note.contains(&format!(
+            "- [ ] edit [[Asahi Linux#Install|Asahi]] video tonight {ID} {video}"
+        )),
+        "{note}"
+    );
+    assert_quiet(&dir, &engine, &mock).await;
+
+    // The link was deleted from the title: it is gone from the note too.
+    retitle(&mock, &video, "edit the video tonight".to_string());
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, "Projects/YouTube.md");
+    assert!(
+        note.contains(&format!("- [ ] edit the video tonight {ID} {video}")),
+        "{note}"
+    );
+    let lines = logical_lines(&mock, "youtube", &video);
+    assert!(
+        lines.contains(&"SUMMARY:edit the video tonight".to_string()),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|line| line.starts_with("X-RESTASK-TEXT")));
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+#[tokio::test]
+async fn a_client_that_drops_the_vault_text_does_not_take_the_links_out_of_the_note() {
+    let dir = youtube_vault(Some("2nd-brain"));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let caddy = uid_of(&dir, "Projects/YouTube.md", "caddy");
+    let before = read(&dir, "Projects/YouTube.md");
+
+    // A client that keeps only what it knows: the title, and the notes typed there.
+    edit_logical(&mock, "youtube", &caddy, |line| {
+        if line.starts_with("X-RESTASK-TEXT") {
+            vec!["DESCRIPTION:print in PETG".to_string()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    engine.reconcile().await.unwrap();
+    assert_eq!(read(&dir, "Projects/YouTube.md"), before);
+    let lines = logical_lines(&mock, "youtube", &caddy);
+    assert!(lines.contains(&format!("SUMMARY:{CADDY}")), "{lines:?}");
+    assert!(lines.contains(&"X-RESTASK-TEXT;VALUE=TEXT:[[Dual HHD 3d printed caddy]]".to_string()));
+    assert!(
+        lines.contains(&"DESCRIPTION:print in PETG".to_string()),
+        "{lines:?}"
+    );
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+#[tokio::test]
+async fn a_task_pushed_before_links_were_written_is_written_again_once() {
+    let dir = youtube_vault(None);
+    let mock = MockCaldav::new();
+    engine(&dir, &mock).reconcile().await.unwrap();
+    let caddy = uid_of(&dir, "Projects/YouTube.md", "caddy");
+    let before = read(&dir, "Projects/YouTube.md");
+    let lines = logical_lines(&mock, "youtube", &caddy);
+    assert!(
+        lines.contains(&"SUMMARY:Dual HHD 3d printed caddy".to_string()),
+        "{lines:?}"
+    );
+
+    // What an earlier restask wrote: the line's text as the title, nothing else.
+    edit_logical(&mock, "youtube", &caddy, |line| {
+        if line.starts_with("SUMMARY") {
+            vec!["SUMMARY:[[Dual HHD 3d printed caddy]]".to_string()]
+        } else if line.starts_with("X-RESTASK-TEXT") {
+            Vec::new()
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    // The vault names its Obsidian vault now.
+    write_vault_file(
+        &dir,
+        "restask.toml",
+        "done_heading = \"Done\"\nobsidian_vault = \"2nd-brain\"\n",
+    );
+    let engine = engine(&dir, &mock);
+    let (puts, _, _) = mock.counters();
+    engine.reconcile().await.unwrap();
+    assert_eq!(read(&dir, "Projects/YouTube.md"), before);
+    assert_eq!(mock.counters().0, puts + 2, "each task with a link, once");
+    let lines = logical_lines(&mock, "youtube", &caddy);
+    assert!(lines.contains(&format!("SUMMARY:{CADDY}")), "{lines:?}");
+    assert_quiet(&dir, &engine, &mock).await;
+}

@@ -16,6 +16,7 @@
 
 use crate::domain::{Status, Task, TaskUid};
 use crate::markdown::mutator::{Mutation, WhenField};
+use crate::vtodo::links::relink;
 
 /// Conflict tie window in seconds (§11.3): devices are assumed NTP-synced to ±60 s.
 pub const TIE_WINDOW_SECS: i64 = 120;
@@ -70,7 +71,14 @@ pub fn merge(
     };
 
     let mut task = local.clone();
-    task.text = pick.field(base.map(|b| &b.text), &local.text, &remote.task.text);
+    // A client that rewrote the resource without `X-RESTASK-TEXT` leaves only the title:
+    // the wikilinks it still shows are the ones the vault had (§8.4).
+    let remote_text = relink(
+        &remote.task.text,
+        base.map_or(&local.text, |base| &base.text),
+        &local.source.path,
+    );
+    task.text = pick.field(base.map(|b| &b.text), &local.text, &remote_text);
     task.status = pick.field(base.map(|b| &b.status), &local.status, &remote.task.status);
     task.priority = pick.field(
         base.map(|b| &b.priority),
