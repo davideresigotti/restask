@@ -31,3 +31,20 @@ fn writing_to_the_copy_leaves_the_sandbox_untouched() {
 
     assert_eq!(fs::read(&sandbox).unwrap(), before);
 }
+
+#[test]
+fn the_notes_are_routed_and_carry_no_ids_yet() {
+    let copy = copy_test_vault();
+    let note = |relative: &str| fs::read_to_string(copy.path().join(relative)).unwrap();
+
+    assert!(note("Project Alpha.md").contains("restask-list: dev-project"));
+    assert!(note("Homelab/Home Lab.md").contains("restask-list-root: dev-home"));
+    assert!(!note("Ideas.md").contains("restask-list"));
+    for relative in [
+        "Project Alpha.md",
+        "Homelab/Home Lab.md",
+        "Homelab/Caddy design.md",
+    ] {
+        assert!(!note(relative).contains('🆔'), "{relative} already has ids");
+    }
+}

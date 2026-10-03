@@ -12,6 +12,7 @@ All tests run against `MockCaldav` and temporary directories. Do not point anyth
 
 ## Trying your change: `test-vault/`
 `test-vault/` is the sandbox for trying the real thing (the built `restask` binary, the Obsidian plugin, Neovim) by hand. Contributors are expected to use it:
+- It is a small mockup vault: `TODO.md` (the inbox view), `Project Alpha.md` (one routed note), `Homelab/` (a root note plus a note below it, with subtasks, priorities, dates, a repeating task and a wikilink) and `Ideas.md` (not routed, so never touched). The notes carry no `🆔` yet: the first pass creates the tasks in your `dev` calendar.
 - Open `test-vault/` as the vault, and sync it with a test calendar named `dev` on your own CalDAV server. Never use a vault or calendar that holds real data.
 - Add whatever task lines your trial needs. Don't edit or delete the lines that are already there, and don't commit your trial's changes to the folder.
 - Automated tests (`cargo test`, Vitest, the Lua tests) can use `test-vault/` as ready-made input. Copy it into a temporary directory first and never write to the folder itself. They run against `MockCaldav`, so they need no server at all.
