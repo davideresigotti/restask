@@ -24,8 +24,8 @@ Do not read `target/`, `node_modules/`, or `Cargo.lock`.
 | Node / npm | **22 / 10** | plugin only, workdir `plugins/obsidian` |
 | Lua | ≥ 5.4 (`luac`, `lua`) | syntax + behaviour gate for `neovim/` |
 
-The maintainer's Radicale lives at `http://192.168.1.10:5232` (user `me`, auth
-enforced). **Never contact it** from tests or while developing: everything runs against
+The maintainer's Radicale lives on their home network (auth enforced; its address is in
+the maintainer's machine config). **Never contact it** from tests or while developing: everything runs against
 `MockCaldav` (`crates/restask/tests/common/mod.rs`). The only exception is the
 `#[ignore]`d `tests/e2e_server.rs`, which the owner runs by hand and which touches the
 `restask-dev` collection only. Never read `~/.config/restask/radicale.passwd`.
@@ -35,7 +35,9 @@ enforced). **Never contact it** from tests or while developing: everything runs 
 There are two kinds of test, and no third:
 
 - *Automated tests* (`cargo test`, Vitest, the Lua tests) are hermetic: temporary
-  directories and `MockCaldav`, no real server, no real calendar, no systemd, no ssh.
+  directories and `MockCaldav`, no real server, no real calendar, no systemd, no ssh. They
+  may use `test-vault/` as ready-made input, but only a copy of it in a temporary
+  directory (see "Fixtures and the sandbox").
 - *A trial of the real thing* — the installed or built `restask` binary, the plugin in
   Obsidian, Neovim, the daemon — happens in `test-vault/`, whose tasks live in the
   calendar `dev` through the sync node's daemon. No other vault, no other calendar.
@@ -223,8 +225,10 @@ Every bug fix ships with a regression test at the level where the bug showed
 **Fixtures and the sandbox.** `crates/restask/tests/fixtures/` and
 `plugins/obsidian/test/fixtures/` are immutable test inputs. `test-vault/` is the
 sandbox (the sync node's daemon is syncing it, through the file sync, with the calendar
-`dev`): the one place a trial of the real thing is made (§2). Never point an automated
-test at it, never commit changes to it, never clean it up. What an agent writes there is
+`dev`): the one place a trial of the real thing is made (§2). An automated test may
+read it as input, but works on a copy in a temporary directory and never writes to the
+folder itself (the file sync would carry the write to the sync node). Never commit
+changes to it, never clean it up. What an agent writes there is
 the plugin copy of step 4 and the lines a trial needs — task lines it adds for the
 trial and says so in the session log, never an edit of a line that was there.
 

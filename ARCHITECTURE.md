@@ -212,5 +212,5 @@ re-planned from fresh snapshots in the next pass.
 
 - `AGENTS.md` — how to work on this repository (gates, rules, workflow).
 - `docs/EXECUTION_STATE.md` — where the work stands; decision log.
-- `README.md` — what the project is for. `INSTALL.md` — how to run it.
-- `test-vault/` — a sandbox vault for manual trials. Tests never read it.
+- `README.md` — what the project is for. `INSTALL.md` — how to install it (`docs/INSTALL-AI.md` is the detailed guide).
+- `test-vault/` — a sandbox vault for manual trials. Tests may use a temporary copy of it (`copy_test_vault`), never the folder itself.

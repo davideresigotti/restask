@@ -317,6 +317,34 @@ pub fn temp_vault() -> TempDir {
     dir
 }
 
+/// Copies the repository's `test-vault/` sandbox into a fresh temporary directory, so a
+/// test can use ready-made notes without ever writing to the sandbox itself (the file
+/// sync would carry such a write to the sync node). Hidden files and folders are left
+/// out: they are not part of the vault (`.restask/`, `.obsidian/`, `.stfolder/`, ...).
+/// The caller keeps the [`TempDir`] alive for the test's duration.
+pub fn copy_test_vault() -> TempDir {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-vault");
+    let dir = tempfile::tempdir().unwrap();
+    copy_visible(&source, dir.path());
+    dir
+}
+
+fn copy_visible(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_visible(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
 /// `view` — a TODO.md without a seal line — as the engine renders it (§7.2): the seal
 /// is the last property of the frontmatter block. The digest is computed here
 /// independently of the crate: FNV-1a (64-bit) over the unsealed text, 16 lowercase hex
