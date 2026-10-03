@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The sync node — the one machine that runs the restask daemon (spec §1.1) — as a Docker
-# compose stack on an always-on server, driven from here over ssh (INSTALL.md, spec
+# compose stack on an always-on server, driven from here over ssh (docs/INSTALL-AI.md, spec
 # App. E). `restask setup` runs `check` and `install`; `contrib/update.sh` runs `update`.
 #
 #   contrib/node.sh check   <ssh-host> <vault-on-host> [<stack-dir>]
@@ -121,7 +121,7 @@ vault="$1"
 stack="$2"
 fail() { printf 'node: %s\n' "$*" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 ||
-    fail "this server has no Docker with the compose plugin. Install restask on it by hand (INSTALL.md, \"A server without Docker\") and run setup here with --no-daemon"
+    fail "this server has no Docker with the compose plugin. Install restask on it by hand (docs/INSTALL-AI.md, \"A server without Docker\") and run setup here with --no-daemon"
 [ -d "$vault" ] ||
     fail "$vault is not a folder on this server. Share the vault with it in the file sync first, and give the folder it lands in"
 if [ -f "$stack/docker-compose.yml" ]; then
@@ -215,7 +215,7 @@ REMOTE
 update)
     stack="${3:-restask}"
     remote "$stack" <<<'test -f "$1/docker-compose.yml"' ||
-        die "$host:$stack has no docker-compose.yml: install the daemon there first (\`restask setup --join --node $host\`, INSTALL.md)"
+        die "$host:$stack has no docker-compose.yml: install the daemon there first (\`restask setup --join --node $host\`, docs/INSTALL-AI.md)"
     ship_sources "$stack"
     build_image "$stack"
     start_daemon "$stack"

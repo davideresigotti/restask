@@ -65,7 +65,7 @@ poll timer (caldav.poll_secs, 300) ──┘
   a server that reports no change tags, leaves server-side changes to the poll.
   The default is 2 s: the look is one small request, and the interval is the whole of
   the daemon's share in how long a server-side change takes to show (the rest is the
-  other client's upload and the file sync's own delay, INSTALL *Latency*).
+  other client's upload and the file sync's own delay, docs/INSTALL-AI.md *Latency*).
 - **The vault config is a file of the vault.** `restask.toml` is read again before
   every pass (`refresh_config`, logged as `config_reloaded` when it differs), so a
   change made on another device — a calendar added to `todo_lists` — takes effect when

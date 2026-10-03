@@ -64,7 +64,7 @@ pass; pushing stays the daemon's.
 .
 ├── ARCHITECTURE.md            model, layers, invariants, spec index
 ├── AGENTS.md                  how to work on this repository
-├── README.md  INSTALL.md      what it is for; how to run it
+├── README.md  INSTALL.md      what it is for; how to install it (docs/INSTALL-AI.md: the detail)
 ├── Cargo.toml  Cargo.lock  rust-toolchain.toml
 ├── .github/workflows/ci.yml   App. D
 ├── contrib/

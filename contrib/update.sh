@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Brings everything that runs restask up to this working tree (AGENTS.md §5.4,
-# INSTALL.md "Updating"). Run it when the gates are green:
+# docs/INSTALL-AI.md "Updating"). Run it when the gates are green:
 #
 #   contrib/update.sh [<ssh-host> [<stack-dir>]]
 #

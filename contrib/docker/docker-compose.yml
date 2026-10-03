@@ -1,10 +1,10 @@
-# The restask sync node as a compose stack (INSTALL.md, spec App. E). `restask setup`
+# The restask sync node as a compose stack (docs/INSTALL-AI.md, spec App. E). `restask setup`
 # puts this file into the stack directory on the server (through `contrib/node.sh`),
 # next to
 #   .env    RESTASK_VAULT_DIR, RESTASK_USER and TZ for this server
 #   src/    the restask sources the image is built from
 #   data/   this machine's config, written by `restask setup --join`; never synced
-# By hand: copy it there, write .env, and see INSTALL.md "A server without the wizard".
+# By hand: copy it there, write .env, and see docs/INSTALL-AI.md "A server without the wizard".
 name: restask
 services:
   restask:
