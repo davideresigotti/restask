@@ -830,7 +830,9 @@ async fn joining_configures_the_machine_and_leaves_the_vault_as_it_is() {
     // devices hold is not touched by a machine joining.
     assert!(summary.joined);
     assert!(summary.backup.is_none());
-    assert!(summary.plugin.is_none());
+    // The plugin the first machine installed is found, not written (the files are
+    // compared below): a running Obsidian is told about it.
+    assert!(summary.plugin.is_some());
     assert!(summary.collections.is_empty());
     assert_eq!(vault_files(vault.path()), before);
     assert!(before
@@ -2340,16 +2342,52 @@ async fn an_obsidian_with_nothing_new_to_load_is_left_alone() {
         "obsidian plugin: installed in .obsidian/plugins/restask and enabled"
     );
 
-    // A join installs no plugin, so it has nothing to load either.
+    // A join of a vault without the plugin has nothing to load.
     let (vault, mock) = set_up_vault().await;
+    std::fs::remove_dir_all(vault.path().join(".obsidian")).unwrap();
     let machine = tempfile::tempdir().unwrap();
     let mut joined = run_setup(join_args(&vault, &machine), mock, clock(), None)
         .await
         .unwrap();
     let open = RecordingObsidian::without_cli();
-    joined.load_plugin(&open, Some(&mut |_| Ok(true)));
+    joined.load_plugin(&open, None);
     assert!(open.calls().is_empty(), "{:?}", open.calls());
     assert_eq!(joined.plugin_note(), None);
+}
+
+#[tokio::test]
+async fn a_join_makes_a_running_obsidian_load_the_plugin_it_finds_in_the_vault() {
+    // The owner's run: the wizard installed the plugin, then stopped at the node's
+    // daemon — before its last step, the one that tells Obsidian. The finishing
+    // `--join` installed nothing and so told Obsidian nothing: the vault's window went
+    // on without the plugin. A join now has Obsidian load the plugin that is there.
+    let (vault, mock) = set_up_vault().await;
+    let plugin = vault.path().join(".obsidian/plugins/restask");
+    let before = vault_files(&plugin);
+    let machine = tempfile::tempdir().unwrap();
+    let mut joined = run_setup(join_args(&vault, &machine), mock.clone(), clock(), None)
+        .await
+        .unwrap();
+    assert_eq!(vault_files(&plugin), before, "a join writes no plugin file");
+
+    let open = RecordingObsidian::with_cli(&[("plugins:restrict", "off"), ("reload", "Reloading")]);
+    joined.load_plugin(&open, None);
+    assert_eq!(joined.plugin_load, PluginLoad::Reloaded);
+    assert!(joined
+        .plugin_note()
+        .unwrap()
+        .contains("Obsidian reloaded this vault's window and loaded it"));
+
+    // Without Obsidian's command line interface it is not restarted for a join — it
+    // may have the plugin already — and the summary says what loads it.
+    let machine = tempfile::tempdir().unwrap();
+    let mut joined = run_setup(join_args(&vault, &machine), mock, clock(), None)
+        .await
+        .unwrap();
+    let open = RecordingObsidian::without_cli();
+    joined.load_plugin(&open, None);
+    assert_eq!(joined.plugin_load, PluginLoad::Pending);
+    assert!(!open.calls().contains(&"restart".to_string()));
 }
 
 #[test]

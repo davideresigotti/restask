@@ -252,8 +252,13 @@ a fresh setup — on a machine the file sync has not reached yet, a fresh setup 
 files that collide with the ones arriving. A machine that has a config and re-runs plain
 `restask setup` gets the full run above, as before.
 
-A join performs step 3 (credentials, verified), step 5 and step 6, and prints the
-summary. It writes nothing into the vault itself: no `restask.toml`, no scaffold, no
+A join performs step 3 (credentials, verified), step 5, step 6 and step 7, and prints the
+summary. Step 7 works from the plugin the join *finds* in the vault (enabled in
+`community-plugins.json`, `main.js` present; `found_obsidian_plugin`): the join is also
+how a run that stopped at the node's daemon is finished, and that run never reached
+step 7. Whether a running Obsidian has the plugin already is not known to a join, so
+Obsidian is told through its command line interface when that is on and never
+restarted; otherwise the summary says a restart loads it. It writes nothing into the vault itself: no `restask.toml`, no scaffold, no
 backup, no plugin install, no `MKCOL` of its own, no inbox prompt (`vault.inbox_list` is in
 the vault). What the first sync does is what any pass does (§11). Order: `PROPFIND`
 (endpoint and credentials proven) → first sync → machine config → daemon unit. The machine

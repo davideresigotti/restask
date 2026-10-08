@@ -494,7 +494,12 @@ pub async fn run_interactive(
             daemon,
             password: Some(Secret::new(password)),
         };
-        let summary = join_and_sync(args, client, clock, installer).await?;
+        let mut summary = join_and_sync(args, client, clock, installer).await?;
+        if let Some(app) = app {
+            // Whether that Obsidian has the plugin already is not known here: it is
+            // told when it can be, and not restarted for it.
+            summary.load_plugin(app, None);
+        }
         print_summary(&summary);
         return Ok(());
     }
@@ -1048,6 +1053,7 @@ async fn join_and_sync<C: CaldavPort>(
         ReconcileReport::default()
     };
     let daemon = place_daemon(installer, &machine, &args)?;
+    let plugin = found_obsidian_plugin(&vault);
 
     Ok(SetupSummary {
         vault,
@@ -1055,7 +1061,7 @@ async fn join_and_sync<C: CaldavPort>(
         joined: true,
         backup: None,
         collections: Vec::new(),
-        plugin: None,
+        plugin,
         plugin_load: PluginLoad::default(),
         daemon,
         synced,
@@ -1111,8 +1117,31 @@ pub struct PluginInstall {
     pub listed: bool,
     /// Whether this run wrote something Obsidian reads when it opens the vault — a file
     /// of the plugin, or its entry in the list. An Obsidian that has the vault open has
-    /// not seen it.
+    /// not seen it. Also set by a join for the plugin it found ([`found_obsidian_plugin`]):
+    /// whether a running Obsidian has seen that one is not known.
     pub changed: bool,
+}
+
+/// The plugin a join finds in the vault: installed and listed by the setup that made the
+/// vault, here through the file sync — or by a run on this machine that stopped before
+/// its last step, which the join finishes. `None` when the vault has no plugin, or one
+/// that is not enabled. A join writes nothing of it; it only has a running Obsidian load
+/// it ([`SetupSummary::load_plugin`]).
+fn found_obsidian_plugin(vault: &Path) -> Option<PluginInstall> {
+    let obsidian = vault.join(".obsidian");
+    let main = obsidian
+        .join("plugins")
+        .join(OBSIDIAN_PLUGIN_ID)
+        .join("main.js");
+    let list = std::fs::read_to_string(obsidian.join("community-plugins.json")).ok()?;
+    let enabled = serde_json::from_str::<Vec<serde_json::Value>>(&list).ok()?;
+    let listed = enabled
+        .iter()
+        .any(|id| id.as_str() == Some(OBSIDIAN_PLUGIN_ID));
+    (listed && main.is_file()).then_some(PluginInstall {
+        listed: true,
+        changed: true,
+    })
 }
 
 /// Installs the Obsidian plugin into `<vault>/.obsidian/plugins/restask/` and lists it in
