@@ -32,7 +32,7 @@ Open the same vault, synced with your file sync (`.obsidian/` included). The plu
 Every list is a calendar at `http://<radicale-host>:5232/<user>/<list>/`. `restask lists` prints them.
 - **Tasks.org** (Android): Settings → Synchronization → Add account → CalDAV or DAVx5.
 - **Thunderbird**: Calendar → New calendar → On the Network → Your credentials.
-- **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()`.
+- **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()`. With [which-key.nvim](https://github.com/folke/which-key.nvim), `<leader>t` shows up as `restask` in the key hint; load the integration at startup (not only for Markdown) to have it there from the first keypress.
 
 # Check
 ```bash

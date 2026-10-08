@@ -102,10 +102,38 @@ function M.add()
 	end)
 end
 
---- Registers the global keymaps (§16): `<leader>td` toggle, `<leader>ta` add.
+--- The prefix the keymaps share, and the name its group goes by in a key hint.
+M.PREFIX = "<leader>t"
+M.GROUP = "restask"
+
+--- Names the keymaps' prefix in which-key (§16), so that the hint shown after
+-- `<leader>` reads `t → restask` and not a count of keymaps. `wk` is the which-key
+-- module: `add` is its current interface, `register` the one before version 3. True when
+-- the group was named; a `wk` with neither, or one that fails, is left alone.
+---@param wk table|nil
+---@return boolean
+function M.name_group(wk)
+	if type(wk) ~= "table" then
+		return false
+	end
+	if type(wk.add) == "function" then
+		return (pcall(wk.add, { { M.PREFIX, group = M.GROUP } }))
+	end
+	if type(wk.register) == "function" then
+		return (pcall(wk.register, { [M.PREFIX] = { name = M.GROUP } }))
+	end
+	return false
+end
+
+--- Registers the global keymaps (§16): `<leader>td` toggle, `<leader>ta` add. Where the
+-- configuration has which-key, their prefix is named there; without it nothing is asked.
 function M.register_keymaps()
-	vim.keymap.set("n", "<leader>td", M.toggle, { silent = true, desc = "restask: toggle task" })
-	vim.keymap.set("n", "<leader>ta", M.add, { silent = true, desc = "restask: add task" })
+	vim.keymap.set("n", M.PREFIX .. "d", M.toggle, { silent = true, desc = "restask: toggle task" })
+	vim.keymap.set("n", M.PREFIX .. "a", M.add, { silent = true, desc = "restask: add task" })
+	local found, wk = pcall(require, "which-key")
+	if found then
+		M.name_group(wk)
+	end
 end
 
 return M

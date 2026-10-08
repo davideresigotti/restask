@@ -41,4 +41,29 @@ settle.without(function()
 end)
 assert(ran, "without() runs its function")
 
-print(("ok - %d cases"):format(#cases + #modes + 2))
+
+-- The keymaps' prefix is named in which-key, whichever interface it has.
+local added
+assert(toggle.name_group({
+	add = function(spec)
+		added = spec
+	end,
+}) == true, "which-key 3")
+assert(#added == 1 and added[1][1] == "<leader>t" and added[1].group == "restask", "the group given to add()")
+local registered
+assert(toggle.name_group({
+	register = function(spec)
+		registered = spec
+	end,
+}) == true, "which-key before 3")
+assert(registered["<leader>t"].name == "restask", "the group given to register()")
+assert(toggle.name_group(nil) == false, "no which-key")
+assert(toggle.name_group(true) == false, "a module that is no table")
+assert(toggle.name_group({}) == false, "neither interface")
+assert(toggle.name_group({
+	add = function()
+		error("boom")
+	end,
+}) == false, "a which-key that fails does not break the setup")
+
+print(("ok - %d cases"):format(#cases + #modes + 2 + 8))

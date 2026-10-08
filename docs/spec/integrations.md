@@ -331,6 +331,13 @@ The local work (invariant 12) is the engine's own, run when a buffer is written.
   `restask <action> --file <absolute path> --line <n>`, and reloads the buffer. Its
   write is not settled (`settle.without`): the command does the local work itself, and
   `--line` must be the line as written. `add()` prompts and runs `restask add`.
+  `register_keymaps()` sets the two keymaps, each with a description, and — where the
+  configuration has [which-key.nvim](https://github.com/folke/which-key.nvim) — names
+  their prefix `<leader>t` as the group `restask` (`name_group`: `add` of version 3,
+  `register` before it), so the hint shown after `<leader>` lists restask by name.
+  Without which-key nothing is asked and nothing fails. The keymaps exist once
+  `setup()` has run: a configuration that loads the integration for Markdown buffers
+  only shows them from the first note on, one that loads it at startup from the start.
 - `conceal.lua`: hides the `🆔` token (and the one blank before it, as §15.5) in windows that show a
   Markdown file of a vault (a `restask.toml` or `.restask/` above the file). The file is
   not changed: a window match conceals the text, `conceallevel` is raised to 2 and the
