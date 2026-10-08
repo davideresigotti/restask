@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::caldav::{CaldavPort, RemoteResource};
+use crate::caldav::{list_name, resolve_list, Bound, CaldavPort, RemoteResource};
 use crate::config::{MachineConfig, VaultConfig};
 use crate::domain::{
     Clock, ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
@@ -26,6 +26,7 @@ use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::todo_view;
 use crate::store::cache as base_store;
+use crate::store::calendars::Calendars;
 use crate::store::index::{Index, IndexEntry};
 use crate::store::tombstones::Tombstones;
 use crate::sync::planner::{self, DeleteOp, Plan, PutOp, Snapshots, DEFER_LIMIT};
@@ -403,7 +404,7 @@ impl<C: CaldavPort> Engine<C> {
     ) -> Result<(), RestaskError> {
         let inbox_list = vault::inbox_list(&self.cfg)?;
         let todo_lists = vault::todo_lists(&self.cfg)?;
-        let (remote, created) = self
+        let (remote, created, bound) = self
             .remote_snapshot(scan, index, &inbox_list, &todo_lists)
             .await?;
         let snapshots = Snapshots {
@@ -453,7 +454,7 @@ impl<C: CaldavPort> Engine<C> {
 
         'ops: {
             for put in &plan.puts {
-                match self.put(put, now).await {
+                match self.put(put, &bound, now).await {
                     Ok(etag) => {
                         report.pushes += 1;
                         progress.pushed.push((put.task.clone(), etag));
@@ -466,11 +467,11 @@ impl<C: CaldavPort> Engine<C> {
                 }
             }
             for mv in &plan.moves {
-                match self.put(&mv.put, now).await {
+                match self.put(&mv.put, &bound, now).await {
                     Ok(etag) => {
                         report.moves += 1;
                         progress.pushed.push((mv.put.task.clone(), etag));
-                        if let Err(error) = self.delete(&mv.from).await {
+                        if let Err(error) = self.delete(&mv.from, &bound).await {
                             if failed(error, "removing the moved task's old copy", report) {
                                 break 'ops;
                             }
@@ -484,7 +485,7 @@ impl<C: CaldavPort> Engine<C> {
                 }
             }
             for delete in &plan.deletes {
-                match self.delete(delete).await {
+                match self.delete(delete, &bound).await {
                     Ok(()) => report.deletes += 1,
                     Err(error) => {
                         if failed(error, "remote delete", report) {
@@ -503,15 +504,29 @@ impl<C: CaldavPort> Engine<C> {
     /// Lists every collection in scope with one `REPORT` each: the inbox list and the
     /// further lists the inbox file shows (§7.5), every list a note routes to or a line
     /// of the inbox file names, and every list the index still references (so moves and
-    /// deletions see the old copy). A routed list without a collection is created when
-    /// `caldav.allow_create_lists` is set; otherwise its tasks simply wait.
+    /// deletions see the old copy). A list is first looked for at its own path; when
+    /// nothing is there, among the server's calendars by name (§5.4) — one another
+    /// client made has a path of its own. Only a routed list that no calendar answers
+    /// to is created, when `caldav.allow_create_lists` is set; otherwise its tasks
+    /// simply wait. A list two calendars answer to is not listed: unknown, not empty.
+    ///
+    /// Returns the snapshot, the lists whose collection is not the one of the pass
+    /// before — just created, or found at another path than last time, so what is
+    /// missing there was never deleted — and where the lists found by name are.
     async fn remote_snapshot(
         &self,
         scan: &Scan,
         index: &Index,
         inbox_list: &ListSlug,
         todo_lists: &BTreeSet<ListSlug>,
-    ) -> Result<(BTreeMap<ListSlug, Vec<RemoteResource>>, BTreeSet<ListSlug>), RestaskError> {
+    ) -> Result<
+        (
+            BTreeMap<ListSlug, Vec<RemoteResource>>,
+            BTreeSet<ListSlug>,
+            BTreeMap<ListSlug, String>,
+        ),
+        RestaskError,
+    > {
         let mut routed: BTreeSet<ListSlug> = scan.notes.values().cloned().collect();
         routed.insert(inbox_list.clone());
         routed.extend(todo_lists.iter().cloned());
@@ -519,23 +534,66 @@ impl<C: CaldavPort> Engine<C> {
         let mut scope = routed.clone();
         scope.extend(index.entries.values().map(|entry| entry.list.clone()));
 
+        let before = Calendars::load(&self.state_dir)?;
+        let mut calendars = before.clone();
+        let mut listing = None;
         let mut remote = BTreeMap::new();
         let mut created = BTreeSet::new();
+        let mut bound = BTreeMap::new();
         for slug in scope {
-            match self.caldav.list_tasks(&slug).await? {
-                Some(resources) => {
+            if let Some(resources) = self.caldav.list_tasks(slug.as_str(), &slug).await? {
+                // At its own path — also when it was found elsewhere before.
+                if calendars.bound.remove(&slug).is_some() {
+                    tracing::warn!(list = %slug.as_str(), "collection_changed");
+                    created.insert(slug.clone());
+                }
+                remote.insert(slug, resources);
+                continue;
+            }
+            let collections = match &listing {
+                Some(collections) => collections,
+                None => listing.insert(self.caldav.list_collections().await?),
+            };
+            match resolve_list(collections, &slug) {
+                Bound::At(collection) => {
+                    // Gone between the two requests: not listed, so nothing is concluded.
+                    let Some(resources) = self.caldav.list_tasks(&collection, &slug).await? else {
+                        continue;
+                    };
+                    if before
+                        .bound
+                        .get(&slug)
+                        .is_some_and(|earlier| *earlier != collection)
+                    {
+                        tracing::warn!(list = %slug.as_str(), "collection_changed");
+                        created.insert(slug.clone());
+                    }
+                    calendars.bound.insert(slug.clone(), collection.clone());
+                    bound.insert(slug.clone(), collection);
                     remote.insert(slug, resources);
                 }
-                None if !routed.contains(&slug) => {}
-                None if self.allow_create_lists => {
+                Bound::Ambiguous(found) => {
+                    tracing::warn!(
+                        list = %slug.as_str(),
+                        calendars = %found.join(", "),
+                        "several calendars of the server have this name; its tasks stay local until one is renamed"
+                    );
+                }
+                Bound::Missing if !routed.contains(&slug) => {}
+                Bound::Missing if self.allow_create_lists => {
                     self.caldav
                         .ensure_collection(&slug, &slug.display_name())
                         .await?;
                     tracing::info!(list = %slug.as_str(), "collection_created");
+                    // restask's own: not a calendar that appeared on the server (§7.5).
+                    if let Some(known) = &mut calendars.known {
+                        known.insert(slug.as_str().to_string());
+                    }
+                    calendars.bound.remove(&slug);
                     created.insert(slug.clone());
                     remote.insert(slug, Vec::new());
                 }
-                None => {
+                Bound::Missing => {
                     tracing::warn!(
                         list = %slug.as_str(),
                         "no such collection on the server and caldav.allow_create_lists is off; its tasks stay local"
@@ -543,14 +601,23 @@ impl<C: CaldavPort> Engine<C> {
                 }
             }
         }
-        Ok((remote, created))
+        if calendars != before {
+            calendars.save(&self.state_dir)?;
+        }
+        Ok((remote, created, bound))
     }
 
-    async fn put(&self, put: &PutOp, now: DateTime<Utc>) -> Result<String, RestaskError> {
+    async fn put(
+        &self,
+        put: &PutOp,
+        bound: &BTreeMap<ListSlug, String>,
+        now: DateTime<Utc>,
+    ) -> Result<String, RestaskError> {
         let etag = self
             .caldav
             .put(
                 &put.task,
+                collection_of(bound, &put.task.list),
                 &put.name,
                 &put.extras,
                 &put.wire,
@@ -562,12 +629,76 @@ impl<C: CaldavPort> Engine<C> {
         Ok(etag)
     }
 
-    async fn delete(&self, delete: &DeleteOp) -> Result<(), RestaskError> {
+    async fn delete(
+        &self,
+        delete: &DeleteOp,
+        bound: &BTreeMap<ListSlug, String>,
+    ) -> Result<(), RestaskError> {
         self.caldav
-            .delete(&delete.list, &delete.name, delete.etag.as_deref())
+            .delete(
+                collection_of(bound, &delete.list),
+                &delete.name,
+                delete.etag.as_deref(),
+            )
             .await?;
         tracing::info!(list = %delete.list.as_str(), name = %delete.name, "caldav_delete");
         Ok(())
+    }
+
+    /// Adds the calendars that appeared on the server to the ones TODO.md shows
+    /// (§7.5): a calendar that can hold tasks, was not there at the look before, and is
+    /// neither the bound one nor shown already, is appended to `vault.todo_lists` under
+    /// the name the vault reaches it by — `restask.toml` is written, then what was seen.
+    /// The first look only remembers: without a look before, nothing is new. Server
+    /// work, so the sync node's alone; off with `todo_new_lists = false`. Returns the
+    /// names added.
+    pub async fn follow_calendars(&mut self) -> Result<Vec<String>, RestaskError> {
+        if !self.syncs_here || !self.cfg.todo_new_lists {
+            return Ok(Vec::new());
+        }
+        let collections = self.caldav.list_collections().await?;
+        let _lock = self.lock().await?;
+        let mut calendars = Calendars::load(&self.state_dir)?;
+        let seen: BTreeSet<String> = collections
+            .iter()
+            .map(|collection| collection.slug.clone())
+            .collect();
+        let Some(known) = calendars.known.clone() else {
+            calendars.known = Some(seen);
+            calendars.save(&self.state_dir)?;
+            return Ok(Vec::new());
+        };
+        let inbox_list = vault::inbox_list(&self.cfg)?;
+        let mut shown = vault::todo_lists(&self.cfg)?;
+        let mut cfg = self.cfg.clone();
+        let mut added = Vec::new();
+        for collection in &collections {
+            if known.contains(&collection.slug) || !collection.supports_vtodo {
+                continue;
+            }
+            let Some(name) = list_name(collection, &collections) else {
+                continue;
+            };
+            if name != inbox_list && shown.insert(name.clone()) {
+                cfg.todo_lists.push(name.as_str().to_string());
+                added.push(name.as_str().to_string());
+            }
+        }
+        if !added.is_empty() {
+            let path = self.vault.join("restask.toml");
+            cfg.save(&path).map_err(|error| RestaskError::Config {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+            tracing::info!(calendars = %added.join(", "), "calendars_added");
+        }
+        if known != seen {
+            calendars.known = Some(known.union(&seen).cloned().collect());
+            calendars.save(&self.state_dir)?;
+        }
+        drop(_lock);
+        self.cfg = cfg;
+        Ok(added)
     }
 
     // ── phase 3: record ───────────────────────────────────────────────────────────────
@@ -733,4 +864,10 @@ fn is_connection_failure(error: &RestaskError) -> bool {
             ..
         }
     )
+}
+
+/// The path segment of a list's collection: where the pass found it by name, else the
+/// list's own slug.
+fn collection_of<'a>(bound: &'a BTreeMap<ListSlug, String>, list: &'a ListSlug) -> &'a str {
+    bound.get(list).map_or(list.as_str(), String::as_str)
 }

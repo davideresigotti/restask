@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::caldav::{CaldavClient, CaldavPort, CollectionInfo};
+use crate::caldav::{list_name, resolve_list, Bound, CaldavClient, CaldavPort, CollectionInfo};
 use crate::config::{CaldavConfig, MachineConfig, NodeSection, VaultConfig, VaultSection};
 use crate::domain::{Clock, ListSlug};
 use crate::fsio;
@@ -506,14 +506,14 @@ pub async fn run_interactive(
     // At a terminal the calendars are a checklist, all of them ticked; the typed
     // questions remain for piped input and for a server with nothing to tick.
     let pick = crate::tui::interactive() && !offered.is_empty();
-    let names: Vec<&str> = server_collections
+    let names: Vec<String> = server_collections
         .iter()
-        .map(|collection| collection.slug.as_str())
+        .map(|collection| calendar_name(collection, &server_collections))
         .collect();
     let shown = if pick {
         let labels: Vec<String> = offered
             .iter()
-            .map(|collection| collection_label(collection))
+            .map(|collection| collection_label(collection, &server_collections))
             .collect();
         let ticked = vec![true; offered.len()];
         loop {
@@ -543,16 +543,17 @@ pub async fn run_interactive(
             }
         }
     };
+    let name = |collection: &CollectionInfo| calendar_name(collection, &server_collections);
     let inbox = match shown.as_slice() {
-        [only] => only.slug.clone(),
+        [only] => name(only),
         _ if pick => {
             let labels: Vec<String> = shown
                 .iter()
-                .map(|collection| collection_label(collection))
+                .map(|collection| collection_label(collection, &server_collections))
                 .collect();
             let at = crate::tui::pick_one("New tasks typed in TODO.md go to", &labels)?;
             match shown.get(at) {
-                Some(collection) => collection.slug.clone(),
+                Some(collection) => name(collection),
                 None => {
                     return Err(RestaskError::Validation {
                         field: "collections",
@@ -562,10 +563,7 @@ pub async fn run_interactive(
             }
         }
         _ => {
-            let shown_names: Vec<&str> = shown
-                .iter()
-                .map(|collection| collection.slug.as_str())
-                .collect();
+            let shown_names: Vec<String> = shown.iter().map(|shown| name(shown)).collect();
             loop {
                 let typed = crate::tui::prompt(&format!(
                     "New tasks typed in TODO.md go to (one of: {}):",
@@ -573,9 +571,9 @@ pub async fn run_interactive(
                 ))?;
                 match shown
                     .iter()
-                    .find(|collection| collection.slug.eq_ignore_ascii_case(typed.trim()))
+                    .find(|collection| name(collection).eq_ignore_ascii_case(typed.trim()))
                 {
-                    Some(collection) => break collection.slug.clone(),
+                    Some(collection) => break name(collection),
                     None => println!("`{typed}` is not one of: {}", shown_names.join(", ")),
                 }
             }
@@ -583,8 +581,8 @@ pub async fn run_interactive(
     };
     let others: Vec<String> = shown
         .iter()
-        .filter(|collection| collection.slug != inbox)
-        .map(|collection| collection.slug.clone())
+        .map(|collection| name(collection))
+        .filter(|shown| *shown != inbox)
         .collect();
 
     let daemon = daemon.ask(installer, &mut |message| crate::tui::prompt(message))?;
@@ -610,9 +608,18 @@ pub async fn run_interactive(
     Ok(())
 }
 
+/// The name the vault knows a calendar of the server by (§5.4): what the wizard lists,
+/// what `restask.toml` and a `📁` token say. It is the name the calendar's clients show,
+/// as a slug — a calendar made in another client has a path nobody chose — else its
+/// path, when another calendar answers to the name first.
+pub fn calendar_name(collection: &CollectionInfo, collections: &[CollectionInfo]) -> String {
+    list_name(collection, collections)
+        .map_or_else(|| collection.slug.clone(), |name| name.as_str().to_string())
+}
+
 /// Case-insensitively matches a typed calendar name against the server's collections
-/// (§13.2 step 4), returning the canonical entry so the binding and the TODO.md
-/// frontmatter always use the server's own slug. `None` means the wizard re-prompts.
+/// (§13.2 step 4): by the name the vault knows it by ([`calendar_name`]), else by its
+/// path. `None` means the wizard re-prompts.
 pub fn match_collection<'a>(
     typed: &str,
     collections: &'a [CollectionInfo],
@@ -620,7 +627,12 @@ pub fn match_collection<'a>(
     let typed = typed.trim();
     collections
         .iter()
-        .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
+        .find(|collection| calendar_name(collection, collections).eq_ignore_ascii_case(typed))
+        .or_else(|| {
+            collections
+                .iter()
+                .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
+        })
 }
 
 /// The calendars the wizard offers for TODO.md (§13.2 step 4): those of the server that
@@ -632,15 +644,15 @@ pub fn offered_collections(collections: &[CollectionInfo]) -> Vec<&CollectionInf
         .collect()
 }
 
-/// How the wizard's list names a calendar: by its slug, the name `restask.toml` and a
-/// `📁` token use — with the name other clients show in front when that is another one
-/// (a calendar made in a CalDAV client has a path the user never saw).
-pub fn collection_label(collection: &CollectionInfo) -> String {
-    match &collection.display_name {
-        Some(name) if !name.trim().eq_ignore_ascii_case(&collection.slug) => {
-            format!("{} ({})", name.trim(), collection.slug)
+/// How the wizard's list shows a calendar: by the name the vault knows it by, with the
+/// name its clients show behind it when that reads differently (`home-lab (Home Lab)`).
+pub fn collection_label(collection: &CollectionInfo, collections: &[CollectionInfo]) -> String {
+    let name = calendar_name(collection, collections);
+    match collection.display_name.as_deref().map(str::trim) {
+        Some(display) if !display.is_empty() && !display.eq_ignore_ascii_case(&name) => {
+            format!("{name} ({display})")
         }
-        _ => collection.slug.clone(),
+        _ => name,
     }
 }
 
@@ -668,6 +680,21 @@ pub fn select_collections<'a>(
         return Ok(offered_collections(collections));
     }
     Ok(chosen)
+}
+
+/// Makes sure a list has a calendar on the server: created at the list's own path only
+/// when none of the server's answers to its name (§5.4) — a calendar another client
+/// made is found by its name and gets no empty twin.
+async fn ensure_list<C: CaldavPort>(
+    caldav: &C,
+    slug: &ListSlug,
+    display: &str,
+) -> Result<(), RestaskError> {
+    let collections = caldav.list_collections().await?;
+    if resolve_list(&collections, slug) == Bound::Missing {
+        caldav.ensure_collection(slug, display).await?;
+    }
+    Ok(())
 }
 
 /// Shared setup body: vault scaffold, Obsidian plugin, fresh TODO.md, machine config,
@@ -778,22 +805,18 @@ async fn prepare_and_sync<C: CaldavPort>(
     let mut collections = Vec::new();
     if let Some(inbox_collection) = &args.inbox_collection {
         let slug = ListSlug::from_name(inbox_collection)?;
-        caldav
-            .ensure_collection(&slug, &slug.display_name())
-            .await?;
+        ensure_list(&caldav, &slug, &slug.display_name()).await?;
         collections.push(slug.as_str().to_string());
     }
     if args.todo_collections.is_some() {
         for slug in crate::vault::todo_lists(&cfg)? {
-            caldav
-                .ensure_collection(&slug, &slug.display_name())
-                .await?;
+            ensure_list(&caldav, &slug, &slug.display_name()).await?;
             collections.push(slug.as_str().to_string());
         }
     }
     for (name, collection) in &args.collections {
         let slug = ListSlug::from_name(collection)?;
-        caldav.ensure_collection(&slug, name).await?;
+        ensure_list(&caldav, &slug, name).await?;
         collections.push(slug.as_str().to_string());
     }
     if args.daemon == DaemonHost::Here {

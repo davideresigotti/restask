@@ -96,14 +96,15 @@ impl CaldavClient {
         format!("{}/{}/", self.base_url, self.username)
     }
 
-    /// `{url}/{username}/{slug}/` (§10.3).
-    fn collection_url(&self, slug: &ListSlug) -> String {
-        format!("{}{}/", self.user_home_url(), slug.as_str())
+    /// `{url}/{username}/{collection}/` (§10.3): `collection` is the path segment, as
+    /// the server's listing spells it.
+    fn collection_url(&self, collection: &str) -> String {
+        format!("{}{}/", self.user_home_url(), collection)
     }
 
-    /// `{url}/{username}/{slug}/{name}.ics` (§10.2).
-    fn resource_url(&self, slug: &ListSlug, name: &str) -> String {
-        format!("{}{}.ics", self.collection_url(slug), name)
+    /// `{url}/{username}/{collection}/{name}.ics` (§10.2).
+    fn resource_url(&self, collection: &str, name: &str) -> String {
+        format!("{}{}.ics", self.collection_url(collection), name)
     }
 
     /// Adds the `Basic` header only when a password is configured (§17: with auth
@@ -223,9 +224,14 @@ impl CaldavClient {
     }
 
     /// `GET`s one resource body; `None` when it is gone.
-    async fn get_body(&self, slug: &ListSlug, name: &str) -> Result<Option<String>, RestaskError> {
+    async fn get_body(&self, collection: &str, name: &str) -> Result<Option<String>, RestaskError> {
         let response = self
-            .request(Method::GET, &self.resource_url(slug, name), None, None)
+            .request(
+                Method::GET,
+                &self.resource_url(collection, name),
+                None,
+                None,
+            )
             .await?;
         match response.status().as_u16() {
             404 => Ok(None),
@@ -298,7 +304,7 @@ impl CaldavPort for CaldavClient {
         let probe = self
             .request(
                 webdav_method("PROPFIND")?,
-                &self.collection_url(slug),
+                &self.collection_url(slug.as_str()),
                 Some(propfind_collections_body()),
                 Some(0),
             )
@@ -313,7 +319,7 @@ impl CaldavPort for CaldavClient {
                 let created = self
                     .request(
                         webdav_method("MKCOL")?,
-                        &self.collection_url(slug),
+                        &self.collection_url(slug.as_str()),
                         Some(mkcol_body(display)),
                         None,
                     )
@@ -329,12 +335,13 @@ impl CaldavPort for CaldavClient {
 
     async fn list_tasks(
         &self,
+        collection: &str,
         slug: &ListSlug,
     ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
         let response = self
             .request(
                 webdav_method("REPORT")?,
-                &self.collection_url(slug),
+                &self.collection_url(collection),
                 Some(report_vtodos()),
                 Some(1),
             )
@@ -347,7 +354,7 @@ impl CaldavPort for CaldavClient {
         for item in parse_report(&body) {
             // Servers that do not inline calendar-data get one GET per resource.
             let data = if item.data.is_empty() {
-                match self.get_body(slug, &item.name).await? {
+                match self.get_body(collection, &item.name).await? {
                     Some(data) => data,
                     None => continue,
                 }
@@ -372,13 +379,14 @@ impl CaldavPort for CaldavClient {
     async fn put(
         &self,
         task: &Task,
+        collection: &str,
         name: &str,
         extras: &[String],
         wire: &WireNames,
         if_match: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<String, RestaskError> {
-        let url = self.resource_url(&task.list, name);
+        let url = self.resource_url(collection, name);
         let mut builder = self
             .authenticate(self.http.request(Method::PUT, &url))
             .header("Content-Type", "text/calendar; charset=utf-8")
@@ -396,13 +404,13 @@ impl CaldavPort for CaldavClient {
 
     async fn delete(
         &self,
-        slug: &ListSlug,
+        collection: &str,
         name: &str,
         etag: Option<&str>,
     ) -> Result<(), RestaskError> {
         let mut builder = self.authenticate(
             self.http
-                .request(Method::DELETE, self.resource_url(slug, name)),
+                .request(Method::DELETE, self.resource_url(collection, name)),
         );
         if let Some(etag) = etag {
             builder = builder.header(IF_MATCH, etag);

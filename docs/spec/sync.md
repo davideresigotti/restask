@@ -13,8 +13,10 @@ next pass repairs.
    Scan and repair the routed notes (§6.4). Carry edits made on TODO.md mirror lines to
    their source notes (§7.1) and rescan if that changed anything.
 2. **Remote.**
-   a. Snapshot: one `REPORT` per list in scope (§5.4). A routed list without a collection
-      is created if allowed, else left out of the snapshot.
+   a. Snapshot: one `REPORT` per list in scope, at the collection that is the list's
+      (§5.4: its own path, else by name from one listing per pass that needs it). A
+      routed list no calendar answers to is created if allowed, else left out of the
+      snapshot; so is a list two calendars answer to.
    b. Plan: `planner::plan(&Snapshots) -> Plan` — pure.
    c. Apply vault mutations (one pass per file), then server writes: puts, moves (put,
       then delete the old copy), deletes. A dependent delete runs only if its put
@@ -144,7 +146,8 @@ Task **in the vault**:
 | **R3** | no copy; settled; the collection it was settled in was listed and is not a *reset* | deleted on the server → delete the vault line, tombstone, forget |
 | **R2** | no copy otherwise | new (or lost wholesale) → put (create). A task whose line states no creation date is put with `CREATED` = the day its UID was minted (§4) |
 
-**Reset collections** (R3 guard): a collection created in this pass, or one where two or
+**Reset collections** (R3 guard): a collection created in this pass, a list found at
+another collection than in the pass before (§5.4), or one where two or
 more settled tasks all vanished at once, did not have its tasks deleted one by one — it
 was emptied, recreated or restored. Its tasks are re-pushed (R2), never deleted from the
 vault.

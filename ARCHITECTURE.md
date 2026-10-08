@@ -168,7 +168,9 @@ re-planned from fresh snapshots in the next pass.
 4. **Local-only by default.** A note takes part only when routed by frontmatter
    (`restask-list`, `restask-list-root`). Of an unrouted note only the frontmatter block
    is ever read; it is never parsed, modified or synced.
-5. **Lists are collections.** List `Home Lab` ⇄ collection `home-lab`. The inbox file
+5. **Lists are collections.** List `Home Lab` ⇄ the server's calendar of that name: the
+   collection at `home-lab`, else the one calendar other clients show as `Home Lab`,
+   wherever its client put it (§5.4). Two of one name are not chosen between. The inbox file
    routes to `vault.inbox_list`; a line in it that names another calendar (`📁 work`)
    lives in that one, and the line — not the state — is what says so (§7.5).
 6. **Other clients' data is not ours to lose.** `VEVENT`s are never touched. Everything in

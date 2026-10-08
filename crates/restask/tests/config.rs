@@ -376,3 +376,18 @@ fn machine_config_saved_0600() {
     let mode = fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
 }
+
+#[test]
+fn new_calendars_are_followed_unless_the_vault_says_no() {
+    let cfg = VaultConfig::from_str("inbox_list = \"personal\"\n").unwrap();
+    assert!(cfg.todo_new_lists);
+    // The default is not written: configs of vaults set up before do not change.
+    assert!(!toml::to_string_pretty(&cfg)
+        .unwrap()
+        .contains("todo_new_lists"));
+    let off = VaultConfig::from_str("todo_new_lists = false\n").unwrap();
+    assert!(!off.todo_new_lists);
+    assert!(toml::to_string_pretty(&off)
+        .unwrap()
+        .contains("todo_new_lists = false"));
+}

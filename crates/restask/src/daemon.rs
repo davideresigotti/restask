@@ -137,6 +137,7 @@ pub async fn run_with<C: CaldavPort>(
             // it. A failed pass (e.g. the server is down) must not kill the daemon; the
             // next event or poll tick retries.
             refresh_config(&vault, &mut engine);
+            follow_calendars(&mut engine).await;
             match engine.reconcile().await {
                 Ok(report) => tracing::debug!(?report, "reconciled"),
                 Err(
@@ -333,6 +334,15 @@ fn refresh_config<C: CaldavPort>(vault: &Path, engine: &mut Engine<C>) {
         }
         Ok(_) => {}
         Err(error) => tracing::warn!(%error, "restask.toml not usable; keeping the last one"),
+    }
+}
+
+/// Lets `engine` add the calendars that appeared on the server to the ones TODO.md
+/// shows (§7.5), before the pass that then brings their tasks in. A look that fails
+/// adds nothing and says nothing: the pass reports a server that is down.
+async fn follow_calendars<C: CaldavPort>(engine: &mut Engine<C>) {
+    if let Err(error) = engine.follow_calendars().await {
+        tracing::debug!(%error, "calendars not looked at");
     }
 }
 

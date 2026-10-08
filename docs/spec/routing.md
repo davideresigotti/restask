@@ -73,11 +73,24 @@ TODO.md, a line with `📁 work`     (the line says so, §7.5)      → work
 
 ### 5.4 Lists and collections
 
-- List `Home Lab` → slug `home-lab` → collection `<url>/<user>/home-lab/`. There is no
-  other mapping: routing is declared in the notes and nowhere else.
-- A routed list whose collection does not exist is created on the first pass
-  (`MKCOL`, VTODO-only, display name from the slug) when `caldav.allow_create_lists` is
-  true; otherwise its tasks stay local and a warning is logged each pass.
+- List `Home Lab` → slug `home-lab` → the server's calendar of that name
+  (`caldav::resolve_list`, pure), looked for in this order:
+  1. the collection at the list's own path, `<url>/<user>/home-lab/` — asked for
+     first, with the list's `REPORT`, so a list that is there costs no other request;
+  2. else, in the account's listing: the one task calendar whose path spells the name
+     another way (`Home-Lab`), else the one whose **display name** does (`Home Lab`).
+     A calendar made in another client (DAVx⁵, Tasks.org, Thunderbird, Radicale's own
+     page) has a generated path; its name is the only one the user ever gave it.
+  Calendars that hold no tasks are found by their path only. Two calendars that answer
+  alike are not chosen between: the list is left out of the pass (unknown, not empty)
+  and a warning names them. Routing is declared in the notes and nowhere else; where
+  a list was found is remembered in `.restask/calendars.json` (§9) only to notice that
+  it is somewhere else now — such a list is a *reset* one for that pass (§11.4): what
+  is missing in its new collection was not deleted.
+- A routed list that **no** calendar answers to is created on the first pass, at its
+  own path (`MKCOL`, VTODO-only, display name from the slug), when
+  `caldav.allow_create_lists` is true; otherwise its tasks stay local and a warning is
+  logged each pass. Setup creates by the same rule (`ensure_list`).
 - **Home note** of a list: the note that receives tasks created on the server for that
   list — the list's root note if it has one, else its first routed note in path order.
   The inbox list's home is the inbox file. So is the home of a list named in

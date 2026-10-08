@@ -960,14 +960,16 @@ impl CaldavPort for PutRejected {
 
     async fn list_tasks(
         &self,
+        collection: &str,
         slug: &ListSlug,
     ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
-        self.0.list_tasks(slug).await
+        self.0.list_tasks(collection, slug).await
     }
 
     async fn put(
         &self,
         _task: &Task,
+        _collection: &str,
         _name: &str,
         _extras: &[String],
         _wire: &WireNames,
@@ -983,11 +985,11 @@ impl CaldavPort for PutRejected {
 
     async fn delete(
         &self,
-        slug: &ListSlug,
+        collection: &str,
         name: &str,
         etag: Option<&str>,
     ) -> Result<(), RestaskError> {
-        self.0.delete(slug, name, etag).await
+        self.0.delete(collection, name, etag).await
     }
 }
 
@@ -3119,4 +3121,219 @@ async fn a_task_pushed_before_links_were_written_is_written_again_once() {
     let lines = logical_lines(&mock, "youtube", &caddy);
     assert!(lines.contains(&format!("SUMMARY:{CADDY}")), "{lines:?}");
     assert_quiet(&dir, &engine, &mock).await;
+}
+
+// ---- §5.4: a list is the calendar of its name, wherever another client put it ----
+
+/// The path a phone gave the calendar it made.
+const PHONE_PATH: &str = "56de6126-33a4-46fd-a66e-3cc49ad32fe5";
+
+#[tokio::test]
+async fn a_calendar_made_in_another_client_is_found_by_its_name() {
+    let dir = vault_showing("\"prova\"");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_collection(PHONE_PATH, "Prova");
+    mock.seed_resource(PHONE_PATH, TASKS_ORG_NAME, &work_task());
+    let engine = engine(&dir, &mock);
+
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (report.adoptions, report.inserts, report.deletes),
+        (1, 1, 0)
+    );
+    let adopted = uid_of(&dir, "TODO.md", "Update restask README");
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "- [ ] Update restask README {CALENDAR} prova {ID} {adopted}\n"
+        )),
+        "{todo}"
+    );
+    // No empty twin at the list's own path, and the task is where its client made it.
+    assert_eq!(mock.collection_names(), vec![PHONE_PATH, "inbox"]);
+    assert_eq!(mock.resource_names(PHONE_PATH), vec![TASKS_ORG_NAME]);
+    assert!(body(&mock, PHONE_PATH, TASKS_ORG_NAME).contains(&format!("X-RESTASK-UID:{adopted}")));
+
+    // Quiet.
+    let (counters, files) = (mock.counters(), snapshot(&dir));
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!((again.pushes, again.moves, again.inserts), (0, 0, 0));
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(snapshot(&dir), files);
+
+    // Checked in the vault, and a task typed for that calendar: both go to it.
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &todo
+            .replace("- [ ] Update restask README", "- [x] Update restask README")
+            .replace(
+                "## No Priority\n",
+                &format!("## No Priority\n- [ ] Typed here {CALENDAR} prova\n"),
+            ),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.failed, report.deletes), (0, 0));
+    assert!(body(&mock, PHONE_PATH, TASKS_ORG_NAME).contains("STATUS:COMPLETED"));
+    assert_eq!(mock.resource_names(PHONE_PATH).len(), 2);
+    assert_eq!(mock.collection_names(), vec![PHONE_PATH, "inbox"]);
+    assert!(mock.resource_names("inbox").is_empty());
+
+    // Deleted in the vault, it leaves the calendar it was in.
+    let todo = read(&dir, "TODO.md");
+    let typed = todo
+        .lines()
+        .find(|line| line.contains("Typed here"))
+        .unwrap()
+        .to_string();
+    write_vault_file(&dir, "TODO.md", &todo.replace(&format!("{typed}\n"), ""));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.deletes, 1);
+    assert_eq!(mock.resource_names(PHONE_PATH), vec![TASKS_ORG_NAME]);
+}
+
+#[tokio::test]
+async fn a_list_whose_calendar_becomes_another_one_loses_no_line() {
+    let dir = vault_showing("\"prova\"");
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_collection(PHONE_PATH, "Prova");
+    mock.seed_resource(PHONE_PATH, TASKS_ORG_NAME, &work_task());
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    engine.reconcile().await.unwrap();
+    let line = read(&dir, "TODO.md")
+        .lines()
+        .find(|line| line.contains("Update restask README"))
+        .unwrap()
+        .to_string();
+
+    // A second calendar of that name: restask does not choose, and concludes nothing
+    // from a list it did not look at.
+    mock.seed_collection("0b1f6c1e-3a52-4c0e-9d58-0f3c2f6f1a77", "prova");
+    let (counters, files) = (mock.counters(), snapshot(&dir));
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (report.pushes, report.deletes, report.markdown_mutations),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!(mock.collection_names().len(), 3);
+
+    // A collection at the list's own path: it is the list's from now on. The one task
+    // settled with the other calendar is not in it — and was not deleted there.
+    mock.seed_collection("prova", "Prova");
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.deletes, 0);
+    assert!(read(&dir, "TODO.md").contains(&line), "the line is kept");
+    assert_eq!(mock.resource_names("prova").len(), 1);
+    assert_eq!(mock.resource_names(PHONE_PATH), vec![TASKS_ORG_NAME]);
+
+    // Quiet again.
+    let (counters, files) = (mock.counters(), snapshot(&dir));
+    engine.reconcile().await.unwrap();
+    assert_eq!(
+        (mock.counters().0, mock.counters().1),
+        (counters.0, counters.1)
+    );
+    assert_eq!(snapshot(&dir), files);
+}
+
+// ---- §7.5: a calendar that appears on the server is shown in TODO.md ----
+
+#[tokio::test]
+async fn a_calendar_that_appears_on_the_server_is_added_to_the_ones_todo_md_shows() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource("work", TASKS_ORG_NAME, &work_task());
+    let mut engine = engine(&dir, &mock);
+    let config = || read(&dir, "restask.toml");
+    let before = config();
+
+    // The first look remembers what is there: nothing is new, `work` was not chosen.
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    assert_eq!(config(), before);
+    engine.reconcile().await.unwrap();
+    assert!(!read(&dir, "TODO.md").contains("Update restask README"));
+
+    // Made on the phone afterwards: one for tasks, one for events.
+    mock.seed_collection(PHONE_PATH, "University");
+    mock.seed_resource(
+        PHONE_PATH,
+        "exam",
+        &work_task().replace("Update restask README", "Enrol for the exam"),
+    );
+    mock.seed_event_calendar("7c1d", "Sport");
+    assert_eq!(engine.follow_calendars().await.unwrap(), vec!["university"]);
+    assert_eq!(
+        VaultConfig::load(&dir.path().join("restask.toml"))
+            .unwrap()
+            .todo_lists,
+        vec!["university"]
+    );
+    engine.reconcile().await.unwrap();
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "- [ ] Enrol for the exam {CALENDAR} university {ID}"
+        )),
+        "{todo}"
+    );
+    assert!(!todo.contains("Update restask README"));
+    assert_eq!(mock.collection_names().len(), 4, "no calendar was created");
+
+    // Quiet: a second look adds nothing and writes nothing.
+    let files = snapshot(&dir);
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    engine.reconcile().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+
+    // Taken out by the user, it stays out: it is not new any more.
+    write_vault_file(&dir, "restask.toml", "done_heading = \"Done\"\n");
+    engine.set_config(VaultConfig::load(&dir.path().join("restask.toml")).unwrap());
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    assert_eq!(config(), "done_heading = \"Done\"\n");
+
+    // Without the memory of earlier looks nothing is new either.
+    std::fs::remove_file(dir.path().join(".restask/calendars.json")).unwrap();
+    mock.seed_collection("9e2f", "Family");
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    assert_eq!(config(), "done_heading = \"Done\"\n");
+
+    // Switched off in the vault's config.
+    write_vault_file(
+        &dir,
+        "restask.toml",
+        "done_heading = \"Done\"\ntodo_new_lists = false\n",
+    );
+    engine.set_config(VaultConfig::load(&dir.path().join("restask.toml")).unwrap());
+    mock.seed_collection("4a4a", "Garden");
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    assert!(!config().contains("garden"));
+}
+
+#[tokio::test]
+async fn a_calendar_restask_created_itself_is_not_one_that_appeared() {
+    let dir = temp_vault();
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    let mut engine = engine(&dir, &mock);
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+
+    // A routed note's list gets its collection from the engine.
+    home_note(&dir, "- [ ] Water the plants\n");
+    engine.reconcile().await.unwrap();
+    assert_eq!(mock.collection_names(), vec!["home", "inbox"]);
+    let before = read(&dir, "restask.toml");
+    assert!(engine.follow_calendars().await.unwrap().is_empty());
+    assert_eq!(read(&dir, "restask.toml"), before);
 }

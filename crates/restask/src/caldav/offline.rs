@@ -36,7 +36,8 @@ impl CaldavPort for Offline {
 
     async fn list_tasks(
         &self,
-        _slug: &ListSlug,
+        _collection: &str,
+        _list: &ListSlug,
     ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
         unavailable()
     }
@@ -44,6 +45,7 @@ impl CaldavPort for Offline {
     async fn put(
         &self,
         _task: &Task,
+        _collection: &str,
         _name: &str,
         _extras: &[String],
         _wire: &WireNames,
@@ -55,7 +57,7 @@ impl CaldavPort for Offline {
 
     async fn delete(
         &self,
-        _slug: &ListSlug,
+        _collection: &str,
         _name: &str,
         _etag: Option<&str>,
     ) -> Result<(), RestaskError> {

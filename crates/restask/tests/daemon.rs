@@ -208,6 +208,49 @@ async fn a_changed_vault_config_takes_effect_while_the_daemon_runs() {
     worker.await.unwrap().unwrap();
 }
 
+/// §7.5: a calendar made in another client while the daemon runs is added to the ones
+/// TODO.md shows, under its name, and its tasks come in with the pass that follows.
+#[tokio::test]
+async fn a_calendar_made_on_the_server_while_the_daemon_runs_shows_up_in_todo_md() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            watch_ms: 50,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    wait_until(|| dir.path().join(".restask/calendars.json").is_file()).await;
+
+    let phone = "56de6126-33a4-46fd-a66e-3cc49ad32fe5";
+    mock.seed_collection(phone, "University");
+    mock.seed_resource(
+        phone,
+        "5417861935824551742",
+        &TASKS_ORG_BODY.replace("Made in Tasks.org", "Enrol for the exam"),
+    );
+    let todo = || std::fs::read_to_string(dir.path().join("TODO.md")).unwrap();
+    wait_until(|| todo().contains("- [ ] Enrol for the exam \u{1F4C1} university \u{1F194}")).await;
+    let config = std::fs::read_to_string(dir.path().join("restask.toml")).unwrap();
+    assert!(config.contains("\"university\""), "{config}");
+    assert!(!mock
+        .collection_names()
+        .iter()
+        .any(|path| path == "university"));
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
 const TASKS_ORG_BODY: &str =
     "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:+//IDN tasks.org//android//EN\r\n\
 BEGIN:VTODO\r\nDTSTAMP:20260922T101500Z\r\nUID:5417861935824551742\r\n\

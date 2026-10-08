@@ -10,6 +10,8 @@
 ├── tasks/<uid>.ics      base snapshots: what vault and server last agreed on
 ├── tombstones.json      uid → deletion instant (pruned after 365 days)
 ├── todo.rendered.md     the engine's own last render of the inbox file (§7.1)
+├── calendars.json       the server's collections seen so far (§7.5) and the lists found
+│                        under another path than their own (§5.4); the sync node's
 └── lock                 advisory lock: one restask process per vault per machine
 ```
 

@@ -24,7 +24,9 @@ pub struct RemoteResource {
 }
 
 /// Transport port to a CalDAV server (§10.2). One impl = one server account; collections
-/// are addressed by [`ListSlug`], resources by their `.ics`-sans-suffix name.
+/// are addressed by their path segment below the account (`collection`), resources by
+/// their `.ics`-sans-suffix name. For most lists the segment is the list's slug; which
+/// collection a list is, is the caller's to say ([`crate::caldav::resolve_list`], §5.4).
 ///
 /// The port is stateless: every precondition (`If-Match`) and every timestamp is passed
 /// in by the caller, so a one-shot CLI run and the long-lived daemon behave identically.
@@ -46,16 +48,17 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
         display: &str,
     ) -> impl Future<Output = Result<(), RestaskError>> + Send;
 
-    /// The whole remote snapshot of one list in a single `REPORT` (§10.1): every `VTODO`
-    /// with its etag and parsed body, in document order. `Ok(None)` means the collection
+    /// The whole remote snapshot of one collection in a single `REPORT` (§10.1): every
+    /// `VTODO` with its etag and parsed body, read as tasks of `list`, in document order. `Ok(None)` means the collection
     /// does not exist. Resources that hold no parseable `VTODO` are skipped with a
     /// warning — one odd resource never fails the listing.
     fn list_tasks(
         &self,
-        slug: &ListSlug,
+        collection: &str,
+        list: &ListSlug,
     ) -> impl Future<Output = Result<Option<Vec<RemoteResource>>, RestaskError>> + Send;
 
-    /// `PUT <url>/<user>/<list>/<name>.ics`: serializes `task` (§8.1) with `extras` (the
+    /// `PUT <url>/<user>/<collection>/<name>.ics`: serializes `task` (§8.1) with `extras` (the
     /// replaced resource's unmanaged content) and `now` as `DTSTAMP`/`LAST-MODIFIED`.
     /// `name` is the resource to write — the UID for a new resource, the listed name
     /// when replacing one (another client may have stored the task under its own name).
@@ -64,9 +67,12 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
     /// `if_match: Some(etag)` replaces exactly that version; `None` creates
     /// (`If-None-Match: *`). Returns the new etag (empty when the server sends none). A
     /// failed precondition surfaces as `CaldavErrorKind::Conflict` (§10.4).
+    // Every precondition is an argument (the port is stateless), and each of these is one.
+    #[allow(clippy::too_many_arguments)]
     fn put(
         &self,
         task: &Task,
+        collection: &str,
         name: &str,
         extras: &[String],
         wire: &WireNames,
@@ -74,11 +80,11 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
         now: DateTime<Utc>,
     ) -> impl Future<Output = Result<String, RestaskError>> + Send;
 
-    /// `DELETE <url>/<user>/<slug>/<name>.ics` with `If-Match` when an etag is given.
+    /// `DELETE <url>/<user>/<collection>/<name>.ics` with `If-Match` when an etag is given.
     /// Deleting a resource that is already gone succeeds.
     fn delete(
         &self,
-        slug: &ListSlug,
+        collection: &str,
         name: &str,
         etag: Option<&str>,
     ) -> impl Future<Output = Result<(), RestaskError>> + Send;

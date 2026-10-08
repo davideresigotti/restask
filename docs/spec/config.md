@@ -9,12 +9,15 @@
 ```toml
 done_heading = "Done"      # heading text that starts a note's completed region
 inbox_file   = "TODO.md"   # the engine-managed inbox + view (§7)
-inbox_list   = "inbox"     # the list (= collection slug) the inbox file routes to:
+inbox_list   = "inbox"     # the list (a calendar's name, §5.4) the inbox file routes to:
                            # where a task typed there without a calendar goes;
                            # setup records the calendar you chose
 todo_lists   = ["work"]    # further calendars whose tasks live in the inbox file,
                            # each line naming its own (📁 work, §7.5); default: none,
                            # and the key is then not written
+todo_new_lists = true      # a calendar made in another client later is added to
+                           # todo_lists by the sync node (§7.5); default true, and the
+                           # key is then not written
 obsidian_vault = "Obsidian"   # the vault's name in Obsidian: a task's wikilinks reach
                            # other clients as links that open the note there (§8.4);
                            # setup records the vault folder's name; absent: plain text.

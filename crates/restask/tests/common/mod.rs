@@ -47,6 +47,7 @@ pub struct MockResource {
 #[derive(Debug, Default)]
 struct MockState {
     collections: BTreeMap<String, String>,
+    events_only: std::collections::BTreeSet<String>,
     resources: BTreeMap<(String, String), MockResource>,
     etag_counter: u64,
     failures: VecDeque<CaldavErrorKind>,
@@ -75,6 +76,15 @@ impl MockCaldav {
         self.lock()
             .collections
             .insert(slug.to_string(), display.to_string());
+    }
+
+    /// Pre-creates a calendar that holds events only, as a calendar app would.
+    pub fn seed_event_calendar(&self, path: &str, display: &str) {
+        let mut state = self.lock();
+        state
+            .collections
+            .insert(path.to_string(), display.to_string());
+        state.events_only.insert(path.to_string());
     }
 
     /// Stores a resource the way another CalDAV client would (fresh etag); the
@@ -179,7 +189,7 @@ impl CaldavPort for MockCaldav {
                 href: format!("/{slug}/"),
                 slug: slug.clone(),
                 display_name: Some(display.clone()),
-                supports_vtodo: true,
+                supports_vtodo: !state.events_only.contains(slug),
                 // Like a server's: it changes with every write to the collection.
                 ctag: Some(
                     state
@@ -206,6 +216,7 @@ impl CaldavPort for MockCaldav {
 
     async fn list_tasks(
         &self,
+        collection: &str,
         slug: &ListSlug,
     ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
@@ -213,12 +224,12 @@ impl CaldavPort for MockCaldav {
         }
         let mut state = self.lock();
         state.reports += 1;
-        if !state.collections.contains_key(slug.as_str()) {
+        if !state.collections.contains_key(collection) {
             return Ok(None);
         }
         let mut resources = Vec::new();
         for ((list, name), resource) in &state.resources {
-            if list != slug.as_str() {
+            if list != collection {
                 continue;
             }
             // Like the real client: a body without a VTODO is skipped, never fatal.
@@ -236,6 +247,7 @@ impl CaldavPort for MockCaldav {
     async fn put(
         &self,
         task: &Task,
+        collection: &str,
         name: &str,
         extras: &[String],
         wire: &WireNames,
@@ -247,7 +259,7 @@ impl CaldavPort for MockCaldav {
         }
         let etag = self.next_etag();
         let mut state = self.lock();
-        let key = (task.list.as_str().to_string(), name.to_string());
+        let key = (collection.to_string(), name.to_string());
         if !state.collections.contains_key(&key.0) {
             return Err(mock_error(
                 CaldavErrorKind::Protocol,
@@ -279,7 +291,7 @@ impl CaldavPort for MockCaldav {
 
     async fn delete(
         &self,
-        slug: &ListSlug,
+        collection: &str,
         name: &str,
         etag: Option<&str>,
     ) -> Result<(), RestaskError> {
@@ -287,7 +299,7 @@ impl CaldavPort for MockCaldav {
             return Err(error);
         }
         let mut state = self.lock();
-        let key = (slug.as_str().to_string(), name.to_string());
+        let key = (collection.to_string(), name.to_string());
         if let (Some(expected), Some(current)) = (etag, state.resources.get(&key)) {
             if current.etag != expected {
                 return Err(mock_error(

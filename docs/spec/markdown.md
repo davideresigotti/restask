@@ -351,6 +351,16 @@ TODO.md is the organizer for every calendar the user wants in it, not for one. I
   calendar yet is a new list, created like a routed note's (§5.4). The token routes
   whether or not its calendar is in `todo_lists`: the vault says where a task lives,
   `todo_lists` only says what is brought *into* the view.
+- **A calendar that appears on the server** — made in another client after the vault
+  was set up — is added to `todo_lists` by the sync node (`Engine::follow_calendars`,
+  before each pass of the daemon): one that can hold tasks, under the name the vault
+  reaches it by (§5.4), unless it is the bound one or shown already. `restask.toml`
+  is written first, then `.restask/calendars.json`, which remembers the collections
+  seen. *New* is measured against that memory: the first look, or one after the state
+  was dropped, remembers everything and adds nothing, so a calendar left unticked in
+  setup or taken out of the key by hand stays out; a collection restask created itself
+  is not one that appeared. Server work, the daemon's alone; `todo_new_lists = false`
+  switches it off (§14.1).
 - **Taking a calendar out of `todo_lists`** removes nothing: its lines stay, still
   name it and still sync with it; new tasks made there on the server no longer come in.
 - **Only in the inbox file.** On a line of a note the token is kept where the line is

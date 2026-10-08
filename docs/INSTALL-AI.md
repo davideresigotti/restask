@@ -148,7 +148,7 @@ On the computer, `doctor` says which machine runs the daemon and how to read its
 
   `--todo-list work` (repeatable) names a further calendar `TODO.md` shows.
 
-- **Another calendar in `TODO.md`, later.** No new setup: add it to `restask.toml` in the vault — `todo_lists = ["work"]`, next to `inbox_list` — and let the file sync carry the file. The daemon reads the change by itself and brings that calendar's tasks into `TODO.md`.
+- **Another calendar in `TODO.md`, later.** A task calendar you create in any app after setup is added by itself: the daemon puts its name into `todo_lists` in the vault's `restask.toml` and brings its tasks into `TODO.md` (calendars for events only are left out; `todo_new_lists = false` switches this off). For one that existed before, add its name yourself — `todo_lists = ["work"]`, next to `inbox_list` — and let the file sync carry the file. Use the name the calendar shows in your apps, in lowercase with dashes for spaces (`Home Lab` → `home-lab`): it does not matter what address the app gave it on the server. Two calendars with the same name are left alone until one is renamed.
 
 - **Coming from an earlier install.** If the computer ran the daemon, or kept the server's password, run the command of *The server step failed* above: it installs the daemon on the server, rewrites this computer's config without credentials and removes its password file. Then stop the old unit: `systemctl --user disable --now restask`.
 

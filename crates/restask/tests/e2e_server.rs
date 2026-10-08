@@ -98,6 +98,7 @@ async fn e2e_server_restask_dev_lifecycle() {
     let created = client
         .put(
             &task,
+            slug.as_str(),
             task.uid.as_str(),
             &extras,
             &WireNames::default(),
@@ -108,7 +109,7 @@ async fn e2e_server_restask_dev_lifecycle() {
         .expect("create failed");
 
     let listed = client
-        .list_tasks(&slug)
+        .list_tasks(slug.as_str(), &slug)
         .await
         .expect("list_tasks failed")
         .expect("the collection exists");
@@ -134,6 +135,7 @@ async fn e2e_server_restask_dev_lifecycle() {
     client
         .put(
             &task,
+            slug.as_str(),
             &remote.name,
             &remote.task.extras,
             &WireNames::default(),
@@ -146,6 +148,7 @@ async fn e2e_server_restask_dev_lifecycle() {
     let stale = client
         .put(
             &task,
+            slug.as_str(),
             &remote.name,
             &[],
             &WireNames::default(),
@@ -155,7 +158,11 @@ async fn e2e_server_restask_dev_lifecycle() {
         .await;
     assert!(stale.is_err(), "a stale If-Match must be refused");
 
-    let listed = client.list_tasks(&slug).await.unwrap().unwrap();
+    let listed = client
+        .list_tasks(slug.as_str(), &slug)
+        .await
+        .unwrap()
+        .unwrap();
     let replaced = find(listed, task.uid.as_str()).expect("still listed");
     assert_eq!(replaced.task.task.text, "restask e2e probe (edited)");
     assert_eq!(
@@ -165,10 +172,14 @@ async fn e2e_server_restask_dev_lifecycle() {
     assert_ne!(replaced.etag, remote.etag);
 
     client
-        .delete(&slug, &replaced.name, Some(&replaced.etag))
+        .delete(slug.as_str(), &replaced.name, Some(&replaced.etag))
         .await
         .expect("delete failed");
-    let listed = client.list_tasks(&slug).await.unwrap().unwrap();
+    let listed = client
+        .list_tasks(slug.as_str(), &slug)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         find(listed, task.uid.as_str()).is_none(),
         "deleted resource must not appear in REPORT"

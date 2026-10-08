@@ -66,6 +66,10 @@ poll timer (caldav.poll_secs, 300) ──┘
   The default is 2 s: the look is one small request, and the interval is the whole of
   the daemon's share in how long a server-side change takes to show (the rest is the
   other client's upload and the file sync's own delay, docs/INSTALL-AI.md *Latency*).
+- **New calendars.** Before each pass the daemon looks at the account's calendars and
+  adds the ones that appeared to `vault.todo_lists` (§7.5; `calendars_added`). A look
+  that fails adds nothing; the pass reports the server. One-shot passes (`restask
+  sync`, setup's first sync) do not look.
 - **The vault config is a file of the vault.** `restask.toml` is read again before
   every pass (`refresh_config`, logged as `config_reloaded` when it differs), so a
   change made on another device — a calendar added to `todo_lists` — takes effect when
@@ -120,11 +124,13 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
 4. **The calendars of TODO.md** (§7.5): two things are asked. *Which calendars TODO.md
    shows* — at a terminal a checklist of the server's calendars that can hold tasks
    (`offered_collections`), **all ticked**: arrows move, the spacebar ticks or unticks
-   one, `a` all, Enter confirms; a calendar is listed by its slug, with the name other
-   clients show in front when that is another one (`collection_label`); none ticked
-   asks again. *Which of them new tasks go to* — a list of the ticked ones, asked when
+   one, `a` all, Enter confirms; a calendar is listed by the name the vault knows it by
+   (`calendar_name`: its display name as a slug, §5.4 — never a generated path), with
+   the display name behind it when that reads differently (`collection_label`); none
+   ticked asks again. *Which of them new tasks go to* — a list of the ticked ones, asked when
    more than one was: a line typed in TODO.md without a calendar belongs to it. Its
-   slug becomes `vault.inbox_list`, the others `vault.todo_lists`. With piped input,
+   name becomes `vault.inbox_list`, the others `vault.todo_lists`; a calendar is
+   created only for a name none of the server's answers to (`ensure_list`). With piped input,
    or when no calendar of the server holds tasks, both are typed answers instead:
    names separated by commas, case-insensitive, Enter for all that can hold tasks, a
    name the server does not have re-prompts (`select_collections`). No calendars at

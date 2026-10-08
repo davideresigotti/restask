@@ -17,10 +17,10 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::setup::{
-    collection_label, daemon_unit_content, install_obsidian_plugin, is_loopback, is_obsidian_main,
-    joins, match_collection, node_link_args, offered_collections, open_vault_id, parse_collections,
-    run_setup, select_collections, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess,
-    NodeTarget, ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
+    calendar_name, collection_label, daemon_unit_content, install_obsidian_plugin, is_loopback,
+    is_obsidian_main, joins, match_collection, node_link_args, offered_collections, open_vault_id,
+    parse_collections, run_setup, select_collections, DaemonFlags, DaemonHost, DaemonInstaller,
+    NodeAccess, NodeTarget, ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -620,22 +620,64 @@ fn the_wizards_checklist_offers_every_calendar_that_holds_tasks_under_a_name_the
             Some("University"),
             true,
         ),
+        calendar("home-lab", Some("Home Lab"), true),
     ];
     // All that can hold tasks, in the server's order — the list opens with each ticked.
     let offered = offered_collections(&server);
     assert_eq!(
         offered
             .iter()
-            .map(|collection| collection_label(collection))
+            .map(|collection| collection_label(collection, &server))
             .collect::<Vec<_>>(),
-        vec![
-            "personal",
-            "work",
-            "University (0b1f6c1e-3a52-4c0e-9d58-0f3c2f6f1a77)"
-        ]
+        vec!["personal", "work", "university", "home-lab (Home Lab)"]
     );
-    // Enter on the typed question is the same choice.
+    // What is written into `restask.toml` is the name, never the path nobody chose.
+    assert_eq!(
+        offered
+            .iter()
+            .map(|collection| calendar_name(collection, &server))
+            .collect::<Vec<_>>(),
+        vec!["personal", "work", "university", "home-lab"]
+    );
+    // Enter on the typed question is the same choice, and a name can be typed.
     assert_eq!(select_collections("", &server).unwrap(), offered);
+    assert_eq!(
+        select_collections("University, Home-Lab", &server).unwrap(),
+        vec![offered[2], offered[3]]
+    );
+}
+
+/// §5.4: setup creates a calendar only when the server has none of that name — one made
+/// in another client is found, and gets no empty twin at the name's own path.
+#[tokio::test]
+async fn setup_takes_a_calendar_made_in_another_client_by_its_name() {
+    let vault = tempfile::tempdir().unwrap();
+    let mock = MockCaldav::new();
+    let phone = "56de6126-33a4-46fd-a66e-3cc49ad32fe5";
+    mock.seed_collection(phone, "Prova");
+    mock.seed_resource(
+        phone,
+        "from-phone",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:from-phone@tasks.org\r\n\
+         CREATED:20260921T081233Z\r\nLAST-MODIFIED:20260922T101400Z\r\n\
+         SUMMARY:Try the new list\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    );
+    let mut setup_args = args(&vault);
+    setup_args.inbox_collection = Some("personal".to_string());
+    setup_args.todo_collections = Some(vec!["prova".to_string()]);
+    setup_args.collections = Vec::new();
+
+    run_setup(setup_args, mock.clone(), clock(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(mock.collection_names(), vec![phone, "personal"]);
+    let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
+    assert!(
+        todo.contains("- [ ] Try the new list 📁 prova 🆔 restask-"),
+        "{todo}"
+    );
+    assert_eq!(mock.resource_names(phone), vec!["from-phone"]);
 }
 
 #[test]

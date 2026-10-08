@@ -35,11 +35,14 @@ pub struct RemoteResource { pub name: String, pub etag: String, pub task: Remote
 pub trait CaldavPort: Clone + Send + Sync + 'static {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError>;
     async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError>;
-    async fn list_tasks(&self, slug: &ListSlug) -> Result<Option<Vec<RemoteResource>>, RestaskError>;
-    async fn put(&self, task: &Task, name: &str, extras: &[String], wire: &WireNames,
+    async fn list_tasks(&self, collection: &str, list: &ListSlug) -> Result<Option<Vec<RemoteResource>>, RestaskError>;
+    async fn put(&self, task: &Task, collection: &str, name: &str, extras: &[String], wire: &WireNames,
                  if_match: Option<&str>, now: DateTime<Utc>) -> Result<String, RestaskError>;
-    async fn delete(&self, slug: &ListSlug, name: &str, etag: Option<&str>) -> Result<(), RestaskError>;
+    async fn delete(&self, collection: &str, name: &str, etag: Option<&str>) -> Result<(), RestaskError>;
 }
+// `collection` is the path segment below the account, as the listing spells it. For
+// most lists it is the list's slug; which collection a list is, the caller says
+// (`caldav::resolve_list`, §5.4) — the port holds no mapping.
 ```
 
 - **`list_collections`** also returns each collection's change tag (`CS:getctag`,

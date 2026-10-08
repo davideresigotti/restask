@@ -361,7 +361,7 @@ async fn list_tasks_is_one_report_carrying_every_body() {
         _ => RawResponse::status(500),
     }));
     let resources = client(&server.base_url)
-        .list_tasks(&slug("inbox"))
+        .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
         .unwrap();
@@ -388,7 +388,7 @@ async fn list_tasks_is_one_report_carrying_every_body() {
 async fn list_tasks_reports_a_missing_collection_as_none() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
     let listed = client(&server.base_url)
-        .list_tasks(&slug("nowhere"))
+        .list_tasks("nowhere", &slug("nowhere"))
         .await
         .unwrap();
     assert!(listed.is_none());
@@ -406,7 +406,7 @@ async fn list_tasks_fetches_bodies_the_server_did_not_inline() {
         _ => RawResponse::status(500),
     }));
     let resources = client(&server.base_url)
-        .list_tasks(&slug("inbox"))
+        .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
         .unwrap();
@@ -429,7 +429,7 @@ async fn list_tasks_skips_resources_without_a_vtodo() {
     );
     let server = spawn_server(Box::new(move |_request| RawResponse::xml(207, &xml)));
     let resources = client(&server.base_url)
-        .list_tasks(&slug("inbox"))
+        .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
         .unwrap();
@@ -451,6 +451,7 @@ async fn put_replaces_exactly_the_version_the_caller_saw() {
     let pushed = client(&server.base_url)
         .put(
             &sample_task(UID_A, "inbox", "Edited locally"),
+            "inbox",
             UID_A,
             &extras,
             &WireNames::default(),
@@ -487,6 +488,7 @@ async fn put_create_uses_if_none_match_star() {
     let etag = client(&server.base_url)
         .put(
             &sample_task(UID_A, "inbox", "New task"),
+            "inbox",
             UID_A,
             &[],
             &WireNames::default(),
@@ -508,6 +510,7 @@ async fn put_without_an_etag_header_still_succeeds() {
     let etag = client(&server.base_url)
         .put(
             &sample_task(UID_A, "inbox", "New task"),
+            "inbox",
             UID_A,
             &[],
             &WireNames::default(),
@@ -528,6 +531,7 @@ async fn put_precondition_conflict_without_retry() {
     let result = client(&server.base_url)
         .put(
             &sample_task(UID_A, "inbox", "local edit"),
+            "inbox",
             UID_A,
             &[],
             &WireNames::default(),
@@ -577,7 +581,7 @@ async fn server_errors_retry_and_recover() {
         }
     }));
     let resources = client(&server.base_url)
-        .list_tasks(&slug("inbox"))
+        .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
         .unwrap();
@@ -588,7 +592,9 @@ async fn server_errors_retry_and_recover() {
 #[tokio::test]
 async fn server_errors_exhaust_retry_budget() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(429)));
-    let result = client(&server.base_url).list_tasks(&slug("inbox")).await;
+    let result = client(&server.base_url)
+        .list_tasks("inbox", &slug("inbox"))
+        .await;
     match result {
         Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
@@ -626,7 +632,7 @@ async fn network_errors_exhaust_retry_budget() {
 async fn basic_auth_header_is_sent() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
     client(&server.base_url)
-        .list_tasks(&slug("inbox"))
+        .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap();
     let requests = server.requests.lock().unwrap();
@@ -646,7 +652,7 @@ async fn no_password_omits_authorization_header() {
         vec![Duration::ZERO; 3],
     )
     .unwrap();
-    anonymous.list_tasks(&slug("inbox")).await.unwrap();
+    anonymous.list_tasks("inbox", &slug("inbox")).await.unwrap();
     let requests = server.requests.lock().unwrap();
     assert!(requests[0].header("authorization").is_none());
 }
@@ -662,13 +668,10 @@ async fn delete_sends_if_match_and_tolerates_404() {
     }));
     let port_client = client(&server.base_url);
     port_client
-        .delete(&slug("inbox"), UID_A, Some("\"etag-a\""))
+        .delete("inbox", UID_A, Some("\"etag-a\""))
         .await
         .unwrap();
-    port_client
-        .delete(&slug("inbox"), UID_A, None)
-        .await
-        .unwrap();
+    port_client.delete("inbox", UID_A, None).await.unwrap();
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].header("if-match"), Some("\"etag-a\""));
@@ -682,18 +685,42 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
     let task = sample_task(UID_A, "inbox", "Mocked task");
 
     // No collection yet: listing says so, writing fails.
-    assert!(mock.list_tasks(&inbox).await.unwrap().is_none());
     assert!(mock
-        .put(&task, UID_A, &[], &WireNames::default(), None, stamp())
+        .list_tasks(inbox.as_str(), &inbox)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(mock
+        .put(
+            &task,
+            "inbox",
+            UID_A,
+            &[],
+            &WireNames::default(),
+            None,
+            stamp()
+        )
         .await
         .is_err());
 
     mock.seed_collection("inbox", "Inbox");
     let etag = mock
-        .put(&task, UID_A, &[], &WireNames::default(), None, stamp())
+        .put(
+            &task,
+            "inbox",
+            UID_A,
+            &[],
+            &WireNames::default(),
+            None,
+            stamp(),
+        )
         .await
         .unwrap();
-    let listed = mock.list_tasks(&inbox).await.unwrap().unwrap();
+    let listed = mock
+        .list_tasks(inbox.as_str(), &inbox)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(
         (listed[0].name.as_str(), listed[0].etag.as_str()),
@@ -704,7 +731,15 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
     // Creating twice and replacing a stale version are both precondition failures.
     for stale in [None, Some("\"nope\"")] {
         match mock
-            .put(&task, UID_A, &[], &WireNames::default(), stale, stamp())
+            .put(
+                &task,
+                "inbox",
+                UID_A,
+                &[],
+                &WireNames::default(),
+                stale,
+                stamp(),
+            )
             .await
         {
             Err(RestaskError::Caldav {
@@ -717,6 +752,7 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
     let rewritten = mock
         .put(
             &task,
+            "inbox",
             UID_A,
             &[],
             &WireNames::default(),
@@ -727,9 +763,14 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
         .unwrap();
     assert_ne!(etag, rewritten);
 
-    assert!(mock.delete(&inbox, UID_A, Some(&etag)).await.is_err());
-    mock.delete(&inbox, UID_A, Some(&rewritten)).await.unwrap();
-    mock.delete(&inbox, UID_A, None).await.unwrap();
+    assert!(mock
+        .delete(inbox.as_str(), UID_A, Some(&etag))
+        .await
+        .is_err());
+    mock.delete(inbox.as_str(), UID_A, Some(&rewritten))
+        .await
+        .unwrap();
+    mock.delete(inbox.as_str(), UID_A, None).await.unwrap();
     assert!(mock.resource_names("inbox").is_empty());
 }
 
@@ -738,7 +779,7 @@ async fn mock_caldav_scripted_failures_fire_once() {
     let mock = MockCaldav::new();
     let inbox = slug("inbox");
     mock.fail_next(CaldavErrorKind::Network);
-    match mock.list_tasks(&inbox).await {
+    match mock.list_tasks(inbox.as_str(), &inbox).await {
         Err(RestaskError::Caldav {
             kind: CaldavErrorKind::Network,
             ..
@@ -746,5 +787,5 @@ async fn mock_caldav_scripted_failures_fire_once() {
         other => panic!("expected the scripted network failure, got {other:?}"),
     }
     // The script is consumed: the next call succeeds again.
-    assert!(mock.list_tasks(&inbox).await.is_ok());
+    assert!(mock.list_tasks(inbox.as_str(), &inbox).await.is_ok());
 }

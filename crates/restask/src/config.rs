@@ -151,6 +151,10 @@ fn default_inbox_list() -> String {
     "inbox".to_string()
 }
 
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn default_track() -> Vec<String> {
     vec!["**/*.md".to_string()]
 }
@@ -178,6 +182,10 @@ pub struct VaultConfig {
     /// with the calendar's name. Empty: the inbox file holds the tasks of `inbox_list` only.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub todo_lists: Vec<String>,
+    /// Whether a calendar that appears on the server later — made in another client —
+    /// is added to `todo_lists` by the sync node (§7.5). On unless set to `false`.
+    #[serde(skip_serializing_if = "is_true")]
+    pub todo_new_lists: bool,
     /// The vault's name in Obsidian, for the links that open a task's linked notes from
     /// another client (§8.4). `restask setup` records the vault folder's name; absent, no
     /// link is written.
@@ -196,6 +204,7 @@ impl Default for VaultConfig {
             inbox_file: default_inbox_file(),
             inbox_list: default_inbox_list(),
             todo_lists: Vec::new(),
+            todo_new_lists: true,
             obsidian_vault: None,
             track: default_track(),
             ignore: default_ignore(),
