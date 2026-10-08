@@ -554,12 +554,12 @@ async fn setup_records_the_vaults_name_in_obsidian_once() {
 
     // A name the user corrected is kept by the next run.
     let mut cfg = VaultConfig::load(&path).unwrap();
-    cfg.obsidian_vault = Some("2nd-brain".to_string());
+    cfg.obsidian_vault = Some("Obsidian".to_string());
     cfg.save(&path).unwrap();
     run_setup(args(&vault), mock, clock(), None).await.unwrap();
     assert_eq!(
         VaultConfig::load(&path).unwrap().obsidian_vault.as_deref(),
-        Some("2nd-brain")
+        Some("Obsidian")
     );
 }
 

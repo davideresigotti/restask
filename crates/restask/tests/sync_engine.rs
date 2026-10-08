@@ -2970,8 +2970,8 @@ async fn assert_quiet(dir: &TempDir, engine: &Engine<MockCaldav>, mock: &MockCal
     assert_eq!(snapshot(dir), files, "an idempotent pass touches no file");
 }
 
-const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=2nd-brain&file=Dual%20HHD%203d%20printed%20caddy)";
-const ASAHI: &str = "[Asahi](obsidian://open?vault=2nd-brain&file=Asahi%20Linux)";
+const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=Obsidian&file=Dual%20HHD%203d%20printed%20caddy)";
+const ASAHI: &str = "[Asahi](obsidian://open?vault=Obsidian&file=Asahi%20Linux)";
 
 fn retitle(mock: &MockCaldav, name: &str, title: String) {
     edit_logical(mock, "youtube", name, |line| {
@@ -2985,7 +2985,7 @@ fn retitle(mock: &MockCaldav, name: &str, title: String) {
 
 #[tokio::test]
 async fn a_wikilink_reaches_other_clients_as_a_link_into_obsidian() {
-    let dir = youtube_vault(Some("2nd-brain"));
+    let dir = youtube_vault(Some("Obsidian"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -3021,7 +3021,7 @@ async fn a_wikilink_reaches_other_clients_as_a_link_into_obsidian() {
 
 #[tokio::test]
 async fn a_title_changed_in_another_client_keeps_the_links_it_still_shows() {
-    let dir = youtube_vault(Some("2nd-brain"));
+    let dir = youtube_vault(Some("Obsidian"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -3057,7 +3057,7 @@ async fn a_title_changed_in_another_client_keeps_the_links_it_still_shows() {
 
 #[tokio::test]
 async fn a_client_that_drops_the_vault_text_does_not_take_the_links_out_of_the_note() {
-    let dir = youtube_vault(Some("2nd-brain"));
+    let dir = youtube_vault(Some("Obsidian"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -3111,7 +3111,7 @@ async fn a_task_pushed_before_links_were_written_is_written_again_once() {
     write_vault_file(
         &dir,
         "restask.toml",
-        "done_heading = \"Done\"\nobsidian_vault = \"2nd-brain\"\n",
+        "done_heading = \"Done\"\nobsidian_vault = \"Obsidian\"\n",
     );
     let engine = engine(&dir, &mock);
     let (puts, _, _) = mock.counters();

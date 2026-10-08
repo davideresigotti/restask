@@ -731,12 +731,12 @@ fn logical(out: &str) -> Vec<String> {
         .collect()
 }
 
-const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=2nd-brain&file=Dual%20HHD%203d%20printed%20caddy)";
+const CADDY: &str = "[Dual HHD 3d printed caddy](obsidian://open?vault=Obsidian&file=Dual%20HHD%203d%20printed%20caddy)";
 
 #[test]
 fn a_wikilink_is_a_markdown_link_into_obsidian_in_the_title() {
     let task = linked_task("[[Dual HHD 3d printed caddy]]");
-    let out = to_vcalendar_as(&task, now(), &[], &vault("2nd-brain"));
+    let out = to_vcalendar_as(&task, now(), &[], &vault("Obsidian"));
     let lines = logical(&out);
     let at = |prefix: &str| {
         lines
@@ -762,7 +762,7 @@ fn a_wikilink_is_a_markdown_link_into_obsidian_in_the_title() {
     assert_eq!(back.summary, CADDY);
     assert!(back.extras.is_empty(), "{:?}", back.extras);
     assert_eq!(
-        to_vcalendar_as(&back.task, now(), &back.extras, &vault("2nd-brain")),
+        to_vcalendar_as(&back.task, now(), &back.extras, &vault("Obsidian")),
         out
     );
 }
