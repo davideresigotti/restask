@@ -34,3 +34,41 @@ fn writing_to_the_copy_leaves_the_sandbox_untouched() {
 
     assert_eq!(fs::read(&sandbox).unwrap(), before);
 }
+
+/// Settling a copy of the sandbox — registration, repair, TODO.md and the views its
+/// root notes hold (§7.6) — leaves a vault a second settle writes nothing in, whatever
+/// the sandbox's notes say today.
+#[tokio::test]
+async fn settling_the_copy_twice_writes_nothing_the_second_time() {
+    use std::sync::Arc;
+
+    use chrono::{FixedOffset, Utc};
+    use common::FixedClock;
+    use restask::caldav::Offline;
+    use restask::config::{MachineConfig, VaultConfig};
+    use restask::sync::Engine;
+
+    fn files(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, out);
+            } else if let Ok(text) = fs::read_to_string(&path) {
+                out.push((path.display().to_string(), text));
+            }
+        }
+        out.sort();
+    }
+
+    let copy = copy_test_vault();
+    let cfg = VaultConfig::load(&copy.path().join("restask.toml")).unwrap_or_default();
+    let clock = Arc::new(FixedClock(Utc::now(), FixedOffset::east_opt(0).unwrap()));
+    let engine = Engine::new(copy.path(), cfg, MachineConfig::default(), Offline, clock);
+    engine.settle().await.unwrap();
+    let mut first = Vec::new();
+    files(copy.path(), &mut first);
+    engine.settle().await.unwrap();
+    let mut second = Vec::new();
+    files(copy.path(), &mut second);
+    assert_eq!(first, second);
+}

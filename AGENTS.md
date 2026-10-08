@@ -140,7 +140,7 @@ in the commit message.
   it at its next pass" is the fallback for edits made without an integration, never the
   design for one made with it.
 - A change to a local rule (registration, repair, the checkbox, `➕`, section priority,
-  mirror edits, the TODO.md view) is made in the spec, in the engine **and** in the
+  mirror edits, the TODO.md view, the view of a root note) is made in the spec, in the engine **and** in the
   plugin in the same task, with a test on each side for the same input and the same
   expected bytes. Neovim gets it through the CLI: no rule is written in Lua.
 - The engine is the reference. The plugin recognises what the engine recognises (which

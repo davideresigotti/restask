@@ -81,6 +81,8 @@ restask-list-root: Home Lab
 ---
 ```
 
+A root note with a `# TODO` heading shows the prioritized tasks of its whole folder in that section, by priority, like a `TODO.md` of the folder (the rest of the note is left alone).
+
 Unmarked notes are left completely untouched (local-only). Quick tasks live in `TODO.md` → the inbox list. Prioritized tasks from routed notes are mirrored into `TODO.md` automatically, and you can check them off there. Each list syncs with the calendar of the same name (`Home Lab` → `home-lab`), created on first sync.
 
 ```bash

@@ -3436,3 +3436,498 @@ async fn a_calendar_restask_created_itself_is_not_one_that_appeared() {
     assert!(engine.follow_calendars().await.unwrap().is_empty());
     assert_eq!(read(&dir, "restask.toml"), before);
 }
+
+// ── §7.6: the view a root note holds ─────────────────────────────────────────────────
+
+const UID3: &str = "restask-01jz0000000000000000000003";
+const UID4: &str = "restask-01jz0000000000000000000004";
+const UID5: &str = "restask-01jz0000000000000000000005";
+const UID6: &str = "restask-01jz0000000000000000000006";
+const ROOT: &str = "Homelab/Home Lab.md";
+const NET: &str = "Homelab/Networking.md";
+const HIGHEST: &str = "\u{1F53A}";
+const LOW: &str = "\u{1F53D}";
+
+/// A root note as a render leaves it: `above` the view, the `view` itself (sealed by
+/// its own digest, computed here independently of the crate), and what follows it.
+fn root_note(above: &str, view: &str, below: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in view.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!(
+        "---\nrestask-list-root: homelab\nrestask-render: {hash:016x}\n---\n{above}{view}{below}"
+    )
+}
+
+/// The folder of the scenarios below: a root note with prose and tasks of its own, a
+/// note beside it, one in a folder below, and a note outside the folder.
+fn homelab(dir: &TempDir) {
+    write_vault_file(
+        dir,
+        ROOT,
+        &format!(
+            "---\nrestask-list-root: homelab\n---\n# Notes\nprose\n# TODO\n- [ ] buy a rack {ID} {UID}\n- [ ] label the cables {LOW} {ID} {UID2}\n\n## Done\n"
+        ),
+    );
+    write_vault_file(
+        dir,
+        NET,
+        &format!(
+            "# Networking\n\n# TODO\n- [ ] update the firewall {HIGHEST} {ID} {UID3}\n- [ ] rotate the keys {ID} {UID4}\n"
+        ),
+    );
+    write_vault_file(
+        dir,
+        "Homelab/Storage/Disks.md",
+        &format!("- [ ] replace the disk {HIGHEST} {ID} {UID5}\n"),
+    );
+    write_vault_file(
+        dir,
+        "Projects.md",
+        &format!("---\nrestask-list: projects\n---\n# TODO\n- [ ] review {HIGHEST} {ID} {UID6}\n"),
+    );
+}
+
+/// The view of [`homelab`]'s root note once rendered.
+fn homelab_view() -> String {
+    format!(
+        "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {UID2}\n\n## No Priority\n- [ ] buy a rack {ID} {UID}\n\n## Done\n"
+    )
+}
+
+/// §7.6: the TODO section of a root note shows the prioritized tasks of its folder and
+/// below, filed like TODO.md; the rest of the note is the user's, the tasks stay one
+/// task each on the server, TODO.md shows what it showed, and a second pass is quiet.
+#[tokio::test]
+async fn a_root_note_shows_the_prioritized_tasks_of_its_folder() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.failed), (0, 0));
+
+    assert_eq!(
+        read(&dir, ROOT),
+        root_note("# Notes\nprose\n", &homelab_view(), "")
+    );
+    // The notes it shows are as they were.
+    assert!(read(&dir, NET).starts_with("# Networking\n\n# TODO\n- [ ] update the firewall"));
+    // One task each: a mirror line is no task of its own.
+    assert_eq!(
+        mock.resource_names("homelab"),
+        vec![UID, UID2, UID3, UID4, UID5]
+    );
+    assert_eq!(mock.resource_names("projects"), vec![UID6]);
+    // TODO.md shows every prioritized task once; a line of the view links to the view.
+    assert_eq!(
+        read(&dir, "TODO.md"),
+        sealed(&format!(
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] review {HIGHEST} [[Projects#TODO|Projects]] {ID} {UID6}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} [[Home Lab#TODO|Home Lab]] {ID} {UID2}\n\n## Done\n"
+        ))
+    );
+
+    // Converged: nothing is written, nothing is sent.
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (again.pushes, again.registered, again.normalized),
+        (0, 0, 0)
+    );
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}
+
+/// §7.6: what is edited in the view of a root note reaches the task — a mirror line's
+/// checkbox, emoji and text in its own note, a new line typed under a priority's
+/// heading as a task of the root note with that priority.
+#[tokio::test]
+async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let firewall =
+        format!("- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n");
+    let disk = format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n");
+    let note = read(&dir, ROOT);
+    assert!(note.contains(&firewall) && note.contains(&disk), "{note}");
+    let edited = note
+        // Ticked in the view, and a task typed under the same heading.
+        .replace(
+            &firewall,
+            &format!("{}- [ ] order the cables\n", firewall.replace("[ ]", "[x]")),
+        )
+        // Reworded and given another priority.
+        .replace(
+            &disk,
+            &disk
+                .replace("replace the disk", "swap the disk")
+                .replace(HIGHEST, LOW),
+        );
+    write_vault_file(&dir, ROOT, &edited);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.failed), (1, 0));
+
+    let net = read(&dir, NET);
+    assert!(
+        net.contains(&format!(
+            "- [x] update the firewall {HIGHEST} \u{2705} {} {ID} {UID3}",
+            today()
+        )),
+        "{net}"
+    );
+    assert_eq!(
+        read(&dir, "Homelab/Storage/Disks.md"),
+        format!("- [ ] swap the disk {LOW} {ID} {UID5}\n")
+    );
+    let ordered = uid_of(&dir, ROOT, "order the cables");
+    assert_eq!(
+        read(&dir, ROOT),
+        root_note(
+            "# Notes\nprose\n",
+            &format!(
+                "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] order the cables {HIGHEST} {ID} {ordered}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {UID2}\n- [ ] swap the disk {LOW} [[Disks|Disks]] {ID} {UID5}\n\n## No Priority\n- [ ] buy a rack {ID} {UID}\n\n## Done\n"
+            ),
+            ""
+        )
+    );
+    assert!(body(&mock, "homelab", UID3).contains("STATUS:COMPLETED"));
+    assert!(body(&mock, "homelab", UID5).contains("SUMMARY:swap the disk"));
+    assert!(body(&mock, "homelab", &ordered).contains("PRIORITY:1"));
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        !todo.contains("firewall")
+            && todo.contains(&format!(
+                "- [ ] order the cables {HIGHEST} [[Home Lab#TODO|Home Lab]] {ID} {ordered}\n"
+            )),
+        "{todo}"
+    );
+
+    // An own line moved under another section's heading takes that section's priority;
+    // one ticked there is filed under the done heading.
+    let note = read(&dir, ROOT);
+    let rack = format!("- [ ] buy a rack {ID} {UID}\n");
+    let label = format!("- [ ] label the cables {LOW} {ID} {UID2}\n");
+    let moved = note
+        .replace(&rack, "")
+        .replace(&label, &format!("{}{rack}", label.replace("[ ]", "[x]")));
+    write_vault_file(&dir, ROOT, &moved);
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, ROOT);
+    assert!(
+        note.contains(&format!("- [ ] buy a rack {LOW} {ID} {UID}\n")),
+        "{note}"
+    );
+    assert!(
+        note.ends_with(&format!(
+            "## Done\n- [x] label the cables {LOW} \u{2705} {} {ID} {UID2}\n",
+            today()
+        )),
+        "{note}"
+    );
+    assert!(body(&mock, "homelab", UID2).contains("STATUS:COMPLETED"));
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    engine.reconcile().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}
+
+/// §7.6: a mirror line deleted in the view of a root note deletes the task in its note
+/// and on the server — and only then: a view that is merely without the line (cut
+/// short, another render's, its heading gone, no render remembered) deletes nothing.
+#[tokio::test]
+async fn deleting_a_mirror_line_in_a_root_note_deletes_the_task_and_absence_does_not() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, ROOT);
+    let net = read(&dir, NET);
+    let firewall =
+        format!("- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n");
+    let gone = note.replace(&firewall, "");
+    assert_ne!(gone, note);
+
+    let cut_short = gone.replace("\n## Done\n", "\n");
+    let stale = gone.replacen("restask-render: ", "restask-render: 0", 1);
+    for broken in [cut_short, stale] {
+        write_vault_file(&dir, ROOT, &broken);
+        let report = engine.reconcile().await.unwrap();
+        assert_eq!(report.failed, 0, "{broken}");
+        assert_eq!(read(&dir, NET), net, "{broken}");
+        assert!(mock.resource("homelab", UID3).is_some(), "{broken}");
+        assert_eq!(read(&dir, ROOT), note, "{broken}");
+    }
+    // The state dropped (`restask rebuild`): no render is remembered.
+    write_vault_file(&dir, ROOT, &gone);
+    std::fs::remove_dir_all(dir.path().join(".restask/views")).unwrap();
+    engine.reconcile().await.unwrap();
+    assert_eq!(read(&dir, NET), net);
+    assert_eq!(read(&dir, ROOT), note);
+
+    // The user's deletion.
+    write_vault_file(&dir, ROOT, &gone);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.failed, 0);
+    assert_eq!(
+        read(&dir, NET),
+        format!("# Networking\n\n# TODO\n- [ ] rotate the keys {ID} {UID4}\n")
+    );
+    assert!(
+        mock.resource("homelab", UID3).is_none(),
+        "deleted on the server"
+    );
+    assert!(mock.resource("homelab", UID5).is_some());
+    let note = read(&dir, ROOT);
+    assert!(
+        !note.contains("firewall") && note.contains("replace the disk"),
+        "{note}"
+    );
+    assert!(!read(&dir, "TODO.md").contains("firewall"));
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    engine.reconcile().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}
+
+/// §7.6: a mirror line is not a task, wherever it ends up. With the view's heading
+/// renamed the root note holds no view; its mirror lines are then lines of a note that
+/// carry other tasks' UIDs — read as tasks they would be given UIDs of their own and
+/// pushed as a second task each. They are left as they are, and the heading put back
+/// makes the section the view again.
+#[tokio::test]
+async fn the_lines_of_a_view_that_lost_its_heading_are_not_tasks() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let rendered = read(&dir, ROOT);
+    let names = mock.resource_names("homelab");
+
+    for drop_state in [false, true] {
+        let unheaded = rendered.replace("# TODO\n", "# Tasks\n");
+        write_vault_file(&dir, ROOT, &unheaded);
+        if drop_state {
+            std::fs::remove_dir_all(dir.path().join(".restask")).unwrap();
+        }
+        let report = engine.reconcile().await.unwrap();
+        assert_eq!(
+            (report.registered, report.normalized, report.failed),
+            (0, 0, 0)
+        );
+        assert_eq!(read(&dir, ROOT), unheaded, "the note is the user's");
+        assert_eq!(mock.resource_names("homelab"), names);
+        assert!(read(&dir, NET).contains(&format!("{ID} {UID3}")));
+
+        write_vault_file(&dir, ROOT, &rendered);
+        engine.reconcile().await.unwrap();
+        assert_eq!(read(&dir, ROOT), rendered);
+        assert_eq!(mock.resource_names("homelab"), names);
+    }
+
+    // A root note that is one no more — a note of the list like the others — keeps the
+    // lines its view had, and they are still no tasks.
+    let demoted = rendered.replace("restask-list-root: homelab", "restask-list: homelab");
+    write_vault_file(&dir, ROOT, &demoted);
+    write_vault_file(
+        &dir,
+        "Homelab/Index.md",
+        "---\nrestask-list-root: homelab\n---\n",
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.failed),
+        (0, 0, 0)
+    );
+    assert_eq!(read(&dir, ROOT), demoted);
+    assert_eq!(mock.resource_names("homelab"), names);
+}
+
+/// A root note without a `TODO` heading is an ordinary note (§7.6): nothing is filed,
+/// nothing is sealed, its subtasks stay subtasks.
+#[tokio::test]
+async fn a_root_note_without_a_todo_heading_holds_no_view() {
+    let dir = temp_vault();
+    let note = format!(
+        "---\nrestask-list-root: homelab\n---\n# To Do\n- [ ] parent {HIGHEST} {ID} {UID}\n    - [ ] child {ID} {UID2}\nprose\n"
+    );
+    write_vault_file(&dir, ROOT, &note);
+    write_vault_file(
+        &dir,
+        NET,
+        &format!("- [ ] update the firewall {HIGHEST} {ID} {UID3}\n"),
+    );
+    let mock = MockCaldav::new();
+    engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(read(&dir, ROOT), note);
+    assert!(body(&mock, "homelab", UID2).contains(&format!("RELATED-TO;RELTYPE=PARENT:{UID}")));
+    assert!(!dir.path().join(".restask/views").exists());
+}
+
+/// §7.6 is local work (invariant 12): `settle` renders the view with no server, and the
+/// daemon's pass over the result writes no vault file. A root below another root has a
+/// view of its own, and its lines show in the view above.
+#[tokio::test]
+async fn settling_renders_the_views_of_root_notes_without_a_server() {
+    let dir = temp_vault();
+    homelab(&dir);
+    write_vault_file(
+        &dir,
+        "Homelab/Storage/Storage.md",
+        &format!("---\nrestask-list-root: storage\n---\n## Todo\n- [ ] buy disks {HIGHEST}\n"),
+    );
+    let offline = engine_with(&dir, Offline, true);
+    let report = offline.settle().await.unwrap();
+    assert_eq!(report.registered, 1);
+    let bought = uid_of(&dir, "Homelab/Storage/Storage.md", "buy disks");
+
+    let below = read(&dir, "Homelab/Storage/Storage.md");
+    assert!(
+        below.ends_with(&format!(
+            "---\n## Todo\n\n### {HIGHEST} Highest Priority\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] buy disks {HIGHEST} {ID} {bought}\n\n### Done\n"
+        )),
+        "{below}"
+    );
+    let above = read(&dir, ROOT);
+    assert!(
+        above.contains(&format!(
+            "- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] buy disks {HIGHEST} [[Storage#Todo|Storage]] {ID} {bought}\n"
+        )),
+        "{above}"
+    );
+    assert!(
+        !dir.path().join(".restask/index.json").exists(),
+        "no sync state"
+    );
+
+    // A second settle is quiet, and so is the pass of the daemon — on the vault.
+    let files = snapshot(&dir);
+    offline.settle().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+    let mock = MockCaldav::new();
+    let notes = [
+        ROOT,
+        NET,
+        "Homelab/Storage/Storage.md",
+        "Homelab/Storage/Disks.md",
+        "TODO.md",
+    ];
+    let before: Vec<SystemTime> = notes.iter().map(|path| mtime(&dir, path)).collect();
+    let report = engine(&dir, &mock).reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.failed),
+        (0, 0, 0)
+    );
+    let after: Vec<SystemTime> = notes.iter().map(|path| mtime(&dir, path)).collect();
+    assert_eq!(after, before);
+    // The note below the lower root is that root's.
+    assert_eq!(
+        mock.resource_names("storage"),
+        vec![UID5.to_string(), bought]
+    );
+}
+
+/// §7.6: a task made on the server in the list of a root note gets its line in the view
+/// (the root note is the list's home), filed by its priority; one completed there
+/// leaves the view of the root note when it lives in another note.
+#[tokio::test]
+async fn server_changes_show_in_the_view_of_a_root_note() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    mock.seed_resource(
+        "homelab",
+        "from-the-phone",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nUID:from-the-phone\r\nSUMMARY:order a UPS\r\nPRIORITY:1\r\nSTATUS:NEEDS-ACTION\r\nCREATED:20260920T101500Z\r\nLAST-MODIFIED:20260920T101500Z\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    );
+    complete_remotely(&mock, "homelab", UID3, Duration::seconds(0));
+    engine.reconcile().await.unwrap();
+
+    let ups = uid_of(&dir, ROOT, "order a UPS");
+    let note = read(&dir, ROOT);
+    assert!(
+        note.contains(&format!(
+            "## {HIGHEST} Highest Priority\n- [ ] order a UPS {HIGHEST} {ID} {ups}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n\n"
+        )),
+        "{note}"
+    );
+    assert!(read(&dir, NET).contains("- [x] update the firewall"));
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    engine.reconcile().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}
+
+/// §7.6: the rest of a root note is a note. A task ticked above the view is stamped and
+/// moved under the done heading — which is the view's — and is a line of the view's own
+/// from then on: it is kept, and completed on the server. (Read as the view of a task
+/// elsewhere, because its UID was a line outside the view a moment ago, the render
+/// dropped it.) Its subtask above the view stays where it is.
+#[tokio::test]
+async fn a_task_ticked_above_the_view_of_a_root_note_is_kept_under_its_done_heading() {
+    let dir = temp_vault();
+    let note = |boxed: &str| {
+        format!(
+            "---\nrestask-list-root: homelab\n---\n# Notes\n- [{boxed}] rack the switch {HIGHEST} {ID} {UID}\n    - [ ] find the screws {ID} {UID2}\n# TODO\n\n## Done\n"
+        )
+    };
+    write_vault_file(&dir, ROOT, &note(" "));
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    // Outside the view nothing is filed: the lines stand where they were written.
+    assert_eq!(
+        read(&dir, ROOT),
+        root_note(
+            &format!("# Notes\n- [ ] rack the switch {HIGHEST} {ID} {UID}\n    - [ ] find the screws {ID} {UID2}\n"),
+            "# TODO\n\n## Done\n",
+            ""
+        )
+    );
+    assert!(body(&mock, "homelab", UID2).contains(&format!("RELATED-TO;RELTYPE=PARENT:{UID}")));
+
+    write_vault_file(
+        &dir,
+        ROOT,
+        &read(&dir, ROOT).replace("- [ ] rack", "- [x] rack"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.failed, 0);
+    let done = format!(
+        "- [x] rack the switch {HIGHEST} \u{2705} {} {ID} {UID}\n",
+        today()
+    );
+    assert_eq!(
+        read(&dir, ROOT),
+        root_note(
+            &format!("# Notes\n    - [ ] find the screws {ID} {UID2}\n"),
+            &format!("# TODO\n\n## Done\n{done}"),
+            ""
+        )
+    );
+    assert!(body(&mock, "homelab", UID).contains("STATUS:COMPLETED"));
+    assert!(mock.resource("homelab", UID2).is_some());
+
+    let files = snapshot(&dir);
+    let (puts, deletes, _) = mock.counters();
+    engine.reconcile().await.unwrap();
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
+}

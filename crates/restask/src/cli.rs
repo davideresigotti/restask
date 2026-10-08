@@ -1166,7 +1166,7 @@ fn print_status(vault: &Path, clock: Arc<dyn Clock>, json: bool) -> Result<i32, 
 }
 
 /// Drops the sync state (§13.3 `restask rebuild`): the index, the base snapshots and the
-/// remembered TODO.md render. Tombstones stay, so deleted tasks are not resurrected. The
+/// remembered renders — of TODO.md and of the views root notes hold (§7.6). Tombstones stay, so deleted tasks are not resurrected. The
 /// next sync starts from "nothing agreed yet": equal content settles silently, differing
 /// content is merged as a conflict (the vault wins unless the server copy is newer).
 fn run_rebuild(vault: &Path) -> Result<i32, RestaskError> {
@@ -1185,10 +1185,12 @@ fn run_rebuild(vault: &Path) -> Result<i32, RestaskError> {
             Err(error) => return Err(error.into()),
         }
     }
-    match std::fs::remove_dir_all(state_dir.join("tasks")) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+    for dir in ["tasks", crate::sync::engine::VIEWS_DIR] {
+        match std::fs::remove_dir_all(state_dir.join(dir)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     println!("dropped the sync state of {known} task(s); run `restask sync` to re-derive it");
     Ok(0)

@@ -1,7 +1,8 @@
-//! Markdown grammar, mutation, and TODO.md view (§6–§7). Pure string processing — no I/O.
+//! Markdown grammar, mutation, the TODO.md view and the views of root notes (§6–§7). Pure string processing — no I/O.
 
 pub mod mutator;
 pub mod parser;
+pub mod root_view;
 pub mod todo_view;
 
 pub use parser::{parse, parse_line, ParsedFile, ParsedTask, TaskDraft};

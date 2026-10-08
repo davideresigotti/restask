@@ -51,6 +51,9 @@ pub struct Snapshots {
     /// The Obsidian vault the notes linked from a task open in (`vault.obsidian_vault`,
     /// §8.4); `None` writes no links.
     pub obsidian_vault: Option<String>,
+    /// Tasks whose line is in the view of a root note (§7.6): flat, like the lines of the
+    /// inbox file — their indentation names no parent.
+    pub flat: BTreeSet<TaskUid>,
 }
 
 /// The mutation plan for one reconciliation pass (§11.1).
@@ -536,9 +539,12 @@ impl<'a> Context<'a> {
     }
 
     /// Whether the vault decides `local`'s parent: only for active tasks in notes, where
-    /// indentation expresses nesting. The done region and TODO.md are flat.
+    /// indentation expresses nesting. The done region, TODO.md and the view of a root
+    /// note are flat.
     fn parent_authoritative(&self, local: &Task) -> bool {
-        local.status == Status::Active && local.source.path != self.s.inbox_file
+        local.status == Status::Active
+            && local.source.path != self.s.inbox_file
+            && !self.s.flat.contains(&local.uid)
     }
 
     /// R3 precondition: the task was settled, the collection it was settled in was

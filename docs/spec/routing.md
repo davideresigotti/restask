@@ -23,6 +23,9 @@ restask-list-root: Home Lab     # list "Home Lab" for THIS folder, recursively;
 A note may carry both: `restask-list` wins for the note; `restask-list-root` still
 declares the folder.
 
+A root note also *shows* its folder: its TODO section is a view of the prioritized tasks
+of every note in the folder and below (§7.6).
+
 **Hidden files and folders are not part of the vault.** A file or directory whose name
 starts with `.` is never walked, at any depth and whatever `track` says: no frontmatter
 is read there, no folder is declared from there, no line is registered there. Such

@@ -67,6 +67,7 @@ A note takes part in syncing only when you route it. Notes you don't route are n
 
 - **A single note**: add `restask-list: University` to its frontmatter and its tasks go to the list `University`.
 - **A whole folder**: add `restask-list-root: Home Lab` to a note and it becomes the folder's root note. Every note below it is routed to that list. The nearest root wins.
+- **A root note shows its folder.** Give it a `# TODO` heading and that section becomes the folder's own `TODO.md`: every prioritized task of the notes in the folder and below, by priority, next to the root note's own tasks. It works like `TODO.md` — tick, edit or delete a line there and the task follows in its note. The rest of the note stays yours; a root note without the heading is left alone.
 - **`TODO.md`** goes to the inbox list, the calendar that receives new tasks (`inbox_list` in `restask.toml`, chosen during `restask setup`).
 - A list is a collection on your server, created on first sync (`Home Lab` → `home-lab`). `restask lists` shows them all.
 - A task created in Tasks.org or Thunderbird lands in the list's root note, or in `TODO.md` for the inbox. From then on, changes on either side update the other.

@@ -33,8 +33,11 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import { uidToken } from "./conceal";
 import {
 	TASK_START,
+	declaresRoot,
 	disclaimed,
 	inTodoSection,
+	inView,
+	isMirrorShaped,
 	isSealed,
 	mirrorSource,
 	mirrored,
@@ -43,8 +46,10 @@ import {
 	routesItself,
 	settled,
 	splices,
+	viewOf,
 	type NoteKind,
 	type Splice,
+	type View,
 } from "./filing";
 import { bodyStart, checkOffset, parseLine } from "./markdown";
 
@@ -393,7 +398,11 @@ export interface FilingHost {
 	enabled(): boolean;
 	/** Whether a new line in a TODO section starts with a checkbox (the `startTasks` setting, §15.7). */
 	startsTasks(): boolean;
-	/** Whether the note in `state` is the vault's TODO.md view (§7): the file at the inbox path, whatever it contains. */
+	/**
+	 * Whether the note in `state` is the vault's TODO.md view (§7): the file at the inbox
+	 * path, whatever it contains. The view a root note holds (§7.6) is found in the note
+	 * itself and is not asked for here.
+	 */
 	isInboxView(state: EditorState): boolean;
 	/** Whether the note in `state` is routed by a `restask-list-root` of its folder or one above (§5.2). */
 	inheritsList(state: EditorState): boolean;
@@ -405,8 +414,9 @@ export interface FilingHost {
 	uid(): string;
 	/**
 	 * Carries what the user changed on a mirror line to the source note of the task `uid`
-	 * (§7.1); `state` is the TODO.md view, `was` the line before the edit (undefined when
-	 * unknown: only a checked box is carried then) and `now` the line after it.
+	 * (§7.1); `state` is the view — TODO.md, or a root note (§7.6) — `was` the line
+	 * before the edit (undefined when unknown: only a checked box is carried then) and
+	 * `now` the line after it.
 	 */
 	carryMirror(state: EditorState, uid: string, was: string | undefined, now: string): Promise<Carried>;
 	/**
@@ -420,7 +430,7 @@ export interface FilingHost {
 	 * out of its note goes back there.
 	 */
 	mirrorReturned(state: EditorState, uid: string): void;
-	/** Tells the plugin that the task `uid` of the note in `state` was edited or deleted: the view follows (§7). */
+	/** Tells the plugin that the task `uid` of the note in `state` was edited or deleted: the views that show it follow (§7, §7.6). */
 	noteTaskSettled(state: EditorState, uid: string): void;
 }
 
@@ -456,7 +466,7 @@ function rewrite(state: EditorState, after: readonly string[]): TransactionSpec 
 function routedKind(state: EditorState, lines: readonly string[], host: FilingHost): NoteKind | undefined {
 	const inboxView = host.isInboxView(state);
 	if (!inboxView && !routesItself(lines) && !host.inheritsList(state)) return undefined;
-	return { inboxView, doneHeading: host.doneHeading() };
+	return { inboxView, doneHeading: host.doneHeading(), root: !inboxView && declaresRoot(lines) };
 }
 
 /** How the note in `state` takes part (§15.6), or undefined when it does not, or not on this device. */
@@ -520,7 +530,7 @@ export interface Filing {
 	inboxView: boolean;
 	/** The UID of the task on the line. */
 	uid?: string;
-	/** `true` for a mirror line of the view: its edits belong in the source note (§7.1). */
+	/** `true` for a mirror line of a view — TODO.md, or the one a root note holds: its edits belong in the source note (§7.1). */
 	mirror: boolean;
 	/** The line as it is now, for a mirror line. */
 	now?: string;
@@ -574,14 +584,15 @@ export function carriedSpec(state: EditorState, uid: string, outcome: Carried, h
 	if (outcome === "failed") return undefined;
 	const lines = state.doc.toJSON();
 	const note = noteKind(state, lines, host);
-	if (note === undefined || !note.inboxView) return undefined;
-	const idx = lines.findIndex((line) => parseLine(line)?.draft.uid === uid);
+	const view = note === undefined ? undefined : viewOf(lines, note);
+	if (note === undefined || view === undefined) return undefined;
+	const idx = lines.findIndex((line, i) => inView(view, i) && parseLine(line)?.draft.uid === uid);
 	const draft = idx < 0 ? undefined : parseLine(lines[idx])?.draft;
 	if (draft === undefined) return undefined;
 	let after: string[] | undefined;
 	if (outcome === "carried") {
 		// Until the view is sealed again, a line the plugin took out must not read as the user's deletion (§7.1).
-		if (draft.checked || draft.priority === undefined) after = disclaimed(removed(lines, idx));
+		if (draft.checked || draft.priority === undefined) after = disclaimed(removed(lines, idx, view));
 	} else if (draft.checked) {
 		after = settled(lines, idx, note, host.today(), () => host.uid(), true)?.lines;
 	}
@@ -591,14 +602,30 @@ export function carriedSpec(state: EditorState, uid: string, outcome: Carried, h
 /** The view with `line` — the mirror line of a task the note has changed since, deleted from the view — put back (§7.1), or undefined. */
 export function restoredSpec(state: EditorState, uid: string, line: string, host: FilingHost): TransactionSpec | undefined {
 	const lines = state.doc.toJSON();
-	if (noteKind(state, lines, host)?.inboxView !== true) return undefined;
-	const after = mirrored(lines, uid, line);
+	const view = viewIn(state, lines, host);
+	if (view === undefined) return undefined;
+	const after = mirrored(lines, uid, line, false, view);
 	return after === undefined ? undefined : rewrite(state, after);
 }
 
-/** The view sealed again (§7.2), or undefined when its seal is right or it has none. */
-export function sealSpec(state: EditorState): TransactionSpec | undefined {
-	return rewrite(state, resealed(state.doc.toJSON()));
+/** The view the note in `state` holds — TODO.md, or the TODO section of a root note (§7.6) — when this device settles tasks. */
+function viewIn(state: EditorState, lines: readonly string[], host: FilingHost): View | undefined {
+	const note = noteKind(state, lines, host);
+	return note === undefined ? undefined : viewOf(lines, note);
+}
+
+/** `true` when the note in `state` holds a view that is exactly as some device rendered it (§7.2). */
+export function sealedView(state: EditorState, host: FilingHost): boolean {
+	const lines = state.doc.toJSON();
+	const view = viewIn(state, lines, host);
+	return view !== undefined && isSealed(lines, view);
+}
+
+/** The view sealed again (§7.2), or undefined when its seal is right or the note has none. */
+export function sealSpec(state: EditorState, host: FilingHost): TransactionSpec | undefined {
+	const lines = state.doc.toJSON();
+	const view = viewIn(state, lines, host);
+	return view === undefined ? undefined : rewrite(state, resealed(lines, view));
 }
 
 /** Lines one paste may hand to the filer; the daemon settles what is beyond. */
@@ -642,10 +669,11 @@ const UID_TOKEN = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
  * task on such a line once the cursor has left it or the editor lost the focus — at
  * once when the edit was the checkbox itself. A line still being typed in is never
  * touched, and only lines edited in this editor are: the rest of the note stays the
- * daemon's job. A mirror line deleted from the TODO.md view deletes the task in its
- * note, and the task goes back there when the line returns (§7.1). In the view it also
- * keeps the seal (§7.2): a view that was sealed when it was loaded is sealed again once
- * every edit made in it has been settled and has reached its note.
+ * daemon's job. A mirror line deleted from a view — TODO.md, or the one a root note
+ * holds (§7.6) — deletes the task in its note, and the task goes back there when the
+ * line returns (§7.1). In a view it also keeps the seal (§7.2): a view that was sealed
+ * when it was loaded is sealed again once every edit made in it has been settled and
+ * has reached its note.
  */
 export function taskFiling(host: FilingHost): Extension {
 	return ViewPlugin.fromClass(
@@ -664,7 +692,7 @@ export function taskFiling(host: FilingHost): Extension {
 
 			constructor(view: EditorView) {
 				this.view = view;
-				this.pure = isSealed(view.state.doc.toJSON());
+				this.pure = sealedView(view.state, host);
 			}
 
 			update(update: ViewUpdate): void {
@@ -683,7 +711,7 @@ export function taskFiling(host: FilingHost): Extension {
 					if (update.transactions.some(typed)) this.remember(update);
 					// What is on disk, or what history brings back, is taken as it is.
 					else if (!update.transactions.some((tr) => tr.annotation(filing) === true)) {
-						this.pure = isSealed(update.state.doc.toJSON());
+						this.pure = sealedView(update.state, host);
 					}
 				}
 				const waiting = this.touched.length > 0 || this.gone.length > 0;
@@ -769,8 +797,9 @@ export function taskFiling(host: FilingHost): Extension {
 					if (result.uid === undefined) continue;
 					// A moved mirror line carries the priority it took from its section (§7.4).
 					const was = result.was ?? line.was;
-					if (!result.inboxView) host.noteTaskSettled(view.state, result.uid);
-					else if (result.mirror && result.now !== undefined && result.now !== was) this.carry(result.uid, was, result.now);
+					if (result.mirror) {
+						if (result.now !== undefined && result.now !== was) this.carry(result.uid, was, result.now);
+					} else if (!result.inboxView) host.noteTaskSettled(view.state, result.uid);
 				}
 				this.seal();
 			}
@@ -785,7 +814,8 @@ export function taskFiling(host: FilingHost): Extension {
 				if (note === undefined) return;
 				for (const task of gone) {
 					if (state.doc.toString().includes(task.uid)) continue;
-					if (!note.inboxView) {
+					// In a note the line was the task — but for a mirror line in the view of a root note (§7.6).
+					if (!note.inboxView && !(note.root === true && isMirrorShaped(task.line))) {
 						host.noteTaskSettled(state, task.uid);
 						continue;
 					}
@@ -829,7 +859,7 @@ export function taskFiling(host: FilingHost): Extension {
 			/** Seals the view again when it was sealed and nothing made in it is still on its way (§7.2). */
 			private seal(): void {
 				if (!this.pure || this.pending > 0 || this.touched.length > 0 || this.gone.length > 0) return;
-				const spec = sealSpec(this.view.state);
+				const spec = sealSpec(this.view.state, host);
 				if (spec !== undefined) this.view.dispatch(spec);
 			}
 		},

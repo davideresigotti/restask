@@ -24,7 +24,7 @@ use crate::domain::{
 };
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
-use crate::markdown::todo_view;
+use crate::markdown::{root_view, todo_view};
 use crate::store::cache as base_store;
 use crate::store::calendars::Calendars;
 use crate::store::index::{Index, IndexEntry};
@@ -36,6 +36,10 @@ use crate::{CaldavErrorKind, RestaskError};
 /// The engine's own last render of TODO.md, kept under `.restask/`. Comparing the live
 /// file against it tells what the user edited in the view (§7).
 pub const RENDERED_FILE: &str = "todo.rendered.md";
+
+/// The engine's own last renders of the views root notes hold (§7.6), one file per root
+/// note under `.restask/`: what [`RENDERED_FILE`] is for TODO.md.
+pub const VIEWS_DIR: &str = "views";
 
 /// Tombstones older than this are pruned (§9.1).
 const TOMBSTONE_TTL_DAYS: i64 = 365;
@@ -194,7 +198,7 @@ impl<C: CaldavPort> Engine<C> {
             .await;
 
         // 3 — record: the view first, then the state.
-        let mut tasks = if progress.vault_changed {
+        let scan = if progress.vault_changed {
             vault::scan(
                 &self.vault,
                 &self.cfg,
@@ -202,10 +206,10 @@ impl<C: CaldavPort> Engine<C> {
                 &index,
                 ScanMode::ReadOnly,
             )?
-            .local
         } else {
-            scan.local
+            scan
         };
+        let mut tasks = scan.local;
         if let Some(plan) = &progress.plan {
             for task in &plan.inbox_inserts {
                 tasks
@@ -214,6 +218,7 @@ impl<C: CaldavPort> Engine<C> {
             }
         }
         self.render(&tasks)?;
+        self.render_views(&tasks, &scan.views, &scan.unreadable)?;
         if let Some(plan) = progress.plan {
             self.record(plan, progress.pushed, &mut index, &mut tombstones, now)?;
         }
@@ -235,6 +240,7 @@ impl<C: CaldavPort> Engine<C> {
         let index = Index::load(&self.state_dir)?;
         let scan = self.scan_local(&index, &mut report)?;
         self.render(&scan.local)?;
+        self.render_views(&scan.local, &scan.views, &scan.unreadable)?;
         Ok(report)
     }
 
@@ -276,6 +282,7 @@ impl<C: CaldavPort> Engine<C> {
         let mut tasks = scan.local;
         tasks.insert(task.uid.clone(), task.clone());
         self.render(&tasks)?;
+        self.render_views(&tasks, &scan.views, &scan.unreadable)?;
         self.sync_after_local_change().await?;
         Ok(task)
     }
@@ -332,9 +339,10 @@ impl<C: CaldavPort> Engine<C> {
 
     // ── phase 1: local ────────────────────────────────────────────────────────────────
 
-    /// Scans and repairs the vault, then carries edits made on TODO.md mirror lines to
-    /// their source notes and gives lines moved to another section of TODO.md their new
-    /// priority (rescanning when that changed anything).
+    /// Scans and repairs the vault, then carries edits made on mirror lines — of TODO.md
+    /// and of the views root notes hold (§7.6) — to their source notes and gives lines
+    /// moved to another section of a view their new priority (rescanning when that
+    /// changed anything).
     fn scan_local(
         &self,
         index: &Index,
@@ -367,6 +375,22 @@ impl<C: CaldavPort> Engine<C> {
             ),
             _ => BTreeMap::new(),
         };
+        for (path, contents) in &first.views {
+            let Ok(remembered) = std::fs::read_to_string(self.view_file(path)) else {
+                continue;
+            };
+            let carried = root_view::mirror_edits(
+                contents,
+                &remembered,
+                path,
+                &first.local,
+                &self.cfg,
+                self.clock.today_local(),
+            );
+            for (target, ops) in carried {
+                edits.entry(target).or_default().extend(ops);
+            }
+        }
         // A line that asks for its creation date gets it here, before anything renders
         // or pushes the task (§6.4).
         for (uid, path) in &first.created_requests {
@@ -421,6 +445,7 @@ impl<C: CaldavPort> Engine<C> {
             inbox_list: Some(inbox_list),
             todo_lists,
             obsidian_vault: self.cfg.obsidian_vault.clone(),
+            flat: scan.flat.clone(),
         };
         let plan = progress.plan.insert(planner::plan(&snapshots));
 
@@ -739,6 +764,61 @@ impl<C: CaldavPort> Engine<C> {
         }
         std::fs::create_dir_all(&self.state_dir)?;
         fsio::write_if_changed(&self.state_dir.join(RENDERED_FILE), &rendered)?;
+        Ok(())
+    }
+
+    /// Where the engine keeps its last render of the view of the root note at `path`.
+    fn view_file(&self, path: &str) -> PathBuf {
+        self.state_dir
+            .join(VIEWS_DIR)
+            .join(format!("{}.md", todo_view::digest(path)))
+    }
+
+    /// Renders the views root notes hold (§7.6) and remembers each render. `views` is
+    /// the scan's: every root note with a view, as the text its tasks were read from. A
+    /// note that is no longer that text — an editor or the file sync wrote it meanwhile
+    /// — is left for the next pass: rendered from an older reading, the view would drop
+    /// what was typed into it since. Nothing is written when the content is unchanged.
+    /// A remembered render is dropped once its note is gone or holds no view any more;
+    /// `unreadable` are the notes this pass could not read, of which nothing is known.
+    fn render_views(
+        &self,
+        tasks: &BTreeMap<TaskUid, Task>,
+        views: &BTreeMap<String, String>,
+        unreadable: &BTreeSet<String>,
+    ) -> Result<(), RestaskError> {
+        let dir = self.state_dir.join(VIEWS_DIR);
+        for (path, contents) in views {
+            let Some(rendered) = root_view::render(contents, path, tasks, &self.cfg) else {
+                continue;
+            };
+            let note = self.vault.join(path);
+            if std::fs::read_to_string(&note).ok().as_ref() != Some(contents) {
+                tracing::info!(path = %path, "note changed during the pass; its view is rendered on the next one");
+                continue;
+            }
+            if rendered != *contents {
+                fsio::write_atomic(&note, &rendered)?;
+                tracing::info!(path = %path, "view_rendered");
+            }
+            if let Some(remembered) = root_view::remembered(&rendered, path, &self.cfg) {
+                std::fs::create_dir_all(&dir)?;
+                fsio::write_if_changed(&self.view_file(path), &remembered)?;
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(());
+        };
+        for entry in entries {
+            let file = entry?.path();
+            let kept = std::fs::read_to_string(&file).is_ok_and(|remembered| {
+                root_view::remembered_path(&remembered)
+                    .is_some_and(|path| views.contains_key(path) || unreadable.contains(path))
+            });
+            if !kept {
+                std::fs::remove_file(&file)?;
+            }
+        }
         Ok(())
     }
 

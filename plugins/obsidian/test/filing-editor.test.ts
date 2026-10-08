@@ -4,8 +4,8 @@
 
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
-import { arrived, carriedSpec, filingOf, restoredSpec, sealSpec, uidGuard, type Carried, type FilingHost } from "../src/editor";
-import { isSealed } from "../src/filing";
+import { arrived, carriedSpec, filingOf, restoredSpec, sealSpec, sealedView, uidGuard, type Carried, type FilingHost } from "../src/editor";
+import { digest, isSealed } from "../src/filing";
 
 const TODAY = "2026-10-02";
 const U = "restask-01jzq4tsvg2c9xkw7n5m8rhdpa";
@@ -248,15 +248,15 @@ describe("§7.2 the seal, in the editor", () => {
 
 	it("is renewed in place after the view was edited, and left alone when right or absent", () => {
 		const state = editor(`|${head}restask-render: 0000000000000000\n---\n# TODO\n\n## No Priority\n- [ ] mine${A}\n\n## Done\n`);
-		const spec = sealSpec(state);
+		const spec = sealSpec(state, HOST);
 		expect(spec).toBeDefined();
 		if (spec === undefined) return;
 		const sealed = state.update(spec).state;
 		expect(isSealed(sealed.doc.toJSON())).toBe(true);
 		expect(sealed.doc.lines).toBe(state.doc.lines);
 		expect(sealed.doc.toString()).not.toContain("<!--");
-		expect(sealSpec(sealed)).toBeUndefined();
-		expect(sealSpec(editor(`|${VIEW}## Done\n`))).toBeUndefined();
+		expect(sealSpec(sealed, HOST)).toBeUndefined();
+		expect(sealSpec(editor(`|${VIEW}## Done\n`), HOST)).toBeUndefined();
 	});
 });
 
@@ -282,5 +282,66 @@ describe("§7 the view is the file at the inbox path, whatever a note contains",
 		expect(result?.inboxView).toBe(true);
 		if (result?.spec === undefined) return;
 		expect(show(state.update(result.spec).state)).toContain(`## No Priority\n- [ ] buy milk 🆔 ${U}\n`);
+	});
+});
+
+describe("§7.6 the view a root note holds, in the editor", () => {
+	const ROOT = "---\nrestask-list-root: homelab\nrestask-render: 0123456789abcdef\n---\n# Notes\nprose\n# TODO\n\n";
+	const theirs = `- [ ] theirs 🔺 [[Networking#TODO|Networking]]${A}`;
+
+	it("files a line typed in the view like a line of TODO.md, and leaves the rest of the note alone", () => {
+		expect(file(`|${ROOT}## 🔺 Highest Priority\n${theirs}\n→- [ ] order the cables\n\n## Done\n`)).toBe(
+			`|${ROOT}## 🔺 Highest Priority\n${theirs}\n- [ ] order the cables 🔺 🆔 ${U}\n\n## Done\n`,
+		);
+		expect(file(`|${ROOT}→- [ ] loose\n## Done\n`)).toBe(`|${ROOT}## No Priority\n- [ ] loose 🆔 ${U}\n\n## Done\n`);
+		// Above the view the note is a note: registered where it is.
+		expect(file(`|${ROOT.replace("prose\n", "→- [ ] above\n")}## Done\n`)).toBe(`|${ROOT.replace("prose\n", `- [ ] above 🆔 ${U}\n`)}## Done\n`);
+	});
+
+	it("tells a mirror line from a line of the note's own", () => {
+		const state = editor(`|${ROOT}## 🔺 Highest Priority\n${theirs.replace("[ ]", "[x]")}\n- [x] mine 🔺 🆔 ${U}\n\n## Done\n`);
+		const line = (text: string): number => state.doc.toString().indexOf(text);
+		// A ticked mirror line is a completion to carry to its note; the document waits for the answer.
+		expect(filingOf(state, line("- [x] theirs"), HOST)).toMatchObject({ mirror: true, inboxView: false, uid: A.slice(4) });
+		expect(filingOf(state, line("- [x] theirs"), HOST)?.spec).toBeUndefined();
+		// A ticked line of the note's own is stamped and filed under the view's done heading.
+		const mine = filingOf(state, line("- [x] mine"), HOST);
+		expect(mine).toMatchObject({ mirror: false, inboxView: false, uid: U });
+		expect(mine?.spec === undefined ? undefined : state.update(mine.spec).state.doc.toString()).toBe(
+			`${ROOT}## 🔺 Highest Priority\n${theirs.replace("[ ]", "[x]")}\n\n## Done\n- [x] mine 🔺 ✅ ${TODAY} 🆔 ${U}\n`,
+		);
+	});
+
+	it("takes a carried mirror line out of the view, the seal claiming no render", () => {
+		const state = editor(`|${ROOT}## 🔺 Highest Priority\n${theirs.replace("[ ]", "[x]")}\n\n## Done\n`);
+		const spec = carriedSpec(state, A.slice(4), "carried", HOST);
+		expect(spec).toBeDefined();
+		if (spec === undefined) return;
+		expect(state.update(spec).state.doc.toString()).toBe(`${ROOT.replace("0123456789abcdef", "0000000000000000")}## Done\n`);
+		// A line with that UID outside the view is the note's business, not the view's.
+		expect(carriedSpec(editor(`|${ROOT.replace("prose\n", `${theirs.replace("[ ]", "[x]")}\n`)}## Done\n`), A.slice(4), "carried", HOST)).toBeUndefined();
+	});
+
+	it("puts a deleted mirror line back when the note wins, and seals the section alone", () => {
+		const state = editor(`|${ROOT}## Done\n\n# Links\nmore\n`);
+		const spec = restoredSpec(state, A.slice(4), theirs, HOST);
+		expect(spec).toBeDefined();
+		if (spec === undefined) return;
+		const restored = state.update(spec).state;
+		expect(restored.doc.toString()).toBe(`${ROOT}## 🔺 Highest Priority\n${theirs}\n\n## Done\n\n# Links\nmore\n`);
+		expect(sealedView(restored, HOST)).toBe(false);
+		const seal = sealSpec(restored, HOST);
+		expect(seal).toBeDefined();
+		if (seal === undefined) return;
+		const sealed = restored.update(seal).state;
+		expect(sealedView(sealed, HOST)).toBe(true);
+		expect(sealed.doc.line(3).text).toBe(`restask-render: ${digest(`# TODO\n\n## 🔺 Highest Priority\n${theirs}\n\n## Done\n\n`)}`);
+		expect(sealSpec(sealed, HOST)).toBeUndefined();
+		// Prose typed outside the view leaves it sealed.
+		const typed = sealed.update({ changes: { from: sealed.doc.length, insert: "and more\n" } }).state;
+		expect(sealedView(typed, HOST)).toBe(true);
+		// A note without a view has no seal to keep.
+		expect(sealSpec(editor(`|${NOTE}- [ ] x\n`), HOST)).toBeUndefined();
+		expect(sealedView(editor(`|${NOTE}- [ ] x\n`), HOST)).toBe(false);
 	});
 });

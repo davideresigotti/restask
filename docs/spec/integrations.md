@@ -131,6 +131,14 @@ by its path as in the engine (§7) and by nothing it contains; in a vault withou
 note whose own frontmatter carries `restask-list` or `restask-list-root` (§5.1,
 line-scanned like the engine); a note in or below a folder
 holding a note with `restask-list-root` (§5.2, from Obsidian's frontmatter cache).
+A root note among them holds a view of its own (§7.6): its TODO section, found in the
+note's text as the engine finds it (`viewOf`), in which a line is settled as a line of
+TODO.md is — everything below about "the view" holds for it, with the section's own
+heading rank, the vault's done heading and the seal over the section alone — while the
+rest of the note is a note. A mirror line there is told from a line of the note's own by
+its exact shape (`isMirrorShaped`). What a note's task changes is brought to every view
+that shows it: TODO.md and the root notes of its folder and of the folders above
+(`syncMirrors`), and an edit carried from one view reaches the others in the same step.
 `track`/`ignore` are not consulted. And only on a device the `settleTasks` setting
 names: `always` (default) every device, `mobile` the mobile app only, `never` none. The
 settings file rides the file sync, so the value is shared by all devices of the vault.
@@ -305,8 +313,9 @@ The local work (invariant 12) is the engine's own, run when a buffer is written.
   `checktime`, so every buffer the CLI rewrote — the note, TODO.md in another window —
   shows the result ('autoread', Neovim's default, reloads an unmodified buffer without
   asking; the reload is one undo step). That is all of §6.4 and §7 at once: lines
-  registered, a checked box stamped and moved, the view filed and sealed, an edit or a
-  deletion made in the view carried to its note. No daemon and no network take part,
+  registered, a checked box stamped and moved, the views filed and sealed — TODO.md and
+  the one each root note holds (§7.6) —, an edit or a deletion made in a view carried
+  to its note. No daemon and no network take part,
   and what is left is what the daemon's pass would leave. The CLI is waited for
   (milliseconds; given up after 5 s), so the buffer cannot change between the write and
   the reload. A missing binary is reported once per session, a failed run each time.

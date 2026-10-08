@@ -16,6 +16,7 @@ use crate::domain::{Clock, ListSlug, LocalDate, SourceRef, Status, Task, TaskUid
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::parser::{link_parents, ParsedTask};
+use crate::markdown::root_view::{self, Section};
 use crate::markdown::todo_view::{looks_like_mirror, section_priority};
 use crate::markdown::{self};
 use crate::router::{scan_frontmatter, NoteMeta, NoteRouting, Router};
@@ -69,6 +70,14 @@ pub struct Scan {
     /// UID → vault-relative path of the file the line is in. A line registered in this
     /// scan is not among them: it got today's date with its UID.
     pub created_requests: BTreeMap<TaskUid, String>,
+    /// Root notes that hold a view (§7.6): vault-relative path → the note's text as this
+    /// scan read it, its own repairs included. The line numbers of the tasks in `local`
+    /// are lines of this text, so a render is made from it — and written only while the
+    /// note still is this text.
+    pub views: BTreeMap<String, String>,
+    /// Tasks whose line is a view's own (§7.6): a view is flat, so their indentation
+    /// says nothing about a parent — as for the lines of the inbox file.
+    pub flat: BTreeSet<TaskUid>,
 }
 
 /// One routed file loaded for scanning.
@@ -78,6 +87,24 @@ struct Loaded {
     contents: String,
     /// The file's mtime when `contents` was read.
     read_at: Option<SystemTime>,
+    /// The view the note holds, when it is a root note with a TODO section (§7.6).
+    view: Option<Section>,
+}
+
+/// `true` when a line of the note `file_no` is a mirror line that strayed (§7.6): it
+/// has the exact shape of one, and its UID is owned by a line of another note — the
+/// task it shows. Such a line is no task, wherever it is: a view that lost its heading,
+/// a root note that is one no more, a line pasted out of a view. Read as a task it
+/// would be the copy of another line and be given a UID of its own — a second task.
+fn is_stray_mirror(
+    task: &ParsedTask,
+    file_no: usize,
+    owner: &BTreeMap<TaskUid, (usize, usize)>,
+) -> bool {
+    task.draft.uid.as_ref().is_some_and(|uid| {
+        owner.get(uid).is_some_and(|(holder, _)| *holder != file_no)
+            && root_view::is_mirror_shaped(&task.raw)
+    })
 }
 
 /// Writes a repaired note back — unless the file changed on disk since it was read (an
@@ -107,7 +134,9 @@ fn write_back(vault: &Path, file: &Loaded, contents: &str) -> Result<bool, Resta
 /// * a line sharing its UID with an earlier line (a duplicated line) gets its own UID;
 /// * a checked line outside the done region is stamped `✅` and moved under the done
 ///   heading; an unchecked line inside it is restored to the active region — so checking
-///   a box in any editor behaves like the plugin command.
+///   a box in any editor behaves like the plugin command;
+/// * in the view of a root note, as in the inbox file, only identity is repaired and a
+///   new line takes the priority of its section: placement is the render's (§7.6).
 ///
 /// `index` breaks duplicate-UID ties: the note the index knows as the task's source
 /// keeps the UID.
@@ -174,11 +203,20 @@ pub fn scan(
                 continue;
             }
         };
+        // A root note shows its folder in its TODO section (§7.6); the inbox file is a
+        // view already.
+        let root = !is_inbox
+            && meta
+                .folder_list
+                .as_deref()
+                .is_some_and(|name| ListSlug::from_name(name).is_ok());
+        let view = root.then(|| root_view::section(&contents, cfg)).flatten();
         let file = Loaded {
             path: meta.path.clone(),
             list,
             contents,
             read_at,
+            view,
         };
         if is_inbox {
             inbox = Some(file);
@@ -205,39 +243,64 @@ pub fn scan(
     scan.files_scanned = loaded.len() + usize::from(inbox.is_some());
 
     // Pass 3 — duplicate UIDs across notes: the index's source note (else the first
-    // occurrence in path order) owns the UID.
+    // occurrence in path order) owns the UID. The lines in the view of a root note are
+    // not asked: a mirror line there has the UID of the task it shows (pass 5). Nor
+    // does a line with the shape of a mirror line take a UID from a line without it:
+    // it is the view of that line, strayed out of its view.
     let mut owner: BTreeMap<TaskUid, (usize, usize)> = BTreeMap::new();
+    let mut shaped: BTreeSet<TaskUid> = BTreeSet::new();
     let parsed: Vec<Vec<ParsedTask>> = loaded
         .iter()
         .map(|file| markdown::parse(&file.contents, cfg).tasks)
         .collect();
     for (file_no, tasks) in parsed.iter().enumerate() {
+        let view = loaded[file_no].view.as_ref();
         for task in tasks {
+            if view.is_some_and(|view| view.holds(task.line_no)) {
+                continue;
+            }
             let Some(uid) = &task.draft.uid else {
                 continue;
             };
             let preferred = index
                 .get(uid)
                 .is_some_and(|entry| entry.source_path == loaded[file_no].path);
-            match owner.get(uid) {
-                None => {
-                    owner.insert(uid.clone(), (file_no, task.line_no));
-                }
+            let mirror = root_view::is_mirror_shaped(&task.raw);
+            let takes = match owner.get(uid) {
+                None => true,
                 Some((held_by, _)) => {
                     let held_preferred = index
                         .get(uid)
                         .is_some_and(|entry| entry.source_path == loaded[*held_by].path);
-                    if preferred && !held_preferred {
-                        owner.insert(uid.clone(), (file_no, task.line_no));
-                    }
+                    let held_mirror = shaped.contains(uid);
+                    (held_mirror && !mirror)
+                        || (held_mirror == mirror && preferred && !held_preferred)
+                }
+            };
+            if takes {
+                owner.insert(uid.clone(), (file_no, task.line_no));
+                if mirror {
+                    shaped.insert(uid.clone());
+                } else {
+                    shaped.remove(uid);
                 }
             }
         }
     }
 
-    // Pass 4 — repair and collect, note by note.
+    // Pass 4 — repair and collect, note by note. A root note with a view waits for
+    // pass 5: what its view shows is known only once the other notes are read.
     let today = clock.today_local();
+    let mut rooted: Vec<(usize, Vec<ParsedTask>)> = Vec::new();
     for (file_no, (file, tasks)) in loaded.iter().zip(parsed).enumerate() {
+        if file.view.is_some() {
+            rooted.push((file_no, tasks));
+            continue;
+        }
+        let tasks: Vec<ParsedTask> = tasks
+            .into_iter()
+            .filter(|task| !is_stray_mirror(task, file_no, &owner))
+            .collect();
         let duplicate = |task: &ParsedTask| {
             task.draft
                 .uid
@@ -255,7 +318,8 @@ pub fn scan(
                 .filter(|task| !duplicate(task))
                 .collect::<Vec<_>>(),
             ScanMode::Repair => {
-                let ops = repairs(&tasks, &duplicate, today, true);
+                let (mut ops, status) = repairs(&tasks, &duplicate, today, true);
+                ops.extend(status);
                 if ops.is_empty() {
                     tasks
                 } else {
@@ -266,7 +330,11 @@ pub fn scan(
                         continue;
                     }
                     count_repairs(&mut scan, &out.applied, &file.path);
-                    markdown::parse(&out.contents, cfg).tasks
+                    markdown::parse(&out.contents, cfg)
+                        .tasks
+                        .into_iter()
+                        .filter(|task| !is_stray_mirror(task, file_no, &owner))
+                        .collect()
                 }
             }
         };
@@ -279,7 +347,129 @@ pub fn scan(
         }
     }
 
-    // Pass 5 — the inbox file: its own tasks are sources, mirror lines are views.
+    // Pass 5 — the root notes that hold a view (§7.6), the deepest folder first: a
+    // view shows the own lines of the views below it. A line in a view is a source or a
+    // view of another note's task, as in the inbox file; the rest of the note is a note.
+    rooted
+        .sort_by_key(|(file_no, _)| std::cmp::Reverse(loaded[*file_no].path.matches('/').count()));
+    for (file_no, tasks) in rooted {
+        let file = &loaded[file_no];
+        let duplicate = |task: &ParsedTask| {
+            task.draft
+                .uid
+                .as_ref()
+                .is_some_and(|uid| owner.get(uid) != Some(&(file_no, task.line_no)))
+        };
+        // The lines of the note in three kinds: outside the view, the view's own, and
+        // — third — the own lines that repeat a UID of an earlier one (copies).
+        let sort = |tasks: &[ParsedTask], view: &Section, local: &BTreeMap<TaskUid, Task>| {
+            // A line of this note claims a UID while it stands outside the view: one
+            // that a repair has just moved into it (checked, under the done heading) is
+            // a line of the view's own now, not the view of a task elsewhere.
+            let beside: BTreeSet<&TaskUid> = tasks
+                .iter()
+                .filter(|task| !view.holds(task.line_no))
+                .filter(|task| !is_stray_mirror(task, file_no, &owner))
+                .filter_map(|task| task.draft.uid.as_ref())
+                .collect();
+            let claimed = |uid: &TaskUid| {
+                owner.get(uid).is_some_and(|(holder, _)| *holder != file_no)
+                    || beside.contains(uid)
+                    || local.contains_key(uid)
+            };
+            let mut outside = Vec::new();
+            let mut own = Vec::new();
+            let mut copies: BTreeSet<usize> = BTreeSet::new();
+            let mut seen: BTreeSet<TaskUid> = BTreeSet::new();
+            for task in tasks {
+                if !view.holds(task.line_no) {
+                    if !is_stray_mirror(task, file_no, &owner) {
+                        outside.push(task.clone());
+                    }
+                } else if !is_view_of_task(task, &file.path, &claimed, index) {
+                    if let Some(uid) = &task.draft.uid {
+                        if !seen.insert(uid.clone()) {
+                            copies.insert(task.line_no);
+                        }
+                    }
+                    own.push(task.clone());
+                }
+            }
+            (outside, own, copies)
+        };
+        let Some(view) = &file.view else {
+            continue;
+        };
+        let (outside, own, copies) = sort(&tasks, view, &scan.local);
+        for task in outside.iter().filter(|task| duplicate(task)) {
+            if let Some(uid) = &task.draft.uid {
+                scan.duplicates.push((uid.clone(), file.path.clone()));
+            }
+        }
+        let (contents, outside, own, view) = match mode {
+            ScanMode::ReadOnly => (
+                file.contents.clone(),
+                outside
+                    .into_iter()
+                    .filter(|task| !duplicate(task))
+                    .collect::<Vec<_>>(),
+                own.into_iter()
+                    .filter(|task| !copies.contains(&task.line_no))
+                    .collect::<Vec<_>>(),
+                view.clone(),
+            ),
+            ScanMode::Repair => {
+                // Outside the view the note is repaired like any note; inside it only
+                // identity is, and a new line takes its section's priority (§7.4).
+                let (mut ops, status) = repairs(&outside, &duplicate, today, true);
+                let copied = |task: &ParsedTask| copies.contains(&task.line_no);
+                let (identity, _) = repairs(&own, &copied, today, false);
+                let ranked = section_ranks(&identity, &own);
+                ops.extend(identity);
+                ops.extend(ranked);
+                ops.extend(status);
+                if ops.is_empty() {
+                    (file.contents.clone(), outside, own, view.clone())
+                } else {
+                    let out = mutator::apply(&file.contents, &ops, cfg, clock)?;
+                    if !write_back(vault, file, &out.contents)? {
+                        // Its tasks are unknown this pass (not gone): decide nothing.
+                        scan.unreadable.insert(file.path.clone());
+                        continue;
+                    }
+                    count_repairs(&mut scan, &out.applied, &file.path);
+                    let Some(view) = root_view::section(&out.contents, cfg) else {
+                        scan.unreadable.insert(file.path.clone());
+                        continue;
+                    };
+                    let tasks = markdown::parse(&out.contents, cfg).tasks;
+                    let (outside, own, _) = sort(&tasks, &view, &scan.local);
+                    (out.contents, outside, own, view)
+                }
+            }
+        };
+        let mtime = file_mtime(&vault.join(&file.path))?;
+        let parents = link_parents(&outside);
+        for (task, parent) in outside.iter().zip(parents) {
+            collect(
+                &mut scan, task, parent, &file.path, &file.list, mtime, today,
+            );
+        }
+        for mut task in own {
+            // A mirror line of the task links to the view, not to the section of it the
+            // task happens to be filed in.
+            task.heading = Some(view.title.clone());
+            if let Some(uid) = &task.draft.uid {
+                if !scan.local.contains_key(uid) {
+                    scan.flat.insert(uid.clone());
+                }
+            }
+            collect(&mut scan, &task, None, &file.path, &file.list, mtime, today);
+        }
+        scan.views.insert(file.path.clone(), contents);
+    }
+
+    // Pass 6 — the inbox file: its own tasks are sources, mirror lines are views.
     if let Some(file) = inbox {
         let tasks = markdown::parse(&file.contents, cfg).tasks;
         let views: BTreeSet<usize> = tasks
@@ -307,25 +497,8 @@ pub fn scan(
                     .cloned()
                     .collect();
                 let duplicate = |task: &ParsedTask| duplicates.contains(&task.line_no);
-                let mut ops = repairs(&own, &duplicate, today, false);
-                // A line typed under a priority's heading takes that priority as it is
-                // registered (§7.4); one that names a priority itself keeps its own.
-                let ranked: Vec<Mutation> = ops
-                    .iter()
-                    .filter_map(|op| match op {
-                        Mutation::Register { line_no, uid, .. } => own
-                            .iter()
-                            .find(|task| task.line_no == *line_no)
-                            .filter(|task| task.draft.priority.is_none())
-                            .and_then(|task| task.heading.as_deref())
-                            .and_then(section_priority)
-                            .map(|priority| Mutation::SetPriority {
-                                uid: uid.clone(),
-                                priority: Some(priority),
-                            }),
-                        _ => None,
-                    })
-                    .collect();
+                let (mut ops, _) = repairs(&own, &duplicate, today, false);
+                let ranked = section_ranks(&ops, &own);
                 ops.extend(ranked);
                 if ops.is_empty() {
                     tasks
@@ -402,14 +575,57 @@ fn is_view_of_note(
     }
 }
 
-/// The repair mutations for one file's task lines: identity first (line-number based),
-/// then — when `placement` — status/placement fixes (UID based).
+/// `true` when a line in the view of the root note at `path` is a rendered view of
+/// another note's task rather than a task of the root note (§7.6): its UID is claimed
+/// by a line outside the view — in another note, or in this one — or, no line claiming
+/// it, it is a mirror line as a render writes one and the index does not know the task
+/// as this note's: the leftover of a task that is gone. A line that merely ends in a
+/// wikilink is a task of the note: someone may have moved it here.
+fn is_view_of_task(
+    task: &ParsedTask,
+    path: &str,
+    claimed: &dyn Fn(&TaskUid) -> bool,
+    index: &Index,
+) -> bool {
+    let Some(uid) = &task.draft.uid else {
+        return false;
+    };
+    claimed(uid)
+        || (root_view::is_mirror_shaped(&task.raw)
+            && index.get(uid).is_none_or(|entry| entry.source_path != path))
+}
+
+/// The priorities the lines registered by `identity` take from the section of the view
+/// they were typed in (§7.4): a line under a priority's heading gets that priority; one
+/// that names a priority itself keeps its own.
+fn section_ranks(identity: &[Mutation], own: &[ParsedTask]) -> Vec<Mutation> {
+    identity
+        .iter()
+        .filter_map(|op| match op {
+            Mutation::Register { line_no, uid, .. } => own
+                .iter()
+                .find(|task| task.line_no == *line_no)
+                .filter(|task| task.draft.priority.is_none())
+                .and_then(|task| task.heading.as_deref())
+                .and_then(section_priority)
+                .map(|priority| Mutation::SetPriority {
+                    uid: uid.clone(),
+                    priority: Some(priority),
+                }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The repair mutations for one file's task lines, in two batches: identity
+/// (line-number based, so it is applied first), and — when `placement` —
+/// status/placement fixes (UID based).
 fn repairs(
     tasks: &[ParsedTask],
     duplicate: &dyn Fn(&ParsedTask) -> bool,
     today: LocalDate,
     placement: bool,
-) -> Vec<Mutation> {
+) -> (Vec<Mutation>, Vec<Mutation>) {
     let mut identity = Vec::new();
     let mut status = Vec::new();
     for task in tasks {
@@ -474,8 +690,7 @@ fn repairs(
             _ => {}
         }
     }
-    identity.extend(status);
-    identity
+    (identity, status)
 }
 
 /// Books applied repairs into the scan counters and the log.

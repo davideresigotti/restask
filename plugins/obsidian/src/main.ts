@@ -31,7 +31,9 @@ import { stripUid } from "./conceal";
 import { taskFiling, taskStart, uidConcealment, type Carried, type DroppedMirror, type FilingHost } from "./editor";
 import {
 	completedByUid,
+	declaresRoot,
 	disclaimed,
+	inView,
 	isSealed,
 	mirrorDropped,
 	mirrorEdited,
@@ -39,12 +41,15 @@ import {
 	mirrorSource,
 	mirrored,
 	putBack,
+	refiled,
 	removed,
 	resealed,
 	routesItself,
 	settled,
+	taskIndex,
 	toggledLines,
 	uidGenerator,
+	viewOf,
 	type NoteKind,
 } from "./filing";
 import { checkOffset, parseLine } from "./markdown";
@@ -258,7 +263,7 @@ export default class RestaskPlugin extends Plugin {
 				const note = fileOf(state);
 				if (note === undefined) return;
 				const lines = state.doc.toJSON();
-				void this.queued(() => this.syncMirror(note, lines, uid), undefined);
+				void this.queued(() => this.syncMirrors(note, lines, uid), undefined);
 			},
 		};
 	}
@@ -292,7 +297,26 @@ export default class RestaskPlugin extends Plugin {
 	private noteKind(file: TFile, lines: readonly string[]): NoteKind | undefined {
 		const inboxView = file.path === this.inboxPath;
 		if (!inboxView && !routesItself(lines) && !this.inheritsList(file)) return undefined;
-		return { inboxView, doneHeading: this.settings.doneHeading };
+		return { inboxView, doneHeading: this.settings.doneHeading, root: !inboxView && declaresRoot(lines) };
+	}
+
+	/**
+	 * The files whose view shows the tasks of `note` (§7, §7.6): the root notes of its
+	 * folder and of the folders above it — read from Obsidian's frontmatter cache — and
+	 * TODO.md. Never `note` itself, nor the file `except`.
+	 */
+	private async viewsOf(note: TFile, except?: string): Promise<TFile[]> {
+		const views: TFile[] = [];
+		const inbox = await this.inboxFile();
+		for (let folder = note.parent; folder !== null && note.path !== inbox?.path; folder = folder.parent) {
+			for (const child of folder.children) {
+				if (!(child instanceof TFile) || child.extension !== "md") continue;
+				const root: unknown = this.app.metadataCache.getFileCache(child)?.frontmatter?.["restask-list-root"];
+				if ((typeof root === "string" && root.trim() !== "") || typeof root === "number") views.push(child);
+			}
+		}
+		if (inbox !== undefined) views.push(inbox);
+		return views.filter((view) => view.path !== note.path && view.path !== except);
 	}
 
 	/** Replaces the content of `file` by `next` if it still is `expected`; `false` when something else got there first. */
@@ -337,8 +361,8 @@ export default class RestaskPlugin extends Plugin {
 			if (!text.includes(uid) || text.includes("\r")) return undefined;
 			const lines = text.split("\n");
 			if (this.noteKind(note, lines)?.inboxView !== false) return undefined;
-			const has = lines.some((line) => parseLine(line)?.draft.uid === uid);
-			return has ? { note, text, lines } : undefined;
+			// A mirror line in the view of a root note is not the task (§7.6).
+			return taskIndex(lines, uid, this.settings.doneHeading) >= 0 ? { note, text, lines } : undefined;
 		};
 		const linked = stem === undefined ? null : this.app.metadataCache.getFirstLinkpathDest(stem, view.path);
 		if (linked instanceof TFile && !tried.has(linked.path)) {
@@ -377,7 +401,27 @@ export default class RestaskPlugin extends Plugin {
 			lines = completed ?? lines;
 		}
 		if (lines === found.lines) return "carried";
-		return (await this.rewrite(found.note, found.text, lines.join("\n"))) ? "carried" : "failed";
+		lines = this.ownLineSettled(found.note, found.lines, lines, uid);
+		if (!(await this.rewrite(found.note, found.text, lines.join("\n")))) return "failed";
+		await this.syncMirrors(found.note, lines, uid, view.path);
+		return "carried";
+	}
+
+	/**
+	 * A source note the plugin has edited the task `uid` in, `before` and `after` the
+	 * edit: when the task is a line in the view of a root note (§7.6) it is filed in the
+	 * section it now belongs to, and a view that was sealed is sealed again — the edit is
+	 * the plugin's own, carried from another view.
+	 */
+	private ownLineSettled(note: TFile, before: readonly string[], after: string[], uid: string): string[] {
+		const kind = this.noteKind(note, before);
+		const sealed = kind !== undefined && isSealed(before, viewOf(before, kind));
+		if (kind?.root !== true || viewOf(before, kind) === undefined) return after;
+		let lines = after;
+		const at = taskIndex(lines, uid, this.settings.doneHeading);
+		const view = viewOf(lines, kind);
+		if (at >= 0 && inView(view, at)) lines = refiled(lines, at, true, view) ?? lines;
+		return sealed ? resealed(lines, viewOf(lines, kind)) : lines;
 	}
 
 	/** Deletes the task `uid` from its source note: its mirror line `line` was deleted from the view (§7.1). */
@@ -386,8 +430,14 @@ export default class RestaskPlugin extends Plugin {
 		const dropped = found === undefined ? undefined : mirrorDropped(found.lines, uid, line, found.note.basename, this.settings.doneHeading);
 		if (found === undefined || dropped === undefined) return "unclaimed";
 		if ("restore" in dropped) return dropped;
-		if (!(await this.rewrite(found.note, found.text, dropped.lines.join("\n")))) return "failed";
+		// A line of a view's own takes a section it leaves empty with it, as the render would (§7.6).
+		const kind = this.noteKind(found.note, found.lines);
+		const shown = kind === undefined ? undefined : viewOf(found.lines, kind);
+		const without = inView(shown, dropped.index) ? removed(found.lines, dropped.index, shown) : dropped.lines;
+		const lines = this.ownLineSettled(found.note, found.lines, without, uid);
+		if (!(await this.rewrite(found.note, found.text, lines.join("\n")))) return "failed";
 		this.dropped.set(uid, { path: found.note.path, index: dropped.index, line: dropped.line });
+		await this.syncMirrors(found.note, lines, uid, view.path);
 		return "deleted";
 	}
 
@@ -399,29 +449,42 @@ export default class RestaskPlugin extends Plugin {
 		if (was === undefined || !(note instanceof TFile)) return;
 		const text = await this.app.vault.read(note);
 		if (text.includes("\r")) return;
-		const after = putBack(text.split("\n"), uid, was.index, was.line);
-		if (after !== undefined) await this.rewrite(note, text, after.join("\n"));
+		const before = text.split("\n");
+		const put = putBack(before, uid, was.index, was.line);
+		if (put === undefined) return;
+		const after = this.ownLineSettled(note, before, put, uid);
+		if (await this.rewrite(note, text, after.join("\n"))) await this.syncMirrors(note, after, uid);
 	}
 
 	/**
-	 * Brings the TODO.md view in line with the task `uid` of `note` (§7), whose current
+	 * Brings the views that show the tasks of `note` — TODO.md (§7) and the root notes
+	 * above it (§7.6) — in line with its task `uid`; `lines` is the note's current text.
+	 * `except` is a view that has the change already: the one it was made in.
+	 */
+	private async syncMirrors(note: TFile, lines: readonly string[], uid: string, except?: string): Promise<void> {
+		for (const file of await this.viewsOf(note, except)) await this.syncMirror(file, note, lines, uid);
+	}
+
+	/**
+	 * Brings the view in `file` in line with the task `uid` of `note`, whose current
 	 * text is `lines`: its mirror line is added when the task is active and has a
 	 * priority, removed when it is not, and — in a sealed view, which stays sealed
 	 * (§7.2) — rewritten when the task changed.
 	 */
-	private async syncMirror(note: TFile, lines: readonly string[], uid: string): Promise<void> {
-		const inbox = await this.inboxFile();
-		if (inbox === undefined || inbox.path === note.path) return;
-		const text = await this.app.vault.read(inbox);
+	private async syncMirror(file: TFile, note: TFile, lines: readonly string[], uid: string): Promise<void> {
+		const text = await this.app.vault.read(file);
 		if (text.includes("\r")) return;
-		const view = text.split("\n");
-		const sealed = isSealed(view);
+		const shown = text.split("\n");
+		const kind = this.noteKind(file, shown);
+		const view = kind === undefined ? undefined : viewOf(shown, kind);
+		if (kind === undefined || view === undefined) return;
+		const sealed = isSealed(shown, view);
 		const line = mirrorLine(lines, uid, note.basename, this.settings.doneHeading);
-		const after = mirrored(view, uid, line, sealed);
+		const after = mirrored(shown, uid, line, sealed, view);
 		if (after === undefined) return;
 		// A line taken out of a view that stays unsealed must not read as the user's deletion (§7.1).
-		const next = sealed ? resealed(after) : line === undefined ? disclaimed(after) : after;
-		await this.rewrite(inbox, text, next.join("\n"));
+		const next = sealed ? resealed(after, viewOf(after, kind)) : line === undefined ? disclaimed(after) : after;
+		await this.rewrite(file, text, next.join("\n"));
 	}
 
 	/** A tap on a checkbox in reading view (§15.6): what the note looks like once Obsidian has handled it is settled. */
@@ -450,6 +513,9 @@ export default class RestaskPlugin extends Plugin {
 		const today = localToday(new Date());
 		const result = settled(lines, idx, note, today, this.newUid);
 		if (result === undefined) return;
+		const beforeLines = before.split("\n");
+		const sealedBefore = isSealed(beforeLines, viewOf(beforeLines, note));
+		const shown = viewOf(lines, note);
 		// Obsidian saves the tap itself; the settled note replaces exactly that version.
 		await view.save();
 		let after = result.lines;
@@ -459,14 +525,15 @@ export default class RestaskPlugin extends Plugin {
 			const outcome = await this.carryMirror(file, result.carry, undefined, lines[idx]);
 			if (outcome === "failed") return;
 			tookOut = outcome === "carried";
-			after = outcome === "carried" ? removed(lines, idx) : settled(lines, idx, note, today, this.newUid, true)?.lines;
+			after = outcome === "carried" ? removed(lines, idx, shown) : settled(lines, idx, note, today, this.newUid, true)?.lines;
 		}
 		// The tap broke the seal of a sealed view; with the tap settled it is a render again (§7.2).
-		if (note.inboxView && isSealed(before.split("\n"))) after = resealed(after ?? lines);
+		if (shown !== undefined && sealedBefore) after = resealed(after ?? lines, viewOf(after ?? lines, note));
 		// A line taken out of a view that stays unsealed must not read as the user's deletion (§7.1).
 		else if (tookOut) after = disclaimed(after ?? lines);
 		if (after !== undefined && !(await this.rewrite(file, text, after.join("\n")))) return;
-		if (!note.inboxView && result.uid !== undefined) await this.syncMirror(file, after ?? lines, result.uid);
+		// A task of the note — a line of its own in the view of a root note too — shows in the views above it.
+		if (!note.inboxView && result.mirror !== true && result.uid !== undefined) await this.syncMirrors(file, after ?? lines, result.uid);
 	}
 
 	private async loadSettings(): Promise<void> {

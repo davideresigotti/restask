@@ -10,8 +10,9 @@ A pass has three phases. They are ordered so that dying at any point leaves a st
 next pass repairs.
 
 1. **Local** — needs no server, always runs.
-   Scan and repair the routed notes (§6.4). Carry edits made on TODO.md mirror lines to
-   their source notes (§7.1) and rescan if that changed anything.
+   Scan and repair the routed notes (§6.4). Carry edits made on mirror lines — of
+   TODO.md (§7.1) and of the views root notes hold (§7.6) — to their source notes, and
+   rescan if that changed anything.
 2. **Remote.**
    a. Snapshot: one `REPORT` per list in scope, at the collection that is the list's
       (§5.4: its own path, else by name from one listing per pass that needs it). A
@@ -23,7 +24,8 @@ next pass repairs.
       succeeded.
 3. **Record.**
    Re-render TODO.md from the vault as it is now (plus tasks the plan placed in the
-   inbox), then persist the state: a base + index entry for every task that was settled
+   inbox), then the view of every root note that holds one (§7.6), then persist the
+   state: a base + index entry for every task that was settled
    or successfully written, defer counters, forgotten UIDs, tombstones.
 
 If the server is unreachable, phase 1 and the render still happen and the error is

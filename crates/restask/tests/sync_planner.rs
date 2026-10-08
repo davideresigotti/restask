@@ -526,6 +526,20 @@ fn the_servers_parent_is_kept_where_the_vault_cannot_express_one() {
         .remote(resource(&theirs, T0 + 5, "\"e2\""), "inbox")
         .plan();
     assert!(p.puts.is_empty(), "the parent is not stripped");
+
+    // So is a line in the view of a root note (§7.6): an active task of a note, but in
+    // a section the render files flat.
+    let mut filed = task(4, "home", "filed child");
+    let mut theirs = filed.clone();
+    theirs.parent = Some(uid(1));
+    let mut world = World::new()
+        .local(&filed)
+        .remote(resource(&theirs, T0, "\"e1\""), "home");
+    world.s.flat.insert(filed.uid.clone());
+    let p = world.plan();
+    assert!(p.puts.is_empty(), "the parent is not stripped");
+    assert_eq!(p.settled[0].task.parent, Some(uid(1)));
+    filed.parent = None;
 }
 
 // ── R3: deleted on the server ─────────────────────────────────────────────────────────

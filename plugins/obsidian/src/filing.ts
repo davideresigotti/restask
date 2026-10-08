@@ -72,8 +72,24 @@ function withPriority(line: string, priority: Priority | undefined): string | un
 	return `${line.slice(0, found.index)}${put}${line.slice(found.index + found[0].length)}`;
 }
 
+/**
+ * How a view is laid out: TODO.md (§7), or the view a root note holds in its TODO
+ * section (§7.6) — the same sections under headings of another rank, closed by the
+ * vault's done heading.
+ */
+export interface Layout {
+	/** The `#`s of the view's section headings. */
+	hashes: string;
+	/** Text of the heading the view's completed tasks stand under. */
+	done: string;
+	/** Whether a line of the view has the shape of a mirror line. */
+	mirror: (raw: string) => boolean;
+}
+
 /** The view's sections in render order (§7). */
-const SECTIONS: readonly string[] = [...PRIORITIES.map(prioritySection), NO_PRIORITY_SECTION, DONE_SECTION];
+function sectionsOf(layout: Layout): readonly string[] {
+	return [...PRIORITIES.map(prioritySection), NO_PRIORITY_SECTION, layout.done];
+}
 
 // Crockford base32, lowercase (§3.1).
 const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -151,12 +167,38 @@ function looksLikeMirror(raw: string): boolean {
 	return before.endsWith("]]") && before.includes("[[");
 }
 
+/** TODO.md's layout (§7). */
+const INBOX: Layout = { hashes: "##", done: DONE_SECTION, mirror: looksLikeMirror };
+
+/**
+ * `true` when `raw` is a mirror line as a render writes one (§7), ticked since or not:
+ * with a priority, and ending in the link to its note — `[[<stem>|<stem>]]` or
+ * `[[<stem>#<heading>|<stem>]]` — right before the `🆔` token. In a root note the
+ * shape, not a mere wikilink at the end of the text, tells a mirror line from a task of
+ * the note (§7.6; the engine's `is_mirror_shaped`).
+ */
+export function isMirrorShaped(raw: string): boolean {
+	const draft = parseLine(raw)?.draft;
+	if (draft?.uid === undefined) return false;
+	const tail = new RegExp(`\\]\\][ \\t]*🆔[ \\t]*${draft.uid}[ \\t]*$`, "u").exec(raw);
+	if (tail === null) return false;
+	const before = raw.slice(0, tail.index);
+	const open = before.lastIndexOf("[[");
+	const bar = before.lastIndexOf("|");
+	if (open < 0 || bar < open) return false;
+	const stem = before.slice(open + 2, bar).split("#")[0];
+	// The priority stands in front of the link, where the render writes it.
+	return stem !== "" && stem === before.slice(bar + 1) && !/[[\]]/.test(stem) && parseLine(before.slice(0, open))?.draft.priority !== undefined;
+}
+
 interface Heading {
 	idx: number;
 	text: string;
+	/** Rank of the heading: the number of its `#`s. */
+	level: number;
 }
 
-const HEADING_RE = /^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/;
+const HEADING_RE = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 const FENCE_RE = /^\s*(`{3,}|~{3,})/;
 
 /** Index of the first line after the frontmatter block (§5.1), 0 when there is none. */
@@ -181,9 +223,79 @@ function headings(lines: readonly string[]): Heading[] {
 			continue;
 		}
 		const heading = HEADING_RE.exec(lines[idx]);
-		if (heading !== null) found.push({ idx, text: heading[1] });
+		if (heading !== null) found.push({ idx, text: heading[2], level: heading[1].length });
 	}
 	return found;
+}
+
+/**
+ * `true` when the note's own frontmatter declares `restask-list-root` (§5.1) with a
+ * name a list can be made of: a root note.
+ */
+export function declaresRoot(lines: readonly string[]): boolean {
+	const end = bodyStartLine(lines);
+	for (let i = 1; i < end - 1; i++) {
+		const colon = lines[i].indexOf(":");
+		if (colon >= 0 && lines[i].slice(0, colon).trim() === "restask-list-root") return /[0-9A-Za-z]/.test(lines[i].slice(colon + 1));
+	}
+	return false;
+}
+
+/** A view within the lines of its file. */
+export interface View {
+	/** Index of the view's first line: 0 in TODO.md, the line of the `TODO` heading in a root note. */
+	from: number;
+	/** Index of the first line after the view. */
+	to: number;
+	/** `true` for the view of a root note (§7.6), which is a section of the note. */
+	root: boolean;
+	/** Text of the heading that opens the view of a root note. */
+	title?: string;
+	layout: Layout;
+}
+
+/**
+ * The view of a root note (§7.6, the engine's `section`): its TODO section — from the
+ * first heading whose text is `TODO` (any letter case, rank 1–5) down to the next
+ * heading of the same or a higher rank, which the done heading never is, or to the end
+ * of the note. Undefined when the note has no such heading, or no frontmatter block
+ * between two lines that are exactly `---` (the seal lives there).
+ */
+function rootView(lines: readonly string[], doneHeading: string): View | undefined {
+	const body = bodyStartLine(lines);
+	if (lines[0] !== "---" || lines[body - 1] !== "---") return undefined;
+	const heads = headings(lines);
+	const at = heads.findIndex((h) => h.level < 6 && h.text.toLowerCase() === TODO_HEADING);
+	if (at < 0) return undefined;
+	const head = heads[at];
+	const next = heads.slice(at + 1).find((h) => h.level <= head.level && h.text !== doneHeading);
+	return {
+		from: head.idx,
+		to: next?.idx ?? lines.length,
+		root: true,
+		title: head.text,
+		layout: { hashes: "#".repeat(head.level + 1), done: doneHeading, mirror: isMirrorShaped },
+	};
+}
+
+/**
+ * The view the note holds: all of TODO.md (§7), the TODO section of a root note (§7.6),
+ * undefined for any other note.
+ */
+export function viewOf(lines: readonly string[], note: NoteKind): View | undefined {
+	if (note.inboxView) return { from: 0, to: lines.length, root: false, layout: note.layout ?? INBOX };
+	return note.root === true ? rootView(lines, note.doneHeading) : undefined;
+}
+
+/** `true` when the line on `idx` is a line of the view — not the heading that opens the view of a root note. */
+export function inView(view: View | undefined, idx: number): view is View {
+	return view !== undefined && idx < view.to && (view.root ? idx > view.from : idx >= view.from);
+}
+
+/** Runs `edit` on the lines of `view` as a document of their own and puts what it returns back among `lines`. */
+function within(lines: readonly string[], view: View, edit: (sub: string[]) => string[] | undefined): string[] | undefined {
+	const out = edit(lines.slice(view.from, view.to));
+	return out === undefined ? undefined : [...lines.slice(0, view.from), ...out, ...lines.slice(view.to)];
 }
 
 /** What a new line in a TODO section starts with (§15.7): an unchecked box, ready for the task's text. */
@@ -256,10 +368,20 @@ function sealIndex(lines: readonly string[]): number {
  * frontmatter matches the rest of the text. Such a view holds no edit that still has to
  * reach a note; whatever the user changes afterwards breaks the seal.
  */
-export function isSealed(lines: readonly string[]): boolean {
+export function isSealed(lines: readonly string[], view?: View): boolean {
 	const at = sealIndex(lines);
 	if (at < 0 || !lines.includes("---", at + 1)) return false;
-	return lines[at].slice(SEAL_PREFIX.length) === digest(lines.filter((_l, i) => i !== at).join("\n"));
+	return lines[at].slice(SEAL_PREFIX.length) === sealOf(lines, at, view);
+}
+
+/**
+ * The digest that seals the view (§7.2): over the whole of TODO.md without its seal
+ * line `at`; for the view of a root note over its TODO section alone (§7.6), so that
+ * what the user writes in the rest of the note breaks nothing.
+ */
+function sealOf(lines: readonly string[], at: number, view?: View): string {
+	if (view?.root !== true) return digest(lines.filter((_l, i) => i !== at).join("\n"));
+	return digest(lines.slice(view.from, view.to).join("\n") + (view.to < lines.length ? "\n" : ""));
 }
 
 /**
@@ -267,11 +389,11 @@ export function isSealed(lines: readonly string[]): boolean {
  * seal line gets one: a view rendered by a daemon that does not seal there stays as it
  * is. The caller vouches that every edit of the user's in it has reached its note.
  */
-export function resealed(lines: readonly string[]): string[] {
+export function resealed(lines: readonly string[], view?: View): string[] {
 	const at = sealIndex(lines);
 	if (at < 0) return [...lines];
 	const out = [...lines];
-	out[at] = `${SEAL_PREFIX}${digest(lines.filter((_l, i) => i !== at).join("\n"))}`;
+	out[at] = `${SEAL_PREFIX}${sealOf(lines, at, view)}`;
 	return out;
 }
 
@@ -312,12 +434,12 @@ export function routesItself(lines: readonly string[]): boolean {
  * Takes the line on `idx` out of the view, in place. A section of the view the line
  * leaves without content goes with it (the render omits empty sections); `Done` stays.
  */
-function takeOut(out: string[], idx: number): void {
+function takeOut(out: string[], idx: number, layout: Layout): void {
 	const heads = headings(out);
 	const own = [...heads].reverse().find((h) => h.idx < idx);
 	let from = idx;
 	let count = 1;
-	if (own !== undefined && own.text !== DONE_SECTION && SECTIONS.includes(own.text)) {
+	if (own !== undefined && own.text !== layout.done && sectionsOf(layout).includes(own.text)) {
 		let end = heads.find((h) => h.idx > idx)?.idx ?? out.length;
 		const rest = out.slice(own.idx + 1, end).filter((_l, i) => own.idx + 1 + i !== idx);
 		if (rest.every((l) => l.trim() === "")) {
@@ -337,7 +459,8 @@ function doneKey(line: string): string {
 }
 
 /** Puts `line` into the section `target` of the view, in place, creating the section in render order when missing. */
-function putIn(out: string[], line: string, target: string): void {
+function putIn(out: string[], line: string, target: string, layout: Layout): void {
+	const sections = sectionsOf(layout);
 	const heads = headings(out);
 	const section = heads.find((h) => h.text === target);
 	if (section !== undefined) {
@@ -346,21 +469,21 @@ function putIn(out: string[], line: string, target: string): void {
 		for (let i = section.idx + 1; i < end; i++) {
 			if (parseLine(out[i]) === undefined) continue;
 			// `Done` is newest first; the other sections grow at the bottom.
-			if (target === DONE_SECTION && doneKey(line) > doneKey(out[i])) break;
+			if (target === layout.done && doneKey(line) > doneKey(out[i])) break;
 			at = i + 1;
 		}
 		out.splice(at, 0, line);
 		return;
 	}
-	const rank = SECTIONS.indexOf(target);
-	const later = heads.find((h) => SECTIONS.indexOf(h.text) > rank);
+	const rank = sections.indexOf(target);
+	const later = heads.find((h) => sections.indexOf(h.text) > rank);
 	if (later !== undefined) {
-		out.splice(later.idx, 0, `## ${target}`, line, "");
+		out.splice(later.idx, 0, `${layout.hashes} ${target}`, line, "");
 		return;
 	}
 	let at = out.length;
 	if (at > 0 && out[at - 1] === "") at -= 1;
-	const block = [`## ${target}`, line];
+	const block = [`${layout.hashes} ${target}`, line];
 	if (at > 0 && out[at - 1].trim() !== "") block.unshift("");
 	out.splice(at, 0, ...block);
 }
@@ -374,16 +497,22 @@ function putIn(out: string[], line: string, target: string): void {
  * stays). Undefined when the line stays where it is: it is in its section already, or
  * it is a mirror line the render would not show (no priority, or completed) — the
  * plugin never drops a line on that ground. `own` says the line is a task of the view
- * itself even though it looks like a mirror line.
+ * itself even though it looks like a mirror line. `view`: the view of a root note the
+ * line is in (§7.6), when the lines are not TODO.md.
  */
-export function refiled(lines: readonly string[], idx: number, own = false): string[] | undefined {
+export function refiled(lines: readonly string[], idx: number, own = false, view?: View): string[] | undefined {
+	if (view?.root === true) return within(lines, view, (sub) => refiledIn(sub, idx - view.from, own, view.layout));
+	return refiledIn(lines, idx, own, view?.layout ?? INBOX);
+}
+
+function refiledIn(lines: readonly string[], idx: number, own: boolean, layout: Layout): string[] | undefined {
 	const task = parse(lines.join("\n")).tasks.find((t) => t.lineNo === idx + 1);
 	if (task === undefined) return undefined;
-	const mirror = !own && looksLikeMirror(lines[idx]);
+	const mirror = !own && layout.mirror(lines[idx]);
 	const target = task.draft.checked
 		? mirror
 			? undefined
-			: DONE_SECTION
+			: layout.done
 		: task.draft.priority !== undefined
 			? prioritySection(task.draft.priority)
 			: mirror
@@ -392,15 +521,16 @@ export function refiled(lines: readonly string[], idx: number, own = false): str
 	if (target === undefined || task.heading === target) return undefined;
 	const out = [...lines];
 	const line = out[idx];
-	takeOut(out, idx);
-	putIn(out, line, target);
+	takeOut(out, idx, layout);
+	putIn(out, line, target, layout);
 	return out;
 }
 
 /** The view without the line on `idx` (§7.1: a mirror line whose task was completed in its note). */
-export function removed(lines: readonly string[], idx: number): string[] {
+export function removed(lines: readonly string[], idx: number, view?: View): string[] {
+	if (view?.root === true) return within(lines, view, (sub) => removed(sub, idx - view.from, { ...view, root: false })) ?? [...lines];
 	const out = [...lines];
-	takeOut(out, idx);
+	takeOut(out, idx, view?.layout ?? INBOX);
 	return out;
 }
 
@@ -429,6 +559,10 @@ export interface NoteKind {
 	inboxView: boolean;
 	/** The vault's `done_heading` (§6.2). */
 	doneHeading: string;
+	/** The note declares `restask-list-root`: its TODO section is a view (§7.6). */
+	root?: boolean;
+	/** The layout of the view, when it is not TODO.md's. */
+	layout?: Layout;
 }
 
 /** What settling one line comes to. */
@@ -470,6 +604,15 @@ export function settled(
 	own = false,
 	moved = false,
 ): Settled | undefined {
+	const view = note.inboxView ? undefined : viewOf(lines, note);
+	if (inView(view, idx)) {
+		// A line in the view of a root note is settled as a line of TODO.md is (§7.6).
+		const kind: NoteKind = { inboxView: true, doneHeading: note.doneHeading, layout: view.layout };
+		const result = settled(lines.slice(view.from, view.to), idx - view.from, kind, today, uid, own, moved);
+		if (result?.lines === undefined) return result;
+		return { ...result, lines: [...lines.slice(0, view.from), ...result.lines, ...lines.slice(view.to)] };
+	}
+	const layout = note.layout ?? INBOX;
 	const tasks = parse(lines.join("\n"), { doneHeading: note.doneHeading }).tasks;
 	const task = tasks.find((t) => t.lineNo === idx + 1);
 	if (task === undefined || task.draft.text === "") return undefined;
@@ -480,11 +623,11 @@ export function settled(
 		out[idx] = registered;
 	}
 	let id = parseLine(registered ?? lines[idx])?.draft.uid;
-	const mirror = note.inboxView && !own && looksLikeMirror(lines[idx]);
+	const mirror = note.inboxView && !own && layout.mirror(lines[idx]);
 	if (id !== undefined && !mirror) {
 		// A copied line gets its own UID; the first occurrence keeps the one they share (§6.4).
 		const copies = tasks
-			.filter((t) => t.draft.uid === id && !(note.inboxView && looksLikeMirror(t.raw)))
+			.filter((t) => t.draft.uid === id && !(note.inboxView && layout.mirror(t.raw)))
 			.slice(1);
 		for (const copy of copies) {
 			const fresh = uid();
@@ -504,15 +647,15 @@ export function settled(
 		// A checked mirror line is a completion to make in the note; an unchecked one is filed by its priority.
 		if (task.draft.checked) return { uid: id, mirror: true, carry: id };
 		const now = reprioritized ? withPriority(lines[idx], target.priority) : undefined;
-		if (now === undefined) return { lines: refiled(lines, idx), uid: id, mirror: true };
-		const view = [...lines];
-		view[idx] = now;
+		if (now === undefined) return { lines: refiledIn(lines, idx, false, layout), uid: id, mirror: true };
+		const shown = [...lines];
+		shown[idx] = now;
 		// Where it was cut from the plugin has put it back, as it does a deleted mirror line (§7.1): the task keeps one line.
 		// Bottom up: a line taken out below `idx` moves nothing above it, and above `idx` the index is not needed again.
-		for (let i = view.length - 1; i >= 0; i--) {
-			if (i !== idx && looksLikeMirror(view[i]) && parseLine(view[i])?.draft.uid === id) takeOut(view, i);
+		for (let i = shown.length - 1; i >= 0; i--) {
+			if (i !== idx && layout.mirror(shown[i]) && parseLine(shown[i])?.draft.uid === id) takeOut(shown, i, layout);
 		}
-		return { lines: view, uid: id, mirror: true, moved: { was: lines[idx], now } };
+		return { lines: shown, uid: id, mirror: true, moved: { was: lines[idx], now } };
 	}
 	if (reprioritized) {
 		const current = (out ?? lines)[idx];
@@ -528,8 +671,27 @@ export function settled(
 		out = [...(out ?? lines)];
 		out[idx] = dated;
 	}
-	out = refiled(out ?? lines, idx, own) ?? out;
+	out = refiledIn(out ?? lines, idx, own, layout) ?? out;
 	return { lines: out, uid: id };
+}
+
+/**
+ * The heading a mirror line of `task` names in its link (§7): the task's nearest
+ * heading — or, for a line in the view of a root note, the heading of the view, not the
+ * section of it the task happens to be filed in (§7.6).
+ */
+function linkHeading(lines: readonly string[], task: ParsedTask, doneHeading: string): string | undefined {
+	const view = declaresRoot(lines) ? rootView(lines, doneHeading) : undefined;
+	return inView(view, task.lineNo - 1) ? view.title : task.heading;
+}
+
+/**
+ * The line of the note on which the task `uid` lives, -1 when the note has no such
+ * task. A mirror line in the view of a root note is not the task (§7.6).
+ */
+export function taskIndex(lines: readonly string[], uid: string, doneHeading: string): number {
+	const view = declaresRoot(lines) ? rootView(lines, doneHeading) : undefined;
+	return lines.findIndex((line, i) => parseLine(line)?.draft.uid === uid && !(inView(view, i) && view.layout.mirror(line)));
 }
 
 /**
@@ -550,7 +712,7 @@ export function mirrorLine(lines: readonly string[], uid: string, stem: string, 
 	if (draft.start !== undefined) parts.push(`🛫 ${when(draft.start)}`);
 	if (draft.scheduled !== undefined) parts.push(`⏳ ${when(draft.scheduled)}`);
 	if (draft.due !== undefined) parts.push(`📅 ${when(draft.due)}`);
-	parts.push(sourceLink(stem, task.heading));
+	parts.push(sourceLink(stem, linkHeading(lines, task, doneHeading)));
 	parts.push(`🆔 ${uid}`);
 	return parts.join(" ");
 }
@@ -608,7 +770,7 @@ export function mirrorEdited(
 	const after = parseLine(now)?.draft;
 	if (before === undefined || after === undefined || before.uid !== uid || after.uid !== uid) return undefined;
 	const draft: TaskDraft = { ...task.draft };
-	const link = sourceLink(stem, task.heading);
+	const link = sourceLink(stem, linkHeading(lines, task, doneHeading));
 	const unlinked = (text: string): string | undefined => (text.endsWith(link) ? text.slice(0, -link.length).trimEnd() : undefined);
 	const textWas = unlinked(before.text);
 	const textNow = unlinked(after.text);
@@ -631,23 +793,26 @@ export function mirrorEdited(
  * but differs is rewritten (and moved when the priority changed) only when `rewrite`
  * says so — the caller then seals the view (§7.2): in an unsealed view a mirror line
  * that differs from the daemon's last render is an edit the daemon would apply to the
- * note. Undefined when the view stays as it is.
+ * note. Undefined when the view stays as it is. `section`: the view of a root note
+ * (§7.6), when `view` is not TODO.md but the lines of that note.
  */
-export function mirrored(view: readonly string[], uid: string, line: string | undefined, rewrite = false): string[] | undefined {
+export function mirrored(view: readonly string[], uid: string, line: string | undefined, rewrite = false, section?: View): string[] | undefined {
+	if (section?.root === true) return within(view, section, (sub) => mirrored(sub, uid, line, rewrite, { ...section, root: false }));
+	const layout = section?.layout ?? INBOX;
 	const at = view.findIndex((l) => parseLine(l)?.draft.uid === uid);
-	if (at >= 0 && !looksLikeMirror(view[at])) return undefined;
-	if (line === undefined) return at >= 0 ? removed(view, at) : undefined;
+	if (at >= 0 && !layout.mirror(view[at])) return undefined;
+	if (line === undefined) return at >= 0 ? removed(view, at, section) : undefined;
 	const priority = parseLine(line)?.draft.priority;
 	if (priority === undefined) return undefined;
 	if (at < 0) {
 		const out = [...view];
-		putIn(out, line, prioritySection(priority));
+		putIn(out, line, prioritySection(priority), layout);
 		return out;
 	}
 	if (!rewrite || view[at] === line) return undefined;
 	const out = [...view];
 	out[at] = line;
-	return refiled(out, at) ?? out;
+	return refiledIn(out, at, false, layout) ?? out;
 }
 
 /** What a deleted mirror line comes to in the task's note (§7.1). */
@@ -665,7 +830,7 @@ export type Dropped =
  * note. Undefined when the note has no such task, or none the view would show.
  */
 export function mirrorDropped(lines: readonly string[], uid: string, mirror: string, stem: string, doneHeading: string): Dropped | undefined {
-	const index = lines.findIndex((line) => parseLine(line)?.draft.uid === uid);
+	const index = taskIndex(lines, uid, doneHeading);
 	const shown = index < 0 ? undefined : mirrorLine(lines, uid, stem, doneHeading);
 	if (shown === undefined) return undefined;
 	if (shown !== mirror) return { restore: shown };

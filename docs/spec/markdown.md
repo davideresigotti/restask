@@ -1,4 +1,4 @@
-# restask spec — Markdown Grammar, Mutation & the TODO.md View (§6–§7)
+# restask spec — Markdown Grammar, Mutation & the Views (§6–§7)
 
 > Normative. Index and invariants: `ARCHITECTURE.md`.
 
@@ -142,6 +142,9 @@ next pass):
   render's job (§7). A line registered there under a priority section's heading also
   takes that priority (§7.4). A line there that names a calendar (`📁`) is a task of
   that calendar (§7.5).
+- In **the view of a root note** — its TODO section, §7.6 — the same: identity only,
+  the section's priority for a new line, placement by the render. The rest of a root
+  note is repaired like any note.
 - Syncthing conflict copies (`*.sync-conflict-*`) and setup backups (`*.pre-restask-*`)
   are never scanned; `restask doctor` reports the former. Neither is anything hidden
   (§5.1) — a file sync's version archive among it.
@@ -182,7 +185,8 @@ restask-render: 9c1f0e2a7b3d4f56
 
 The view is the file at `vault.inbox_file`, and it is known by that path alone — to the
 engine and to the plugin (§15.6). Nothing in a file makes it the view, and nothing in a
-note makes the note one.
+note makes the note one. A root note holds a view of its own, of its folder, in one
+section of it (§7.6); the rest of this section is about TODO.md, which shows the vault.
 
 Render rules (`render(tasks, cfg)` — same input, byte-identical output):
 
@@ -369,6 +373,145 @@ TODO.md is the organizer for every calendar the user wants in it, not for one. I
 - The whole of it is local work (invariant 12): the token is read by the scan and
   written by the render with no server, and the plugin keeps it in its place when it
   registers, stamps or files a line (§15.6).
+
+### 7.6 The view a root note holds
+
+A root note — one that declares `restask-list-root` (§5.1) — shows its folder the way
+TODO.md shows the vault: the prioritized tasks of every note in the folder and below,
+filed by priority, in the note's **TODO section**. TODO.md itself is unchanged by it: it
+shows what it showed.
+
+```
+---
+restask-list-root: homelab
+restask-render: 9c1f0e2a7b3d4f56
+---
+# Notes
+anything — this part of the note is the user's
+# TODO
+
+## 🔺 Highest Priority
+- [ ] Update the firewall rules 🔺 [[Networking#TODO|Networking]] 🆔 restask-01jz…
+- [ ] Replace the failing disk 🔺 🛫 2026-10-08 📅 2026-10-09 [[Storage#TODO|Storage]] 🆔 restask-01jz…
+
+## 🔽 Low Priority
+- [ ] Label the cables 🔽 🆔 restask-01jz…
+
+## No Priority
+- [ ] Buy a rack 🆔 restask-01jz…
+
+## Done
+- [x] Order the switch ✅ 2026-10-03 🆔 restask-01jz…
+```
+
+**The section** (`root_view::section`). From the first heading whose text is `TODO` — in
+any letter case, of rank 1 to 5, outside the frontmatter and fenced blocks (§6.2) — down
+to the next heading of the same or a higher rank, or to the end of the note. The done
+heading never ends it, whatever its rank: the view's completed tasks are part of the
+view. **A root note without such a heading holds no view** and is an ordinary note, as
+before; restask adds no heading to a note. Neither does a note the seal cannot be written
+to: one with CRLF line endings, or whose frontmatter is not delimited by two lines that
+are exactly `---`.
+
+**What it shows.**
+
+- *Lines of its own* — the task lines of the root note that stand in the section: tasks
+  of the note, in the list the note routes to. Full canonical lines, as in TODO.md, and
+  flat: a line indented under another one there is written at the margin, and its parent
+  stays on the server (§11.4), as for a line of TODO.md.
+- *Mirror lines* (§7) — of the active tasks with a priority whose line is in a routed
+  note in the root note's folder or below it, whatever list that note routes to: a note
+  with a `restask-list` of its own, the notes below a root further down, and that root's
+  own lines. Not shown: tasks without a priority or completed (they stay in their note),
+  the tasks of the inbox file (it is no note), and the root note's own lines outside the
+  section (they are in the note already).
+
+A line of a view's own is mirrored like any note task — in TODO.md, and in the view of a
+root note further up — with a link to the view's heading (`[[Home Lab#TODO|Home Lab]]`),
+not to the section of the view it happens to be filed in.
+
+**Render** (`root_view::render(contents, path, tasks, cfg)` — same input, byte-identical
+output). The section is regenerated; every other byte of the note is kept, but for the
+seal line.
+
+- The heading line as the note has it, one blank line, then the sections of §7 under
+  headings one rank below it (`## 🔺 Highest Priority` under `# TODO`): the five priority
+  sections with lines of its own and mirror lines together, by (source path, line);
+  `No Priority` with the lines of its own that have none, by UID; and the done heading —
+  `vault.done_heading`, the one §6.3 moves a completed line under — with the completed
+  lines of its own, newest first. Empty sections are omitted; the done heading is always
+  there. A blank line closes the section when the note goes on below it.
+- Anything else in the section — prose, blank lines, the order of the lines, their
+  indentation — does not survive a render, as in TODO.md. What is above and below the
+  section is the user's.
+- The render is made from the text the scan read, and written only while the note still
+  is that text. A note an editor or the file sync wrote in between is rendered by the
+  next pass: made from an older reading, the render would drop what was typed into the
+  section since.
+
+**Reading the section back** (`vault::scan`). A line in the section with a UID is
+
+- a *mirror line* when a line outside the section claims the UID — in another note, or
+  in this one — whatever the line looks like;
+- else a mirror line whose task is gone, when it has the exact shape of one
+  (`is_mirror_shaped`: a priority, then `[[<stem>|<stem>]]` or
+  `[[<stem>#<heading>|<stem>]]` right before `🆔`) and the index does not know the task
+  as this note's;
+- else a *line of the view's own*. A line that merely ends in a wikilink is one: a task
+  line cut from another note and pasted here has moved here, and is not dropped as the
+  leftover of a view.
+
+Lines of the view's own that share a UID are copies: the first keeps it (§6.4).
+
+**A mirror line is no task, wherever it is.** In any routed note, a line outside a
+view that has the exact shape of a mirror line and the UID of a task line in another
+note is not read as a task: it is the view of that task, strayed — the lines of a view
+that lost its heading (renamed, or given a rank that ends the section early), of a root
+note that is one no more, or a line pasted out of a view. Read as a task it would be a
+copy of the line it shows, be given a UID of its own (§6.4), and reach the server as a
+second task. It stays in the note as text; the heading back, it is in the view again.
+For the same reason such a line never takes the UID from a line without that shape,
+whatever the index or the path order says.
+
+**Editable, like TODO.md.** §7.1 and §7.4 hold for the section as they do for TODO.md:
+
+- a line typed under a priority's heading is registered with that priority; one typed
+  directly under the view's heading, or under `No Priority`, with none;
+- an edit of a mirror line — checkbox, text, priority, repeat rule, dates — is carried to
+  the task's own note, provided the note still shows the rendered value;
+- a line moved to another section takes that section's priority; for a mirror line the
+  change is made in its note;
+- **deleting a mirror line deletes the task in its note**, on the proof §7.1 asks for:
+  the section is this engine's last render of it, edited (same seal claim, done heading
+  present), the UID is nowhere in it, and the note still shows the task as rendered.
+
+The engine's last render of each view is kept in `.restask/views/` (§9): the note's
+path, the seal the render carried, and the section's text (`root_view::remembered`).
+Without it — the state dropped — a pass carries nothing and deletes nothing.
+
+**The seal** (§7.2) is the same frontmatter property, `restask-render: <digest>`, on the
+line below `restask-list-root`. The digest is over the text of the section alone, so
+what the user writes in the rest of the note breaks nothing; an edit in the section
+does. A sealed section carries no edits.
+
+**Every device of the vault has to know views.** An engine from before them reads a
+mirror line in a root note as a copied task line and gives it a UID of its own — a
+second task, on the server too. The sync node's daemon, the `restask` binary Neovim
+calls and the plugin are updated together (`contrib/update.sh`, App. E).
+
+All of it is local work (invariant 12): `restask settle` renders the views with no
+server, and the plugin keeps them on the device (§15.6).
+
+```rust
+// markdown::root_view
+pub struct Section { pub start: usize, pub end: usize, pub level: usize, pub title: String }
+pub fn section(contents: &str, cfg: &VaultConfig) -> Option<Section>;
+pub fn render(contents: &str, path: &str, tasks: &BTreeMap<TaskUid, Task>, cfg: &VaultConfig) -> Option<String>;
+pub fn is_sealed(contents: &str, cfg: &VaultConfig) -> bool;
+pub fn is_mirror_shaped(raw: &str) -> bool;
+pub fn remembered(contents: &str, path: &str, cfg: &VaultConfig) -> Option<String>;
+pub fn mirror_edits(contents, remembered, path, local, cfg, today) -> BTreeMap<String, Vec<Mutation>>;
+```
 
 ```rust
 pub fn section_priority(heading: &str) -> Option<Priority>;

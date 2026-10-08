@@ -10,6 +10,8 @@
 ├── tasks/<uid>.ics      base snapshots: what vault and server last agreed on
 ├── tombstones.json      uid → deletion instant (pruned after 365 days)
 ├── todo.rendered.md     the engine's own last render of the inbox file (§7.1)
+├── views/<digest>.md    its last render of the view each root note holds (§7.6); the
+│                        name is the digest (§7.2) of the note's path
 ├── calendars.json       the server's collections seen so far (§7.5) and the lists found
 │                        under another path than their own (§5.4); the sync node's
 └── lock                 advisory lock: one restask process per vault per machine
@@ -21,7 +23,9 @@ snapshots), and a machine that takes over as the sync node starts from the same
 knowledge. It is written by the one daemon (§1.1) — and, for the remembered render, by
 `settle`. It is never scanned for tasks, whatever
 `ignore` says. All of it is disposable: `restask rebuild` removes the index, the snapshots
-and the remembered render (tombstones stay), and the next pass re-derives them.
+and the remembered renders (tombstones stay), and the next pass re-derives them. A
+remembered render of a view is dropped by the pass that finds its root note gone, or
+without a view.
 
 Every file is written atomically through `fsio` (hidden temp sibling + fsync + rename; a
 leftover temp file from a crash is overwritten, never an obstacle) and **only when its

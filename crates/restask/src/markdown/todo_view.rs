@@ -13,7 +13,7 @@ use crate::markdown::parser::{parse, ParsedTask, TaskDraft};
 
 /// Opens the seal line of a render (§7.2): a property of the view's frontmatter block,
 /// below `restask-list`. Nothing restask writes goes into the body but the view itself.
-const SEAL_PREFIX: &str = "restask-render: ";
+pub(crate) const SEAL_PREFIX: &str = "restask-render: ";
 
 /// The disclaimer comment views carried before the seal moved into the frontmatter. Never
 /// written; read only to recognise such a view as one of restask's ([`is_view`]).
@@ -25,7 +25,7 @@ const LEGACY_SEAL_PREFIX: &str = "<!-- restask-render: ";
 
 /// The digest a seal carries: FNV-1a (64-bit) over the view's text without its seal line,
 /// as 16 lowercase hex digits.
-fn digest(unsealed: &str) -> String {
+pub(crate) fn digest(unsealed: &str) -> String {
     let mut hasher = FnvHasher::default();
     hasher.write(unsealed.as_bytes());
     format!("{:016x}", hasher.finish())
@@ -39,7 +39,7 @@ fn seal_line(unsealed: &str) -> String {
 /// Byte range of the seal line of `contents`, line break included: the first line of the
 /// frontmatter block that opens with the seal's key. `None` when the text has no
 /// frontmatter block, or the block has no such line.
-fn seal_range(contents: &str) -> Option<(usize, usize)> {
+pub(crate) fn seal_range(contents: &str) -> Option<(usize, usize)> {
     let mut at = contents.strip_prefix("---\n").map(|_| 4)?;
     loop {
         let length = contents[at..].find('\n')?;
@@ -56,7 +56,7 @@ fn seal_range(contents: &str) -> Option<(usize, usize)> {
 
 /// The digest the seal line of `contents` claims, right or not: which render the text
 /// is, or was before it was edited. `None` when it has no seal line.
-fn seal_claim(contents: &str) -> Option<&str> {
+pub(crate) fn seal_claim(contents: &str) -> Option<&str> {
     seal_range(contents).map(|(start, end)| &contents[start + SEAL_PREFIX.len()..end - 1])
 }
 
@@ -65,10 +65,24 @@ fn seal_claim(contents: &str) -> Option<&str> {
 /// heading every render ends with. Only then does a line that is *missing* say anything
 /// (§7.1): in a view edited from another render the line may never have been there, and
 /// a file cut short lost its lines to no one's decision.
-fn edited_from(current: &str, rendered: &str) -> bool {
-    seal_claim(current).is_some()
-        && seal_claim(current) == seal_claim(rendered)
-        && current.lines().any(|line| line == "## Done")
+fn edited_from(current: &ViewText<'_>, rendered: &ViewText<'_>) -> bool {
+    current.claim.is_some()
+        && current.claim == rendered.claim
+        && current.body.lines().any(|line| line == current.done_line)
+}
+
+/// One view as [`edits_between`] compares it: TODO.md, or the view a root note holds
+/// (§7.6).
+pub(crate) struct ViewText<'a> {
+    /// The text of the view: all of TODO.md, or the TODO section of a root note.
+    pub body: &'a str,
+    /// The digest its seal line claims, right or not (§7.2).
+    pub claim: Option<&'a str>,
+    /// Whether the seal matches the text: a render, with no edit in it.
+    pub sealed: bool,
+    /// The heading line every render of this view ends with — the proof that the text
+    /// is whole (§7.1).
+    pub done_line: &'a str,
 }
 
 /// `true` when `contents` is a view exactly as some device rendered it (§7.2): its
@@ -97,7 +111,7 @@ pub fn is_view(contents: &str) -> bool {
 }
 
 /// Heading text of a priority's section in the view (§7), without the `## `.
-fn priority_heading(priority: Priority) -> String {
+pub(crate) fn priority_heading(priority: Priority) -> String {
     format!("{} {} Priority", priority.emoji(), priority.heading())
 }
 
@@ -112,7 +126,7 @@ pub fn section_priority(heading: &str) -> Option<Priority> {
 }
 
 /// Heading text of the section for the inbox file's own tasks without a priority (§7).
-const NO_PRIORITY_HEADING: &str = "No Priority";
+pub(crate) const NO_PRIORITY_HEADING: &str = "No Priority";
 
 /// The priority an active line takes from being **moved** to another section of the view
 /// (§7.4): `Some(priority)` when the user moved it, `None` when the line is where the
@@ -209,7 +223,7 @@ pub fn inbox_line(task: &Task, cfg: &VaultConfig) -> String {
 }
 
 /// The completion date of a task, if completed.
-fn completed_on(task: &Task) -> Option<LocalDate> {
+pub(crate) fn completed_on(task: &Task) -> Option<LocalDate> {
     match task.status {
         Status::Completed { on } => Some(on),
         Status::Active => None,
@@ -341,20 +355,47 @@ pub fn mirror_edits(
     cfg: &VaultConfig,
     today: LocalDate,
 ) -> BTreeMap<String, Vec<Mutation>> {
+    let view = |text| ViewText {
+        body: text,
+        claim: seal_claim(text),
+        sealed: is_sealed(text),
+        done_line: "## Done",
+    };
+    edits_between(
+        &view(current),
+        &view(rendered),
+        local,
+        &cfg.inbox_file,
+        cfg,
+        today,
+    )
+}
+
+/// [`mirror_edits`] for any view: `current` is the view as it is in the vault, `rendered`
+/// this engine's last render of it, `own_path` the file the view is in — a task whose
+/// source is that file is a line of the view's own.
+pub(crate) fn edits_between(
+    current: &ViewText<'_>,
+    rendered: &ViewText<'_>,
+    local: &BTreeMap<TaskUid, Task>,
+    own_path: &str,
+    cfg: &VaultConfig,
+    today: LocalDate,
+) -> BTreeMap<String, Vec<Mutation>> {
     let mut edits: BTreeMap<String, Vec<Mutation>> = BTreeMap::new();
     // A sealed view is some device's render, not an edit: where it differs from this
     // engine's last render, the notes are what changed — and they may still be in transit.
-    if current == rendered || is_sealed(current) {
+    if current.body == rendered.body || current.sealed {
         return edits;
     }
     let mut shown: BTreeMap<TaskUid, ParsedTask> = BTreeMap::new();
-    for task in parse(rendered, cfg).tasks {
+    for task in parse(rendered.body, cfg).tasks {
         if let Some(uid) = task.draft.uid.clone() {
             shown.entry(uid).or_insert(task);
         }
     }
     let mut seen: Vec<TaskUid> = Vec::new();
-    for line in parse(current, cfg).tasks {
+    for line in parse(current.body, cfg).tasks {
         let Some(uid) = line.draft.uid.clone() else {
             continue;
         };
@@ -366,7 +407,7 @@ pub fn mirror_edits(
         }
         seen.push(uid.clone());
         let moved = moved_priority(&line, was);
-        if source.source.path == cfg.inbox_file {
+        if source.source.path == own_path {
             // A line of the view's own says everything else itself; the scan reads it.
             if let Some(priority) = moved {
                 edits
@@ -456,8 +497,8 @@ pub fn mirror_edits(
             let Some(source) = local.get(uid) else {
                 continue;
             };
-            if source.source.path == cfg.inbox_file
-                || current.contains(uid.as_str())
+            if source.source.path == own_path
+                || current.body.contains(uid.as_str())
                 || mirror_line(source) != was.raw
             {
                 continue;

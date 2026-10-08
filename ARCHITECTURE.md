@@ -99,7 +99,8 @@ The work of a pass (§11.1) is of two kinds, and only one of them is the daemon'
   (stamp, move under the done heading, and back), the creation date a line asks for, the
   priority of the TODO.md section a task is typed in or moved to, an edit on a TODO.md
   mirror line carried to its note, and the TODO.md view itself — mirror lines, sections,
-  order, seal (§6.4, §7).
+  order, seal (§6.4, §7). The view a root note holds of its folder (§7.6) is the same
+  work, in one section of a note.
 - **Server work** — everything that needs the CalDAV server: the three-way merge, pushes
   and pulls, adoption, the roll-forward of a recurring series, and the state under
   `.restask/` that records what both sides agreed on.
@@ -200,7 +201,7 @@ re-planned from fresh snapshots in the next pass.
 | `docs/spec/overview.md` | §1–2 | topology, repository layout |
 | `docs/spec/domain.md` | §3–4 | domain types, priority table, timestamp contract |
 | `docs/spec/routing.md` | §5 | note routing, list ⇄ collection |
-| `docs/spec/markdown.md` | §6–7 | grammar, mutations, repair, the TODO.md view |
+| `docs/spec/markdown.md` | §6–7 | grammar, mutations, repair, the TODO.md view, the view of a root note |
 | `docs/spec/vtodo.md` | §8, App. A | codec, extras, golden VTODO |
 | `docs/spec/storage.md` | §9 | `.restask/` layout and semantics |
 | `docs/spec/caldav.md` | §10 | XML protocol, the port, retry |

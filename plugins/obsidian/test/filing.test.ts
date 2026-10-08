@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
 	canonicalLine,
 	completedByUid,
+	declaresRoot,
 	digest,
 	disclaimed,
+	isMirrorShaped,
 	isSealed,
 	mirrorDropped,
 	mirrorEdited,
@@ -22,8 +24,10 @@ import {
 	settled,
 	splices,
 	statusRepaired,
+	taskIndex,
 	toggledLines,
 	uidGenerator,
+	viewOf,
 } from "../src/filing";
 import { parseLine } from "../src/markdown";
 
@@ -756,5 +760,152 @@ describe("§15.6 the change as splices", () => {
 			expect(patch(before, after ?? [])).toEqual(after);
 			expect(splices(before, after ?? []).length).toBeLessThanOrEqual(2);
 		}
+	});
+});
+
+describe("§7.6 the view a root note holds", () => {
+	const a = A.slice(3);
+	const b = B.slice(3);
+	const ROOT = { inboxView: false, doneHeading: "Done", root: true };
+	const head = ["---", "restask-list-root: homelab", "restask-render: 20eaf3e3ad473666", "---", "# Notes", "prose"];
+	const empty = [...head, "# TODO", "", "## Done", ""];
+	const firewall = `- [ ] update the firewall 🔺 [[Networking#TODO|Networking]] ${A}`;
+	const full = [
+		...head,
+		"# TODO",
+		"",
+		"## 🔺 Highest Priority",
+		firewall,
+		"",
+		"## No Priority",
+		`- [ ] buy a rack ${B}`,
+		"",
+		"## Done",
+		"",
+	];
+
+	it("is the TODO section of the note, as the engine finds it", () => {
+		expect(viewOf(empty, ROOT)).toMatchObject({ from: 6, to: 10, root: true, title: "TODO" });
+		expect(viewOf(empty, NOTE)).toBeUndefined();
+		// Down to the next heading of the same or a higher rank; the done heading never ends it.
+		const followed = ["---", "restask-list-root: x", "---", "## todo", "- [ ] a", "## Done", "- [x] b", "## Links", "prose", ""];
+		expect(viewOf(followed, ROOT)).toMatchObject({ from: 3, to: 7, title: "todo" });
+		expect(viewOf(followed, ROOT)?.layout.hashes).toBe("###");
+		// No heading, a heading of the lowest rank, a fenced one, no frontmatter of exact `---` lines: no view.
+		expect(viewOf(["---", "restask-list-root: x", "---", "# To Do", ""], ROOT)).toBeUndefined();
+		expect(viewOf(["---", "restask-list-root: x", "---", "###### TODO", ""], ROOT)).toBeUndefined();
+		expect(viewOf(["---", "restask-list-root: x", "---", "```", "# TODO", "```", ""], ROOT)).toBeUndefined();
+		expect(viewOf(["--- ", "restask-list-root: x", "---", "# TODO", ""], ROOT)).toBeUndefined();
+		expect(declaresRoot(empty)).toBe(true);
+		expect(declaresRoot(["---", "restask-list: x", "restask-list-root:  ", "---"])).toBe(false);
+		expect(declaresRoot(["restask-list-root: x"])).toBe(false);
+	});
+
+	it("is sealed by the digest of the section alone", () => {
+		// The same view and digest are pinned in crates/restask/tests/root_view.rs.
+		expect(digest("# TODO\n\n## Done\n")).toBe("20eaf3e3ad473666");
+		const view = viewOf(empty, ROOT);
+		expect(isSealed(empty, view)).toBe(true);
+		// Prose outside the view breaks nothing; a line in it does.
+		const prose = [...empty.slice(0, 5), "other prose", ...empty.slice(6)];
+		expect(isSealed(prose, viewOf(prose, ROOT))).toBe(true);
+		const typed = [...empty.slice(0, 7), "- [ ] typed", ...empty.slice(7)];
+		expect(isSealed(typed, viewOf(typed, ROOT))).toBe(false);
+		const again = resealed(typed, viewOf(typed, ROOT));
+		expect(isSealed(again, viewOf(again, ROOT))).toBe(true);
+		// A section that is followed by more of the note ends in its blank line.
+		const followed = [...empty.slice(0, 9), "", "# Links", ""];
+		expect(resealed(followed, viewOf(followed, ROOT))[2]).toBe(`restask-render: ${digest("# TODO\n\n## Done\n\n")}`);
+	});
+
+	it("knows a mirror line by its exact shape", () => {
+		expect(isMirrorShaped(firewall)).toBe(true);
+		expect(isMirrorShaped(`- [ ] scrub 🔽 📅 2026-10-01 [[Disks|Disks]] ${A}`)).toBe(true);
+		// A task that ends in a wikilink is a task.
+		expect(isMirrorShaped(`- [ ] Install [[Vaultwarden]] ${A}`)).toBe(false);
+		expect(isMirrorShaped(`- [ ] Install [[Vaultwarden]] 🔺 ${A}`)).toBe(false);
+		expect(isMirrorShaped(`- [ ] read [[Storage|the storage note]] 🔺 ${A}`)).toBe(false);
+		expect(isMirrorShaped(`- [ ] see [[Disks|Disks]] ${A}`)).toBe(false);
+		// Ticked by the user, it still is the line a render wrote.
+		expect(isMirrorShaped(`- [x] scrub 🔽 [[Disks|Disks]] ${A}`)).toBe(true);
+		expect(isMirrorShaped("- [ ] scrub 🔽 [[Disks|Disks]]")).toBe(false);
+	});
+
+	it("gives a line typed under a priority's heading that priority, and files an own line by its emoji", () => {
+		const typed = [...full.slice(0, 10), "- [ ] order the cables", ...full.slice(10)];
+		expect(settled(typed, 10, ROOT, TODAY, uid)?.lines).toEqual([...full.slice(0, 10), `- [ ] order the cables 🔺 🆔 ${U}`, ...full.slice(10)]);
+		// Typed directly under the view's heading without a priority: `No Priority`.
+		const loose = [...empty.slice(0, 7), "- [ ] loose", ...empty.slice(7)];
+		expect(settled(loose, 7, ROOT, TODAY, uid)?.lines).toEqual([...head, "# TODO", "", "## No Priority", `- [ ] loose 🆔 ${U}`, "", "## Done", ""]);
+		// An own line given an emoji moves to that section; the one it leaves empty goes with it.
+		const ranked = full.map((line) => (line === `- [ ] buy a rack ${B}` ? `- [ ] buy a rack 🔽 ${B}` : line));
+		expect(settled(ranked, 12, ROOT, TODAY, uid)?.lines).toEqual([
+			...full.slice(0, 11),
+			"## 🔽 Low Priority",
+			`- [ ] buy a rack 🔽 ${B}`,
+			"",
+			"## Done",
+			"",
+		]);
+	});
+
+	it("completes an own line under the view's done heading and leaves the rest of the note alone", () => {
+		const ticked = full.map((line) => (line === `- [ ] buy a rack ${B}` ? `- [x] buy a rack ${B}` : line));
+		expect(settled(ticked, 12, ROOT, TODAY, uid)?.lines).toEqual([...full.slice(0, 11), "## Done", `- [x] buy a rack ✅ ${TODAY} ${B}`, ""]);
+		// Outside the view the note is a note: the box is the status, and the line goes under the done heading.
+		const above = [...head.slice(0, 5), `- [x] above ${B}`, ...empty.slice(6)];
+		expect(settled(above, 5, ROOT, TODAY, uid)?.lines).toEqual([...head.slice(0, 5), "# TODO", "", "## Done", `- [x] above ✅ ${TODAY} ${B}`, ""]);
+	});
+
+	it("carries a mirror line's checkbox and its move to another section, like TODO.md", () => {
+		const ticked = full.map((line) => (line === firewall ? firewall.replace("[ ]", "[x]") : line));
+		expect(settled(ticked, 9, ROOT, TODAY, uid)).toEqual({ uid: a, mirror: true, carry: a });
+		// Cut from its section and pasted under `No Priority`: the emoji goes, the note is told.
+		const moved = [...full.slice(0, 8), "## No Priority", firewall, ...full.slice(12)];
+		const result = settled(moved, 9, ROOT, TODAY, uid, false, true);
+		expect(result?.moved).toEqual({ was: firewall, now: firewall.replace(" 🔺", "") });
+		expect(result?.mirror).toBe(true);
+	});
+
+	it("links a mirror line of its own lines to the view, not to the section", () => {
+		const ranked = full.map((line) => (line === `- [ ] buy a rack ${B}` ? `- [ ] buy a rack 🔽 ${B}` : line));
+		expect(mirrorLine(ranked, b, "Home Lab", "Done")).toBe(`- [ ] buy a rack 🔽 [[Home Lab#TODO|Home Lab]] ${B}`);
+		// Outside the view the nearest heading is the one.
+		const above = [...head, `- [ ] above 🔺 ${B}`, "# TODO", "", "## Done", ""];
+		expect(mirrorLine(above, b, "Home Lab", "Done")).toBe(`- [ ] above 🔺 [[Home Lab#Notes|Home Lab]] ${B}`);
+		// A mirror line is not the task: the note that shows one is not the task's note.
+		expect(taskIndex(full, a, "Done")).toBe(-1);
+		expect(taskIndex(full, b, "Done")).toBe(12);
+		expect(taskIndex(["- [ ] x 🔺 [[N|N]] " + A], a, "Done")).toBe(0);
+	});
+
+	it("is kept in line with the notes below it: lines added, rewritten when sealed, removed", () => {
+		const view = viewOf(empty, ROOT);
+		const added = mirrored(empty, a, firewall, true, view);
+		expect(added).toEqual([...head, "# TODO", "", "## 🔺 Highest Priority", firewall, "", "## Done", ""]);
+		if (added === undefined) return;
+		const low = firewall.replace("🔺", "🔽");
+		// Unsealed, a line that differs is the daemon's to judge; sealed, it follows the note.
+		expect(mirrored(added, a, low, false, viewOf(added, ROOT))).toBeUndefined();
+		expect(mirrored(added, a, low, true, viewOf(added, ROOT))).toEqual([...head, "# TODO", "", "## 🔽 Low Priority", low, "", "## Done", ""]);
+		expect(mirrored(added, a, undefined, false, viewOf(added, ROOT))).toEqual(empty);
+		// A line of the view's own is never taken for the mirror of another note's task.
+		expect(mirrored(full, b, undefined, true, viewOf(full, ROOT))).toBeUndefined();
+		// In a section that is followed by more of the note.
+		const followed = [...head, "## TODO", "", "### Done", "", "## Links", "prose", ""];
+		expect(mirrored(followed, a, firewall, true, viewOf(followed, ROOT))).toEqual([
+			...head,
+			"## TODO",
+			"",
+			"### 🔺 Highest Priority",
+			firewall,
+			"",
+			"### Done",
+			"",
+			"## Links",
+			"prose",
+			"",
+		]);
+		expect(removed(full, 9, viewOf(full, ROOT))).toEqual([...full.slice(0, 8), ...full.slice(11)]);
 	});
 });

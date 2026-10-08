@@ -477,3 +477,39 @@ fn fence_open(line: &str) -> Option<&'static str> {
 fn heading_text<'a>(re: &Regex, line: &'a str) -> Option<&'a str> {
     re.captures(line)?.get(1).map(|m| m.as_str())
 }
+
+/// The headings of a note with their rank (§6.2): `(0-based line index, level 1–6,
+/// text)` for every ATX heading outside the frontmatter block and outside fenced code
+/// blocks — the lines [`parse`] reads as headings. The view of a root note is found by
+/// them (§7.6).
+pub fn headings(contents: &str) -> Vec<(usize, usize, &str)> {
+    let Some(patterns) = patterns() else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut first = 0usize;
+    if lines.first().is_some_and(|open| *open == "---") {
+        if let Some(close) = lines.iter().skip(1).position(|l| l.trim() == "---") {
+            first = close + 2;
+        }
+    }
+    let mut found = Vec::new();
+    let mut fence: Option<&'static str> = None;
+    for (idx, line) in lines.iter().enumerate().skip(first) {
+        if let Some(marker) = fence {
+            if line.trim_start().starts_with(marker) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = fence_open(line) {
+            fence = Some(marker);
+            continue;
+        }
+        if let Some(text) = heading_text(&patterns.heading, line) {
+            let level = line.bytes().take_while(|byte| *byte == b'#').count();
+            found.push((idx, level, text));
+        }
+    }
+    found
+}
