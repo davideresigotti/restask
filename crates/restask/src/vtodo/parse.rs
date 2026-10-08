@@ -18,6 +18,7 @@ use crate::domain::recurrence::Recurrence;
 use crate::domain::task::{ListSlug, SourceRef, Status, Task};
 use crate::domain::uid::TaskUid;
 use crate::vtodo::links::relink;
+use crate::vtodo::serialize::ANCHOR_PARAM;
 use crate::RestaskError;
 
 /// A VTODO resource fetched from a CalDAV collection (§8.2).
@@ -141,6 +142,8 @@ pub fn from_vcalendar<Z: TimeZone>(
             "COMPLETED" => completed_at = instant(&prop, tz),
             "PRIORITY" => priority = prop.value.trim().parse::<u8>().ok(),
             "DUE" => due = when(&prop, tz),
+            // The anchor of a repeating task without a date (§8.1) is not a start date.
+            "DTSTART" if prop.param(ANCHOR_PARAM).is_some() => {}
             "DTSTART" => start = when(&prop, tz),
             "X-RESTASK-SCHEDULED" | "X-TASKRES-SCHEDULED" => scheduled = when(&prop, tz),
             "X-RESTASK-SOURCE" | "X-TASKRES-SOURCE" if source_path.is_none() => {

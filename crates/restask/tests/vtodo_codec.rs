@@ -253,6 +253,84 @@ fn parses_own_output_round_trip() {
 }
 
 #[test]
+fn a_rule_without_a_date_is_anchored_on_the_wire_and_the_anchor_is_no_start_date() {
+    // RRULE with neither DTSTART nor DUE has no first occurrence; Radicale refuses it.
+    let rule = restask::domain::Recurrence::from_rrule("FREQ=WEEKLY;INTERVAL=2;COUNT=5")
+        .unwrap()
+        .0;
+    let mut task = Task {
+        due: None,
+        scheduled: None,
+        created: None,
+        recurrence: Some(rule),
+        ..golden_task()
+    };
+
+    // The day the UID was minted, when the task says nothing else: the same at every put.
+    let minted = task.uid.created_on().unwrap();
+    let anchor = |task: &Task| {
+        to_vcalendar(task, now())
+            .lines()
+            .find(|line| line.starts_with("DTSTART"))
+            .map(str::to_string)
+    };
+    assert_eq!(
+        anchor(&task),
+        Some(format!(
+            "DTSTART;VALUE=DATE;X-RESTASK-ANCHOR=TRUE:{}",
+            When::Date(minted).to_ical()
+        ))
+    );
+    let serialized = to_vcalendar(&task, now());
+    let order: Vec<_> = ["DTSTART", "RRULE"]
+        .iter()
+        .map(|name| serialized.find(&format!("\r\n{name}")).unwrap())
+        .collect();
+    assert!(order[0] < order[1]);
+
+    // Read back, it is no start date and no extra: the task is the one that was written.
+    let remote = from_vcalendar(&serialized, &tz_cet(), &list()).unwrap();
+    assert_eq!(remote.task.start, None);
+    assert_eq!(remote.task.recurrence, task.recurrence);
+    assert!(remote.extras.is_empty(), "{:?}", remote.extras);
+    assert_eq!(to_vcalendar(&remote.task, now()), serialized);
+
+    // The creation date, then the scheduled date, come first.
+    task.created = Some(LocalDate::parse("2026-09-19").unwrap());
+    assert!(anchor(&task).unwrap().ends_with(":20260919"));
+    task.scheduled = Some(When::Date(LocalDate::parse("2026-09-23").unwrap()));
+    assert!(anchor(&task).unwrap().ends_with(":20260923"));
+
+    // A task with a date of its own, or without a rule, gets none.
+    let dated = Task {
+        due: Some(When::Date(LocalDate::parse("2026-09-25").unwrap())),
+        ..task.clone()
+    };
+    assert_eq!(anchor(&dated), None);
+    let started = Task {
+        start: Some(When::Date(LocalDate::parse("2026-09-24").unwrap())),
+        ..task.clone()
+    };
+    assert_eq!(
+        anchor(&started).as_deref(),
+        Some("DTSTART;VALUE=DATE:20260924")
+    );
+    let plain = Task {
+        recurrence: None,
+        ..task.clone()
+    };
+    assert_eq!(anchor(&plain), None);
+
+    // A rule the vault cannot spell, kept among the extras, needs the anchor as much.
+    let extras = vec!["RRULE:FREQ=DAILY;BYHOUR=9,17".to_string()];
+    let unmanaged = to_vcalendar_with(&plain, now(), &extras);
+    assert!(
+        unmanaged.contains("X-RESTASK-ANCHOR=TRUE:20260923\r\n"),
+        "{unmanaged}"
+    );
+}
+
+#[test]
 fn round_trip_full_task_with_datetimes() {
     let parent = TaskUid::parse("restask-01arz3ndektsv4rrffq69g5fav").unwrap();
     let original = Task {

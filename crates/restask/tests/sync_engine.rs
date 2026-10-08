@@ -1759,6 +1759,63 @@ fn ical_day(offset: i64) -> String {
         .to_string()
 }
 
+/// The owner's line, `Collect feedback 🔽 🔁 every 2 weeks for 5 times`: a rule and no
+/// date. Radicale answered 400 to its `VTODO` at every pass (a rule has no first
+/// occurrence without a date), so the task never left the vault. The wire now carries an
+/// anchor the vault does not show (§8.1).
+#[tokio::test]
+async fn a_repeating_task_without_a_date_reaches_the_server_and_gets_no_date_in_the_vault() {
+    let dir = temp_vault();
+    let line = format!("- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {ID} {UID}\n");
+    home_note(&dir, &line);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.pushes, 1);
+
+    let sent = body(&mock, "home", UID);
+    assert!(
+        sent.contains("RRULE:FREQ=WEEKLY;INTERVAL=2;COUNT=5\r\n"),
+        "{sent}"
+    );
+    let anchor = sent
+        .lines()
+        .find(|line| line.starts_with("DTSTART"))
+        .expect("a rule needs a date on the wire");
+    assert!(
+        anchor.starts_with("DTSTART;VALUE=DATE;X-RESTASK-ANCHOR=TRUE:"),
+        "{anchor}"
+    );
+    assert!(!sent.contains("\r\nDUE"), "{sent}");
+
+    // The anchor is the wire's: the line keeps the dates it has — none — and a second
+    // pass writes no file and sends nothing.
+    assert!(read(&dir, "notes/home.md").contains(&line));
+    let files = snapshot(&dir);
+    let (_, puts, _) = mock.counters();
+    let again = engine.reconcile().await.unwrap();
+    assert_eq!(again.pushes, 0);
+    assert_eq!(snapshot(&dir), files);
+    assert_eq!(mock.counters().1, puts);
+    assert!(!read(&dir, "notes/home.md").contains('\u{1F6EB}'));
+
+    // A date typed later is the task's own: the anchor gives way to it.
+    home_note(
+        &dir,
+        &format!(
+            "- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {DUE} {} {ID} {UID}\n",
+            day(3)
+        ),
+    );
+    engine.reconcile().await.unwrap();
+    let sent = body(&mock, "home", UID);
+    assert!(
+        sent.contains(&format!("DUE;VALUE=DATE:{}\r\n", ical_day(3))),
+        "{sent}"
+    );
+    assert!(!sent.contains("DTSTART"), "{sent}");
+}
+
 #[tokio::test]
 async fn a_repeat_rule_written_in_the_vault_reaches_the_server_and_back() {
     let dir = temp_vault();

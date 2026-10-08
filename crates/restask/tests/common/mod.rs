@@ -278,11 +278,21 @@ impl CaldavPort for MockCaldav {
                 ))
             }
         }
+        // What Radicale does with a rule that has no first occurrence: 400, at every put.
+        let body = to_vcalendar_as(task, now, extras, wire);
+        let has = |name: &str| body.lines().any(|line| line.starts_with(name));
+        if has("RRULE") && !has("DTSTART") && !has("DUE") {
+            return Err(mock_error(
+                CaldavErrorKind::Protocol,
+                400,
+                "a repeat rule without a date",
+            ));
+        }
         state.puts += 1;
         state.resources.insert(
             key,
             MockResource {
-                body: to_vcalendar_as(task, now, extras, wire),
+                body,
                 etag: etag.clone(),
             },
         );

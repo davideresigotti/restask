@@ -5,13 +5,17 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::dates::When;
+use crate::domain::dates::{LocalDate, When};
 use crate::domain::task::{Status, Task};
 use crate::vtodo::links::wire_title;
 use crate::vtodo::recurrence::is_rrule;
 
 /// `PRODID` value emitted in every serialized calendar (§8.1).
 const PRODID: &str = "-//restask//restask 0.1.0//EN";
+
+/// Parameter that marks a `DTSTART` as the anchor of a repeating task without a date
+/// (§8.1): a date the rule needs on the wire and the task does not have in the vault.
+pub const ANCHOR_PARAM: &str = "X-RESTASK-ANCHOR";
 
 /// Maximum octets per physical line before folding (§8.1).
 const FOLD_LIMIT: usize = 75;
@@ -98,6 +102,14 @@ pub fn to_vcalendar_as(
     }
     if let Some(start) = task.start {
         push_line(&mut out, &when_property("DTSTART", start));
+    } else if let Some(day) = series_anchor(task, now_utc, extras) {
+        push_line(
+            &mut out,
+            &format!(
+                "DTSTART;VALUE=DATE;{ANCHOR_PARAM}=TRUE:{}",
+                When::Date(day).to_ical()
+            ),
+        );
     }
     if let Some(due) = task.due {
         push_line(&mut out, &when_property("DUE", due));
@@ -172,6 +184,46 @@ fn format_utc_midnight(day: chrono::NaiveDate) -> String {
 
 /// Emits a date property: all-day values carry `VALUE=DATE`, floating date-times carry no
 /// parameter and no `Z` (§4).
+/// The day a repeating task without a start and without a due date is anchored at on
+/// the wire (§8.1), `None` for every other task. A rule has no first occurrence without
+/// a date, and servers refuse such a `VTODO` (Radicale answers 400). The day is the
+/// scheduled date, else the creation date, else the day the UID was minted — the same
+/// at every put — and only then today.
+fn series_anchor(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> Option<LocalDate> {
+    if task.due.is_some() {
+        return None;
+    }
+    let mut nested = 0usize;
+    let mut ruled = task.recurrence.is_some();
+    for extra in extras {
+        let upper = extra.to_ascii_uppercase();
+        if upper.starts_with("BEGIN:") {
+            nested += 1;
+        } else if upper.starts_with("END:") {
+            nested = nested.saturating_sub(1);
+        } else if nested == 0 {
+            // Another client's own dates are its anchor.
+            if matches!(property_name(&upper), "DTSTART" | "DUE" | "DURATION") {
+                return None;
+            }
+            ruled |= is_rrule(&upper);
+        }
+    }
+    if !ruled {
+        return None;
+    }
+    let scheduled = task.scheduled.map(|when| match when {
+        When::Date(day) => day,
+        When::DateTime(at) => LocalDate(at.0.date()),
+    });
+    Some(
+        scheduled
+            .or(task.created)
+            .or_else(|| task.uid.created_on())
+            .unwrap_or(LocalDate(now_utc.date_naive())),
+    )
+}
+
 fn when_property(name: &str, when: When) -> String {
     match when {
         When::Date(_) => format!("{};VALUE=DATE:{}", name, when.to_ical()),

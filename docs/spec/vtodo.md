@@ -30,6 +30,17 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
   `PERCENT-COMPLETE:100` + `COMPLETED`.
 - `PRIORITY` per §3.2; `DTSTART` / `DUE` / `X-RESTASK-SCHEDULED` per §4 — each omitted
   when absent.
+- **Anchor.** A task with a repeat rule — its own, or an unmanaged one among the extras
+  — and neither a start nor a due date is written with
+  `DTSTART;VALUE=DATE;X-RESTASK-ANCHOR=TRUE:<day>` in the place of `DTSTART`. A rule has
+  no first occurrence without a date, and a server may refuse such a `VTODO` (Radicale
+  answers 400 at every put, so the task never left the vault). The day is the scheduled
+  date, else the creation date, else the day the UID was minted (the same at every put),
+  else today. The anchor is the wire's alone: read back (§8.2) it is not a start date,
+  so the line gets no `🛫` and the next occurrence is still counted from the day the task
+  is done (§11.6). A date the task gets later replaces it. A client that rewrites the
+  property without the parameter has given the task a start date, which then reaches
+  the line like any other.
 - `RRULE:<canonical rule>` when the task has a repeat rule (§3.6). It is written once: an
   `RRULE` among the extras is dropped when the task carries its own.
 - `RELATED-TO;RELTYPE=PARENT:<uid>` when the task has a parent.
@@ -83,6 +94,8 @@ Collections are shared with other clients, so the parser is forgiving:
   `chrono::Local`; tests pass a `FixedOffset` or a `chrono_tz::Tz`.
 - `X-RESTASK-UID` is read as a restask UID or not at all; whether it is believed is the
   planner's decision (§11 R5).
+- A `DTSTART` with the parameter `X-RESTASK-ANCHOR` (§8.1 *Anchor*) is no start date
+  and no extra: it is dropped, and written again by the next put that needs it.
 - `RRULE`: a rule the vault can spell exactly (§3.6) becomes `task.recurrence`; any other
   rule is an extra, handed back as written.
 - **Extras**: every property the serializer does not own, and every nested component
