@@ -30,7 +30,7 @@ import {
 	type TransactionSpec,
 } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { uidToken } from "./conceal";
+import { sealLine, uidToken } from "./conceal";
 import {
 	TASK_START,
 	declaresRoot,
@@ -361,6 +361,36 @@ function hiddenRanges(view: EditorView): DecorationSet {
 	return Decoration.set(ranges);
 }
 
+const SEAL_HIDDEN = Decoration.line({ class: "restask-seal-line" });
+
+/** The line decoration that hides the seal line of the frontmatter (§7.2), when the document has one. */
+function hiddenSeal(view: EditorView): DecorationSet {
+	const doc = view.state.doc;
+	const head: string[] = [];
+	for (let n = 1; n <= Math.min(doc.lines, 64); n++) {
+		const text = doc.line(n).text;
+		head.push(text);
+		if (n > 1 && text === "---") break;
+	}
+	const at = sealLine(head);
+	return at < 0 ? Decoration.none : Decoration.set([SEAL_HIDDEN.range(doc.line(at + 1).from)]);
+}
+
+const sealConcealer = ViewPlugin.fromClass(
+	class {
+		decorations: DecorationSet;
+
+		constructor(view: EditorView) {
+			this.decorations = hiddenSeal(view);
+		}
+
+		update(update: ViewUpdate): void {
+			if (update.docChanged) this.decorations = hiddenSeal(update.view);
+		}
+	},
+	{ decorations: (plugin) => plugin.decorations },
+);
+
 const uidConcealer = ViewPlugin.fromClass(
 	class {
 		decorations: DecorationSet;
@@ -378,7 +408,7 @@ const uidConcealer = ViewPlugin.fromClass(
 
 /** The editor extension of §15.5: the token is hidden, and edits cannot lose it by accident. */
 export function uidConcealment(): Extension {
-	return [uidGuard, uidConcealer];
+	return [uidGuard, uidConcealer, sealConcealer];
 }
 
 /** How carrying a mirror line's edit to its note went: done, no note has the task, or not possible now. */

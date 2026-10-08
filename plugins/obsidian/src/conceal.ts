@@ -48,3 +48,18 @@ export function stripUid(text: string): string {
 	if (span === undefined) return text;
 	return text.slice(0, blanksBefore(text, span.start, 0)) + text.slice(span.end);
 }
+
+const SEAL_LINE = /^restask-render: [0-9a-f]{16}$/;
+
+/**
+ * Index of the line that holds a view's seal (docs/spec/markdown.md §7.2) in the
+ * frontmatter block of `lines`, or -1 when the file has none. The seal is the engine's
+ * bookkeeping, not something to read or edit, so the editor does not show it.
+ */
+export function sealLine(lines: readonly string[]): number {
+	if (lines[0] !== "---") return -1;
+	for (let i = 1; i < lines.length && lines[i] !== "---"; i++) {
+		if (SEAL_LINE.test(lines[i])) return i;
+	}
+	return -1;
+}

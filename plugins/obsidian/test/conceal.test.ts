@@ -1,7 +1,7 @@
 //! §15.5 locating the hidden `🆔` token: which lines have one, and what exactly is hidden.
 
 import { describe, expect, it } from "vitest";
-import { stripUid, uidToken } from "../src/conceal";
+import { sealLine, stripUid, uidToken } from "../src/conceal";
 
 const UID = "restask-01jzq4tsvg2c9xkw7n5m8rhdpf";
 const LEGACY = "taskres-01jzq4tsvg2c9xkw7n5m8rhdpf";
@@ -68,5 +68,16 @@ describe("§15.5 stripUid (reading view)", () => {
 	it("leaves other text alone", () => {
 		expect(stripUid("Buy milk")).toBe("Buy milk");
 		expect(stripUid("🆔 restask-nope")).toBe("🆔 restask-nope");
+	});
+});
+
+describe("sealLine", () => {
+	it("finds the seal in the frontmatter", () => {
+		expect(sealLine(["---", "restask-list: inbox", "restask-render: 9c1f0e2a7b3d4f56", "---", "# TODO"])).toBe(2);
+	});
+	it("ignores a seal outside the frontmatter or malformed", () => {
+		expect(sealLine(["# TODO", "restask-render: 9c1f0e2a7b3d4f56"])).toBe(-1);
+		expect(sealLine(["---", "---", "restask-render: 9c1f0e2a7b3d4f56"])).toBe(-1);
+		expect(sealLine(["---", "restask-render: nope", "---"])).toBe(-1);
 	});
 });

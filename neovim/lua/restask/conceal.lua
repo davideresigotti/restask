@@ -9,6 +9,34 @@ local guard = require("restask.guard")
 --- The token of §6.1 on a task line, with the one blank before it, as a Vim pattern.
 M.PATTERN = [[^[ \t]*[-*+][ \t]\+\[[ xX]\][ \t]\+.\{-}\zs[ \t]\=🆔[ \t]\+\%(restask\|taskres\)-[0-9a-hjkmnp-tv-z]\{26}]]
 
+--- The seal of a rendered view (§7.2), a frontmatter line the engine owns: hidden whole.
+-- The line is not drawn at all (`conceal_lines`, Neovim 0.11), so no blank row is left.
+M.SEAL = "^restask%-render: %x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x$"
+
+--- The namespace of the seal's extmark (created on first use).
+local function seal_ns()
+	return vim.api.nvim_create_namespace("restask_seal")
+end
+
+--- Hides the seal line of the frontmatter of `buf`, or clears the hiding when there is none.
+---@param buf integer
+function M.hide_seal(buf)
+	vim.api.nvim_buf_clear_namespace(buf, seal_ns(), 0, -1)
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, 64, false)
+	if lines[1] ~= "---" then
+		return
+	end
+	for i = 2, #lines do
+		if lines[i] == "---" then
+			return
+		end
+		if lines[i]:match(M.SEAL) then
+			pcall(vim.api.nvim_buf_set_extmark, buf, seal_ns(), i - 1, 0, { end_row = i - 1, conceal_lines = "" })
+			return
+		end
+	end
+end
+
 --- Modes in which the cursor line is concealed too; they are added to the window's
 -- 'concealcursor'. All of them: the token is never shown, the guard protects it instead.
 M.concealcursor = "nvic"
@@ -65,6 +93,7 @@ function M.refresh()
 	local wanted = is_note(buf)
 	local state = vim.w.restask_conceal
 	if wanted then
+		M.hide_seal(buf)
 		state = state
 			or {
 				match = vim.fn.matchadd("Conceal", M.PATTERN, 10, -1, { conceal = "" }),
@@ -85,6 +114,7 @@ function M.refresh()
 		end
 	elseif state then
 		pcall(vim.fn.matchdelete, state.match)
+		vim.api.nvim_buf_clear_namespace(buf, seal_ns(), 0, -1)
 		if vim.wo.conceallevel == state.set_level then
 			vim.wo.conceallevel = state.level
 		end
@@ -208,6 +238,14 @@ function M.register(opts)
 		group = group,
 		pattern = { "conceallevel", "concealcursor" },
 		callback = M.refresh,
+	})
+	vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "BufReadPost", "FileChangedShellPost" }, {
+		group = group,
+		callback = function(event)
+			if vim.w.restask_conceal and event.buf == vim.api.nvim_get_current_buf() then
+				M.hide_seal(event.buf)
+			end
+		end,
 	})
 	if M.guard then
 		vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {

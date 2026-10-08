@@ -48,7 +48,7 @@ The symbols for priority, dates and other metadata are inspired by [Tasks](https
 - It shows all the calendars you choose, not just one. `restask setup` asks which calendars appear and which one receives new tasks. A task from another calendar carries its name on the line (`- [ ] Update README 🔺 📁 work`); change the name to move the task.
 - Tasks are grouped by priority. Those without a priority sit under `## No Priority`.
 - The section and the priority emoji always agree: type a task under a heading and it gets that priority, move it to another section and the priority follows, and the other way round.
-- The file is generated, so only the tasks you add or edit there are kept. Besides the tasks, it contains just two frontmatter properties, `restask-list` and `restask-render`. Leave them alone.
+- The file is generated, so only the tasks you add or edit there are kept. Besides the tasks, it contains just two frontmatter properties, `restask-list` and `restask-render`. Leave them alone; the Obsidian plugin and the Neovim integration hide `restask-render`.
 
 ## Vault Tasks & Subtasks
 - Every checkbox in a routed note is a task. An indented checkbox is a subtask of the one above it.

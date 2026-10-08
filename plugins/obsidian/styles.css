@@ -1,1 +1,7 @@
 /* restask — Obsidian plugin styles. */
+
+/* The seal of a rendered view is the engine's bookkeeping: hidden in the editor and in the Properties panel. */
+.cm-line.restask-seal-line,
+.metadata-property[data-property-key="restask-render"] {
+	display: none;
+}
