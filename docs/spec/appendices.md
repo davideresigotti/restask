@@ -100,6 +100,14 @@ On push and pull request, three jobs on `ubuntu-latest`:
   `install` share it, and the script leaves it open. Run by itself (`update.sh`) the
   script opens its own, where ssh asks what it needs, and closes it on exit.
   Remote paths are passed as quoted arguments, never spliced into a command line.
+  - `stack <host> <vault>` (setup's `prepare_node`, when no `--node-dir` is given):
+    prints the directory of that vault's stack and nothing else. In order: the compose
+    working directory of a container of service `restask` that mounts `<vault>` at
+    `/vault` — a stack is found wherever it was put; a directory `restask` or
+    `restask-*` in the ssh user's home whose compose file mounts it (a stack with no
+    container); else the first of `restask`, `restask-<name>`, `restask-<name>-2` …
+    that holds no compose file, `<name>` being the vault folder's name in lower case
+    with dashes (a leading `restask-` of its own is not doubled).
   - `check <host> <vault> [<dir>]` (setup's `prepare_node`): ssh works; `docker compose
     version` answers; `<vault>` is a folder; a stack already in `<dir>` mounts that
     folder (`docker compose config`), else it is refused; a running stack is stopped.
@@ -107,7 +115,9 @@ On push and pull request, three jobs on `ubuntu-latest`:
     and password on standard input, one per line): creates `<dir>/data`, owned by the
     owner of the vault's files; when the stack has no compose file yet, writes `.env`
     (that owner, this machine's time zone — completion dates are the user's local days,
-    whatever the server's clock says) and the compose file; replaces `src/` with the
+    whatever the server's clock says —, and `COMPOSE_PROJECT_NAME`, the directory's
+    name: the compose file names project, container and image after it, so two vaults'
+    stacks share none of them) and the compose file; replaces `src/` with the
     files the image is built from (tracked and new ones under `Cargo.toml`,
     `Cargo.lock`, `crates/`, the Dockerfile; without git, those paths minus `target/`);
     builds. Then the **barrier**: the SHA-256 of every `*.md`, of `restask.toml` and of
@@ -120,15 +130,19 @@ On push and pull request, three jobs on `ubuntu-latest`:
     A pass over files still on their way would be the second writer of §1.1.
   - `update <host> [<dir>]`: `src/`, build, `up -d`, log, running check, and the images
     the build replaced are pruned by label.
-  It never rewrites an existing compose file or `.env`. `<dir>` defaults to `restask`
-  in the ssh user's home directory.
+  It never rewrites an existing compose file or `.env` (a stack from before the
+  per-directory names keeps `restask` for all three; it is the first vault's). `<dir>`
+  defaults to `restask` in the ssh user's home directory.
 - `update.sh [<ssh-host> [<stack-dir>]]`: brings what runs restask up to the working
-  tree. In order: `cargo install` when a `restask` is on `PATH`; restart of the user unit
-  when it is enabled (the script fails if it is not `active` afterwards); the three
-  plugin files into `<vault>/.obsidian/plugins/restask/` when they differ — vault from
-  `RESTASK_VAULT`, else the unit's `--vault`, else the machine config; never over
-  symlinks, never `data.json`; then `node.sh update` for the sync node — host and stack
-  from the arguments, else `RESTASK_SERVER` / `RESTASK_SERVER_DIR`, else `[node]` of
-  the machine config (§14.2); a host with no stack named anywhere means
-  `/opt/docker/restask`; no host, no node step. It never writes `data/` or the stack's
-  compose file, and never runs `restask setup`.
+  tree, for every vault of the machine. In order: `cargo install` when a `restask` is on
+  `PATH`; restart of each enabled user unit (`restask.service`, `restask-*.service`;
+  the script fails if one is not `active` afterwards); the three plugin files into
+  `<vault>/.obsidian/plugins/restask/` when they differ — the vaults of `RESTASK_VAULT`,
+  of the units' `--vault` and of every machine config (§14.2: `config.toml` and
+  `vaults/*/config.toml`, or the one `RESTASK_CONFIG` names); never over symlinks,
+  never `data.json`; then `node.sh update` for the sync nodes — host and stack from the
+  arguments, else `RESTASK_SERVER` / `RESTASK_SERVER_DIR`; with a host and no stack,
+  every stack on that host a machine config records in `[node]` (one per vault), and
+  `/opt/docker/restask` when none does; with neither, every recorded stack on every
+  host; nothing recorded, no node step. It never writes `data/` or a stack's compose
+  file, and never runs `restask setup`.

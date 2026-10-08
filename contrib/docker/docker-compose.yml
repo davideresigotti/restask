@@ -1,18 +1,19 @@
 # The restask sync node as a compose stack (docs/INSTALL-AI.md, spec App. E). `restask setup`
 # puts this file into the stack directory on the server (through `contrib/node.sh`),
 # next to
-#   .env    RESTASK_VAULT_DIR, RESTASK_USER and TZ for this server
+#   .env    RESTASK_VAULT_DIR, RESTASK_USER and TZ for this server, and
+#           COMPOSE_PROJECT_NAME: the stack's name. One stack serves one vault; a second
+#           vault on the same server is a second directory with another name
 #   src/    the restask sources the image is built from
 #   data/   this machine's config, written by `restask setup --join`; never synced
 # By hand: copy it there, write .env, and see docs/INSTALL-AI.md "A server without the wizard".
-name: restask
 services:
   restask:
     build:
       context: ./src
       dockerfile: contrib/docker/Dockerfile
-    image: restask
-    container_name: restask
+    image: ${COMPOSE_PROJECT_NAME:-restask}
+    container_name: ${COMPOSE_PROJECT_NAME:-restask}
     restart: unless-stopped
     # The owner of the vault's files on this server: the daemon writes notes as that user.
     user: "${RESTASK_USER:-1000:1000}"

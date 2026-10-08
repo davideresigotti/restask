@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # The sync node — the one machine that runs the restask daemon (spec §1.1) — as a Docker
 # compose stack on an always-on server, driven from here over ssh (docs/INSTALL-AI.md, spec
-# App. E). `restask setup` runs `check` and `install`; `contrib/update.sh` runs `update`.
+# App. E). `restask setup` runs `stack`, `check` and `install`; `contrib/update.sh` runs
+# `update`. A server holds one stack per vault.
+#
+#   contrib/node.sh stack   <ssh-host> <vault-on-host>
+#       Prints the stack directory of that vault, and nothing else: the stack that
+#       already serves it — wherever it is, when its container exists, else among
+#       `restask` and `restask-*` in the ssh user's home directory — else a directory
+#       no stack is in: `restask`, then `restask-<vault folder>` (a folder called
+#       `restask-x` gives `restask-x`).
 #
 #   contrib/node.sh check   <ssh-host> <vault-on-host> [<stack-dir>]
 #       The host is reachable, has Docker with compose, holds the vault folder, and
@@ -22,6 +30,8 @@
 # stack holds  docker-compose.yml  .env  src/  data/ ; install and update replace src/
 # and the image, install also writes data/ (the machine config) through the join.
 # A stack's own docker-compose.yml and .env are never rewritten once they exist.
+# Project, container and image of a stack are named after its directory (.env), so the
+# stacks of two vaults share nothing.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,7 +39,7 @@ cd "$(dirname "$0")/.."
 die() { printf 'node: %s\n' "$*" >&2; exit 1; }
 say() { printf '   %s\n' "$*"; }
 
-[ $# -ge 2 ] || die "usage: node.sh check|install|update <ssh-host> … (see the head of this file)"
+[ $# -ge 2 ] || die "usage: node.sh stack|check|install|update <ssh-host> … (see the head of this file)"
 action="$1"
 host="$2"
 
@@ -111,6 +121,43 @@ REMOTE
 manifest='find . -type d -name ".?*" ! -name .restask -prune -o -type f \( -name "*.md" -o -name restask.toml -o -path "./.restask/*" \) ! -name lock ! -name "*.sync-conflict-*" ! -name "*.restask-tmp" ! -name ".syncthing.*" -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum'
 
 case "$action" in
+stack)
+    [ $# -eq 3 ] || die "usage: node.sh stack <ssh-host> <vault-on-host>"
+    vault="${3%/}"
+    remote "$vault" <<'REMOTE'
+vault="$1"
+# 1. A container of a restask stack that mounts the vault says where its stack is.
+for id in $(docker ps -aq --filter label=com.docker.compose.service=restask 2>/dev/null); do
+    mounted="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/vault"}}{{.Source}}{{end}}{{end}}' "$id" 2>/dev/null)"
+    if [ "${mounted%/}" = "$vault" ]; then
+        dir="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$id" 2>/dev/null)"
+        if [ -n "$dir" ] && [ -f "$dir/docker-compose.yml" ]; then
+            printf '%s\n' "${dir#"$HOME"/}"
+            exit 0
+        fi
+    fi
+done
+# 2. A stack without a container (stopped and removed, or never started).
+for dir in restask restask-*; do
+    [ -f "$dir/docker-compose.yml" ] || continue
+    if (cd "$dir" && docker compose config 2>/dev/null) |
+        awk -v vault="$vault" '{ line = $0; sub(/^[ \t-]*source:[ \t]*/, "", line); sub(/\/$/, "", line); if ($0 ~ /source:/ && line == vault) found = 1 } END { exit !found }'; then
+        printf '%s\n' "$dir"
+        exit 0
+    fi
+done
+# 3. A directory no stack is in.
+name="$(basename "$vault" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//; s/^restask-//')"
+dir=restask
+count=1
+while [ -f "$dir/docker-compose.yml" ]; do
+    if [ "$count" -eq 1 ]; then dir="restask-${name:-vault}"; else dir="restask-${name:-vault}-$count"; fi
+    count=$((count + 1))
+done
+printf '%s\n' "$dir"
+REMOTE
+    ;;
+
 check)
     [ $# -ge 3 ] || die "usage: node.sh check <ssh-host> <vault-on-host> [<stack-dir>]"
     vault="${3%/}"
@@ -166,7 +213,9 @@ cd "$stack"
 owner="$(stat -c '%u:%g' "$vault")"
 if [ ! -f docker-compose.yml ]; then
     # The daemon runs as the owner of the vault's files and writes its config as that user.
-    printf "RESTASK_VAULT_DIR='%s'\nRESTASK_USER=%s\nTZ=%s\n" "$vault" "$owner" "$zone" >.env
+    # The stack is named after its directory: project, container and image are its own.
+    project="$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//')"
+    printf "RESTASK_VAULT_DIR='%s'\nRESTASK_USER=%s\nTZ=%s\nCOMPOSE_PROJECT_NAME=%s\n" "$vault" "$owner" "$zone" "${project:-restask}" >.env
 fi
 if [ "$(stat -c '%u:%g' data)" != "$owner" ]; then
     chown "$owner" data 2>/dev/null || {
@@ -223,6 +272,6 @@ update)
     ;;
 
 *)
-    die "unknown action \`$action\` (check, install, update)"
+    die "unknown action \`$action\` (stack, check, install, update)"
     ;;
 esac

@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 
 use crate::caldav::{CaldavClient, CaldavPort, Offline};
-use crate::config::{machine_config_path, ConfigError, MachineConfig, VaultConfig};
+use crate::config::{machine_config_path_for, ConfigError, MachineConfig, VaultConfig};
 use crate::daemon::{self, DaemonConfig};
 use crate::domain::{Clock, Priority, Recurrence, Status, SystemClock, TaskUid, When};
 use crate::markdown::{is_view, parse};
@@ -81,8 +81,9 @@ pub enum Command {
         /// The vault's folder on the `--node` machine.
         #[arg(long, value_name = "PATH", requires = "node")]
         node_vault: Option<String>,
-        /// Where the daemon's files go on the `--node` machine (default: `restask` in
-        /// the ssh user's home directory).
+        /// Where the daemon's files go on the `--node` machine (default: the stack that
+        /// already serves the vault there, else `restask` in the ssh user's home
+        /// directory, else `restask-<vault folder>` — one stack per vault).
         #[arg(long, value_name = "DIR", requires = "node")]
         node_dir: Option<String>,
         /// Do not install the daemon at all: it is installed by hand on another, always-on
@@ -203,7 +204,8 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Settle { file } => resolve_vault_for_file(vault.as_deref(), file.as_deref())?,
         _ => resolve_vault(vault.as_deref())?,
     };
-    let config_path = machine_config_path();
+    // One machine config per vault (§14.2): another vault's server is never this one's.
+    let config_path = machine_config_path_for(&vault);
     let machine = load_machine(&config_path)?;
     match command {
         Command::Setup {
@@ -301,7 +303,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Doctor {} => {
             // Diagnostics must run even when the machine config is unusable, so the
             // client is best-effort here instead of the catch-all below.
-            let caldav = server_client(&machine).ok();
+            let caldav = server_client(&machine, &config_path).ok();
             let report = doctor(
                 &vault,
                 &machine,
@@ -318,7 +320,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
         Command::Lists => print_lists(&vault, &machine, Arc::new(SystemClock)),
         Command::Settle { .. } => settle(&vault, machine, Arc::new(SystemClock)).await,
         Command::Daemon { once } => {
-            let caldav = server_client(&machine)?;
+            let caldav = server_client(&machine, &config_path)?;
             let dc = DaemonConfig {
                 poll_secs: machine.caldav.poll_secs,
                 watch_ms: machine.caldav.watch_secs.saturating_mul(1_000),
@@ -345,7 +347,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             // The vault part of these commands needs no server; without a configured
             // endpoint they still save locally and say so. A machine that leaves the
             // syncing to the sync node builds no client at all.
-            match server_client(&machine) {
+            match server_client(&machine, &config_path) {
                 Ok(caldav) => {
                     run_with(
                         local,
@@ -371,7 +373,7 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
             }
         }
         server => {
-            let caldav = server_client(&machine)?;
+            let caldav = server_client(&machine, &config_path)?;
             run_with(
                 server,
                 vault,
@@ -388,10 +390,13 @@ pub async fn execute(cli: Cli) -> Result<i32, RestaskError> {
 /// The CalDAV client of a command that is server work (`sync`, `daemon`). A machine that
 /// leaves the syncing to the vault's sync node (`[node]`, §14.2) is refused one: a pass
 /// from a second machine races the file sync (§1.1).
-fn server_client(machine: &MachineConfig) -> Result<CaldavClient, RestaskError> {
+fn server_client(
+    machine: &MachineConfig,
+    config_path: &Path,
+) -> Result<CaldavClient, RestaskError> {
     match &machine.node {
         Some(node) => Err(RestaskError::Config {
-            path: machine_config_path().display().to_string(),
+            path: config_path.display().to_string(),
             reason: format!(
                 "this machine only edits the vault: {} syncs it with the server. \
                  `restask settle` does the local work here",

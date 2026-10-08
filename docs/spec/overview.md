@@ -27,6 +27,12 @@ that other clients (Tasks.org, Thunderbird) read and write.
   makes no pass; `restask sync` and `restask daemon` refuse there, and `add` / `done` /
   `undone` settle the vault and stop (§13.3). What a daemon would add on such a machine —
   immediacy — the integrations already give (§15.6, §16).
+- **Several vaults** are several of these, side by side and sharing nothing: each vault
+  has its own `restask.toml` and `.restask/`, its own server or calendars, its own
+  daemon — on a server one compose stack per vault (§13.2 step 6, App. E), on a
+  computer one unit per vault — and, on every machine that works on it, its own machine
+  config (§14.2). A machine can be the sync node of one vault and an editing machine of
+  another.
 - **Why not two.** A vault has two ways to another machine: the file sync, and — through
   two daemons — the server. A pass on machine A pushes an edit at once; the daemon on B
   hears of it from the server watch within seconds (§13.1), before the file sync has

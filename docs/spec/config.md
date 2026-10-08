@@ -34,9 +34,29 @@ and they need no `ignore` entry.
 
 ### 14.2 Machine config — `$XDG_CONFIG_HOME/restask/config.toml` (0600; never synced)
 
+**One per vault.** A machine may work on several vaults, each with its own server, its
+own sync node, its own daemon; a command run in one never loads what belongs to another
+(`config::machine_config_of`). A config is known by the vault its `[vault] path` names:
+
+1. a further config, `$XDG_CONFIG_HOME/restask/vaults/<name>/config.toml`, that names
+   the vault the command works on (links resolved);
+2. else `config.toml` itself — when it does not exist yet, names this vault, names no
+   vault, or names a folder this machine does not have (a hand-written path, a vault
+   that was moved). A machine with one vault has this one file, as before;
+3. else — `config.toml` is another vault's — a further config of this vault's own:
+   `<name>` is the vault folder's name in lower case, runs of other characters a dash
+   (`Work Notes` → `work-notes`), with `-2`, `-3` … when a vault of the same folder name
+   holds that directory. Until setup writes it the vault has no machine config (the
+   defaults: no server), never a borrowed one.
+
+`RESTASK_CONFIG` names the file outright and ends the search. What lies beside a config
+is per vault with it: the password file (§17), and the name of the daemon's unit on
+this machine (`setup::daemon_unit_name`: `restask.service` beside `config.toml`,
+`restask-<name>.service` beside a further config).
+
 ```toml
 [vault]
-path = "/opt/docker/syncthing/data/obsidian"   # informational; commands resolve the vault per §13.3
+path = "/opt/docker/syncthing/data/obsidian"   # the vault this config is for; commands resolve the vault per §13.3
 
 [caldav]
 url  = "http://192.168.1.10:5232"              # use HTTPS beyond a trusted LAN
@@ -58,14 +78,15 @@ path = "/home/me/Vault"
 
 [node]                                         # this vault's daemon runs elsewhere
 host = "myserver"                              # ssh host of the sync node …
-dir = "restask"                                # … the directory of its stack there …
+dir = "restask"                                # … the directory of this vault's stack there …
 vault = "/srv/sync/vault"                      # … and the vault's folder there
 url = "http://192.168.1.10:5232"               # the endpoint that daemon syncs with:
 username = "me"                                # what `restask lists` prints URLs from
 ```
 
 `host`, `dir` and `vault` are absent when the daemon was installed by hand
-(`--no-daemon`). `contrib/update.sh` reads `host` and `dir`.
+(`--no-daemon`). `contrib/update.sh` reads `host` and `dir` of every config of the
+machine.
 
 - A literal `password = "…"` key anywhere is a **validation error**.
 - There is no list configuration: routing lives in the notes (§5). A `[[lists]]` table
@@ -83,7 +104,8 @@ override the file; `RESTASK_CALDAV_PASSWORD` wins over `password_env`, which win
 
 ## §17 Security
 
-- **Passwords** live only in `~/.config/restask/radicale.passwd` (0600) or an environment
+- **Passwords** live only in `radicale.passwd` (0600) beside the vault's machine config
+  (§14.2: `~/.config/restask/`, a further vault's directory under `vaults/` there) or an environment
   variable — never in `config.toml`, never in the vault, never in logs (the
   `Authorization` header is not logged; `CaldavClient`'s `Debug` redacts the password).
   Only the sync node has one. Setup hands it to a node through standard input — of

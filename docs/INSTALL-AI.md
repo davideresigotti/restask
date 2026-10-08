@@ -137,7 +137,8 @@ On the computer, `doctor` says which machine runs the daemon and how to read its
   restask setup --join --node <ssh-host> --node-vault <vault folder on the server>
   ```
 
-- **Where things go on the server.** `~/restask` of the ssh user: `docker-compose.yml`, `.env` (vault folder, user, time zone), `src/` (the sources), `data/` (the daemon's config and password, mode `0600`). `--node-dir <dir>` picks another directory. The container runs as the owner of the vault's files, in this computer's time zone.
+- **Where things go on the server.** `~/restask` of the ssh user: `docker-compose.yml`, `.env` (vault folder, user, time zone, the stack's name), `src/` (the sources), `data/` (the daemon's config and password, mode `0600`). `--node-dir <dir>` picks another directory. The container runs as the owner of the vault's files, in this computer's time zone.
+- **A second vault.** Run `restask setup` in it, like in the first: each vault has its own task server (or its own calendars), its own daemon and its own settings, and they share nothing. On the server the second vault gets a stack beside the first — `~/restask-<vault folder>`, with a container and an image of that name — and setup finds a vault's stack again by itself, so a later run never starts a second daemon for the same vault. On the computer each vault has its own machine config: the first in `~/.config/restask/config.toml`, a further one in `~/.config/restask/vaults/<vault folder>/config.toml`. A command finds the right one from the vault it is run in. A daemon on the computer itself is one unit per vault (`restask.service`, `restask-<vault folder>.service`).
 - **Without questions.** Every answer has a flag:
 
   ```bash
@@ -168,7 +169,7 @@ From the clone on your computer, one command updates everything that runs restas
 git pull && contrib/update.sh
 ```
 
-It reinstalls the `restask` command here, restarts this computer's daemon if it has one, refreshes the Obsidian plugin in the vault (reload Obsidian to load it), then sends the sources to the server setup installed on, rebuilds the image and restarts the daemon there, and shows its first log lines. It fails if a daemon does not come up. (`contrib/update.sh <ssh-host> [<dir>]` names the server explicitly.)
+It reinstalls the `restask` command here, restarts this computer's daemons if it has any, refreshes the Obsidian plugin in every vault set up here (reload Obsidian to load it), then sends the sources to each server stack setup installed — one per vault — rebuilds the image and restarts the daemon there, and shows its first log lines. It fails if a daemon does not come up. (`contrib/update.sh <ssh-host> [<dir>]` names the server, or one stack on it, explicitly.)
 
 Uninstalling:
 
@@ -179,4 +180,6 @@ rm ~/.config/systemd/user/restask.service                    # … and its unit
 cargo uninstall restask                                      # the command
 ```
 
-State lives entirely in `<vault>/.restask/` and the machine config (`~/.config/restask/` on a computer, the stack's `data/` on the server) — delete those to fully reset.
+A second vault's daemon is `cd restask-<vault folder>` on the server and `restask-<vault folder>.service` on a computer.
+
+State lives entirely in `<vault>/.restask/` and the machine config (`~/.config/restask/` on a computer — a further vault's under `vaults/` there —, the stack's `data/` on the server) — delete those to fully reset.

@@ -49,11 +49,11 @@ Thunderbird.
 | Project, CLI binary, Rust crate, plugin id | **`restask`** |
 | Per-vault state directory | `.restask/` (vault root, rides the file sync) |
 | Vault config | `restask.toml` (vault root, synced) |
-| Machine config | `$XDG_CONFIG_HOME/restask/config.toml` (never synced) |
+| Machine config | `$XDG_CONFIG_HOME/restask/config.toml` (never synced); one per vault — a further vault's is `vaults/<name>/config.toml` there (§14.2) |
 | Environment prefix | `RESTASK_*` |
 | Task UID | `restask-<ULID>` |
 | Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID`, `X-RESTASK-TEXT` |
-| Systemd unit / container | `restask.service` / `restask` |
+| Systemd unit / container | `restask.service` / `restask`; a further vault's are `restask-<name>.service` / `restask-<vault folder>` |
 
 The project was called *Taskres* in its first weeks. That name survives only as read-side
 compatibility: UIDs minted as `taskres-<ULID>` stay valid verbatim (UIDs are eternal) and
@@ -183,8 +183,8 @@ re-planned from fresh snapshots in the next pass.
 9. **One writer per vault per machine** (advisory lock on `.restask/lock`); all writes
    atomic; all state disposable — `restask rebuild` drops it and the next pass
    re-derives it.
-10. **Secrets never travel.** Passwords live only in `~/.config/restask/radicale.passwd`
-    (0600) or the environment — never in synced files, configs or logs.
+10. **Secrets never travel.** Passwords live only in `radicale.passwd` beside the vault's
+    machine config (0600) or the environment — never in synced files, configs or logs.
 11. **Timestamps follow §4.** Markdown dates are device-local; date-only values map to
     midnight UTC and back by UTC calendar date; timed dues are floating local time.
 12. **Local work is local, and the same everywhere.** Nothing that can be decided from

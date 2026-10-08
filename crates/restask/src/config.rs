@@ -501,3 +501,101 @@ pub fn machine_config_path_from<E: Fn(&str) -> Option<String>>(env: E) -> PathBu
         .unwrap_or_else(|| PathBuf::from(".config"));
     base.join("restask").join("config.toml")
 }
+
+/// The machine config of `vault` (§14.2): a machine has one per vault it works on, so
+/// that two vaults — each with its own server, its own sync node — never read each
+/// other's. `$RESTASK_CONFIG` names it outright; else see [`machine_config_of`].
+pub fn machine_config_path_for(vault: &Path) -> PathBuf {
+    machine_config_path_for_from(vault, |key| {
+        std::env::var(key).ok().filter(|value| !value.is_empty())
+    })
+}
+
+/// [`machine_config_path_for`] with an injectable environment lookup (hermetic tests).
+pub fn machine_config_path_for_from<E: Fn(&str) -> Option<String>>(
+    vault: &Path,
+    env: E,
+) -> PathBuf {
+    if let Some(path) = env(ENV_CONFIG).filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+    machine_config_of(&machine_config_path_from(env), vault)
+}
+
+/// Which file holds the machine config of `vault`, given the machine's first one, `main`
+/// (`…/restask/config.toml`). The file is known by the vault its `[vault] path` names:
+///
+/// 1. a further config, `…/restask/vaults/<name>/config.toml`, that names this vault;
+/// 2. `main`, when it is not there yet, names this vault, names none, or names a folder
+///    this machine does not have (a hand-written path, a vault that was moved): one
+///    config serves a machine with one vault, as it always did;
+/// 3. else — `main` is another vault's — a further config of this vault's own, in a
+///    directory called after the vault's folder (`-2`, `-3` … when another vault of that
+///    name has it). Whatever lies beside a config (the password file) is per vault too.
+pub fn machine_config_of(main: &Path, vault: &Path) -> PathBuf {
+    let further = main.parent().unwrap_or(Path::new(".")).join("vaults");
+    let mut configs: Vec<PathBuf> = fs::read_dir(&further)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| Some(entry.ok()?.path().join("config.toml")))
+                .filter(|config| config.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    configs.sort();
+    if let Some(own) = configs
+        .into_iter()
+        .find(|config| named_vault(config).is_some_and(|named| same_folder(&named, vault)))
+    {
+        return own;
+    }
+    match named_vault(main) {
+        Some(named) if !same_folder(&named, vault) && named.is_dir() => {}
+        _ => return main.to_path_buf(),
+    }
+    let name = folder_slug(vault);
+    let mut dir = further.join(&name);
+    let mut count = 1;
+    while dir.exists() {
+        count += 1;
+        dir = further.join(format!("{name}-{count}"));
+    }
+    dir.join("config.toml")
+}
+
+/// The vault a machine config names in `[vault] path`; `None` when the file is not
+/// there, does not parse or names none.
+fn named_vault(config: &Path) -> Option<PathBuf> {
+    let value: toml::Value = toml::from_str(&fs::read_to_string(config).ok()?).ok()?;
+    Some(PathBuf::from(value.get("vault")?.get("path")?.as_str()?))
+}
+
+/// Whether two paths are one folder, links resolved where the folders exist.
+fn same_folder(left: &Path, right: &Path) -> bool {
+    let resolved = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved(left) == resolved(right)
+}
+
+/// A vault folder's name as a directory name of this machine's configs: lower case,
+/// anything but letters and digits a dash.
+fn folder_slug(vault: &Path) -> String {
+    let name = fs::canonicalize(vault)
+        .unwrap_or_else(|_| vault.to_path_buf())
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "vault".to_string()
+    } else {
+        slug
+    }
+}

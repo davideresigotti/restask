@@ -15,12 +15,13 @@ use tempfile::TempDir;
 
 use common::{FixedClock, MockCaldav};
 use restask::cli;
-use restask::config::{MachineConfig, VaultConfig};
+use restask::config::{machine_config_of, MachineConfig, VaultConfig};
 use restask::setup::{
-    calendar_name, collection_label, daemon_unit_content, install_obsidian_plugin, is_loopback,
-    is_obsidian_main, joins, match_collection, node_link_args, offered_collections, open_vault_id,
-    parse_collections, run_setup, select_collections, DaemonFlags, DaemonHost, DaemonInstaller,
-    NodeAccess, NodeTarget, ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
+    calendar_name, collection_label, daemon_unit_content, daemon_unit_name,
+    install_obsidian_plugin, is_loopback, is_obsidian_main, joins, match_collection,
+    node_link_args, offered_collections, open_vault_id, parse_collections, run_setup,
+    select_collections, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess, NodeTarget,
+    ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -75,12 +76,13 @@ fn args(vault: &TempDir) -> SetupArgs {
     }
 }
 
-/// The always-on server of these tests.
+/// The always-on server of these tests. Where the vault's stack is there is the
+/// server's answer ([`RecordingInstaller::stack`]).
 fn node() -> NodeTarget {
     NodeTarget {
         host: "homeserver".to_string(),
         vault: "/srv/sync/vault".to_string(),
-        dir: "restask".to_string(),
+        dir: None,
     }
 }
 
@@ -174,6 +176,9 @@ struct RecordingInstaller {
     fail_node: bool,
     /// An ssh host that cannot be logged in to.
     unreachable: Option<String>,
+    /// The stack directory the node answers for a vault that names none: `restask`,
+    /// unless another vault's stack is there already.
+    stack: Option<String>,
 }
 
 impl RecordingInstaller {
@@ -233,7 +238,7 @@ impl DaemonInstaller for RecordingInstaller {
         Ok(())
     }
 
-    fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
+    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
         if self.fail_prepare {
             return Err(Self::injected());
         }
@@ -241,7 +246,11 @@ impl DaemonInstaller for RecordingInstaller {
             .lock()
             .unwrap()
             .push(format!("prepare {} | {}", node.host, self.todo()));
-        Ok(())
+        Ok(node
+            .dir
+            .clone()
+            .or_else(|| self.stack.clone())
+            .unwrap_or_else(|| "restask".to_string()))
     }
 
     fn install_node(
@@ -257,7 +266,7 @@ impl DaemonInstaller for RecordingInstaller {
             "install {} {} {} {} {} {} | {}",
             node.host,
             node.vault,
-            node.dir,
+            node.stack(),
             access.url,
             access.username,
             access.password.expose(),
@@ -1417,10 +1426,243 @@ fn the_flags_say_where_the_daemon_goes() {
     assert_eq!(
         elsewhere.resolve().unwrap(),
         DaemonHost::Node(NodeTarget {
-            dir: "/opt/docker/restask".to_string(),
+            dir: Some("/opt/docker/restask".to_string()),
             ..node()
         })
     );
+}
+
+#[tokio::test]
+async fn a_second_vault_on_the_server_gets_a_stack_and_a_machine_config_of_its_own() {
+    // The owner's case: their vault is served by the stack `restask` on the server, and
+    // a second vault — another folder there, another task server — is set up from the
+    // same computer. Each vault has its own stack, and this computer its own config
+    // for each: the first vault's is not touched.
+    let home = TempDir::new().unwrap();
+    let main = home.path().join("restask/config.toml");
+    let first = legacy_vault();
+    let installer = RecordingInstaller::default();
+    let first_config = machine_config_of(&main, first.path());
+    assert_eq!(first_config, main);
+    let first_args = SetupArgs {
+        config_path: first_config.clone(),
+        ..node_args(&first)
+    };
+    run_setup(first_args, MockCaldav::new(), clock(), Some(&installer))
+        .await
+        .unwrap();
+    let first_recorded = std::fs::read_to_string(&main).unwrap();
+    assert_eq!(
+        MachineConfig::load(&main).unwrap().node.unwrap().dir,
+        Some("restask".to_string())
+    );
+
+    // The second vault: the server answers with a directory beside the first stack.
+    let second = legacy_vault();
+    let second_config = machine_config_of(&main, second.path());
+    assert_ne!(second_config, main);
+    assert!(second_config.starts_with(home.path().join("restask/vaults")));
+    assert!(!joins(second.path(), &second_config, false).unwrap());
+    let installer = RecordingInstaller {
+        stack: Some("restask-work".to_string()),
+        ..RecordingInstaller::watching(&second)
+    };
+    let second_args = SetupArgs {
+        config_path: second_config.clone(),
+        url: "https://tasks.example.org".to_string(),
+        daemon: DaemonHost::Node(NodeTarget {
+            vault: "/srv/sync/work".to_string(),
+            ..node()
+        }),
+        ..node_args(&second)
+    };
+    let summary = run_setup(second_args, MockCaldav::new(), clock(), Some(&installer))
+        .await
+        .unwrap();
+    assert_eq!(summary.config_path, second_config);
+    assert!(
+        installer.node_calls()[1].starts_with(
+            "install homeserver /srv/sync/work restask-work https://tasks.example.org me s3cret"
+        ),
+        "{:?}",
+        installer.node_calls()
+    );
+    let recorded = MachineConfig::load(&second_config).unwrap();
+    assert_eq!(recorded.vault.path.as_deref(), Some(second.path()));
+    let recorded = recorded.node.unwrap();
+    assert_eq!(recorded.dir.as_deref(), Some("restask-work"));
+    assert_eq!(recorded.vault.as_deref(), Some("/srv/sync/work"));
+    assert_eq!(recorded.url.as_deref(), Some("https://tasks.example.org"));
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), first_recorded);
+
+    // Each vault finds its own config again, from then on.
+    assert_eq!(machine_config_of(&main, first.path()), main);
+    assert_eq!(machine_config_of(&main, second.path()), second_config);
+
+    // A node install that fails names the stack the server chose in the command that
+    // finishes it: a second run must not pick another directory.
+    let third = legacy_vault();
+    let failing = RecordingInstaller {
+        stack: Some("restask-notes".to_string()),
+        fail_node: true,
+        ..RecordingInstaller::default()
+    };
+    let third_args = SetupArgs {
+        config_path: machine_config_of(&main, third.path()),
+        ..node_args(&third)
+    };
+    let failed = run_setup(third_args, MockCaldav::new(), clock(), Some(&failing)).await;
+    let Err(RestaskError::Validation { reason, .. }) = failed else {
+        panic!("a failed node install must fail the run");
+    };
+    assert!(reason.contains("--node-dir \"restask-notes\""), "{reason}");
+}
+
+#[test]
+fn every_vault_has_a_daemon_unit_of_its_own() {
+    // The machine's first vault keeps the unit it always had; a further vault's unit is
+    // named after its config directory, so its setup never repoints the first daemon.
+    assert_eq!(
+        daemon_unit_name(Path::new("/home/me/.config/restask/config.toml")),
+        "restask.service"
+    );
+    assert_eq!(
+        daemon_unit_name(Path::new(
+            "/home/me/.config/restask/vaults/work/config.toml"
+        )),
+        "restask-work.service"
+    );
+    // A config named outright (`RESTASK_CONFIG`) is the machine's one.
+    assert_eq!(
+        daemon_unit_name(Path::new("/srv/vaults/config.toml")),
+        "restask.service"
+    );
+    assert_eq!(
+        daemon_unit_name(Path::new("config.toml")),
+        "restask.service"
+    );
+}
+
+/// Runs `contrib/node.sh stack` for `vault` against a stand-in for the server: an `ssh`
+/// that runs the script it is sent in `home`, and a `docker` that answers from files
+/// there — `containers` (one `id|mounted folder|stack directory` per line) and, in a
+/// stack directory, `mounts` (the folder its compose file mounts). Neither starts
+/// anything. Returns what the script printed.
+#[cfg(unix)]
+fn node_stack(home: &Path, vault: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = TempDir::new().unwrap();
+    let ssh = "#!/bin/bash\ncd \"$FAKE_HOME\" && HOME=\"$FAKE_HOME\" eval \"${@: -1}\"\n";
+    let docker = r#"#!/bin/bash
+case "$1" in
+ps) [ -f "$FAKE_HOME/containers" ] && cut -d'|' -f1 "$FAKE_HOME/containers" ;;
+inspect)
+    line="$(grep "^$4|" "$FAKE_HOME/containers")"
+    case "$3" in *Mounts*) echo "$line" | cut -d'|' -f2 ;; *) echo "$line" | cut -d'|' -f3 ;; esac ;;
+compose) [ "$2" = config ] && printf '    volumes:
+      - type: bind
+        source: %s
+        target: /vault
+' "$(cat mounts)" ;;
+esac
+"#;
+    for (name, body) in [("ssh", ssh), ("docker", docker)] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = std::process::Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/node.sh"))
+        .args(["stack", "homeserver", vault])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("FAKE_HOME", home)
+        .env(
+            restask::setup::ENV_SSH_CONTROL,
+            "/run/user/1000/restask-ssh-7/%C",
+        )
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A stack directory in `home` whose compose file mounts `vault`.
+#[cfg(unix)]
+fn stack_serving(home: &Path, dir: &str, vault: &str) {
+    let dir = home.join(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+    std::fs::write(dir.join("mounts"), vault).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_server_gives_every_vault_a_stack_of_its_own() {
+    // The owner's run: the stack `restask` serves their vault, and setup for a second
+    // vault stopped at "the stack in restask serves another vault". The server now
+    // answers with the stack of the vault that is asked about.
+    let server = TempDir::new().unwrap();
+    let home = server.path();
+
+    // A server without restask: the first vault gets `restask`, as it always did.
+    assert_eq!(node_stack(home, "/srv/sync/obsidian"), "restask\n");
+    stack_serving(home, "restask", "/srv/sync/obsidian");
+
+    // That vault again — a second run, another computer joining: its own stack, also
+    // when the folder is typed with a slash at the end.
+    assert_eq!(node_stack(home, "/srv/sync/obsidian"), "restask\n");
+    assert_eq!(node_stack(home, "/srv/sync/obsidian/"), "restask\n");
+
+    // Another vault: a directory beside it, named after the vault's folder.
+    assert_eq!(
+        node_stack(home, "/srv/sync/Work Notes"),
+        "restask-work-notes\n"
+    );
+    assert_eq!(
+        node_stack(home, "/srv/sync/restask-vault"),
+        "restask-vault\n"
+    );
+    stack_serving(home, "restask-vault", "/srv/sync/restask-vault");
+    assert_eq!(
+        node_stack(home, "/srv/sync/restask-vault"),
+        "restask-vault\n"
+    );
+    assert_eq!(node_stack(home, "/srv/sync/obsidian"), "restask\n");
+
+    // A third vault whose folder has the name of the second's: no stack is shared.
+    assert_eq!(
+        node_stack(home, "/mnt/other/restask-vault"),
+        "restask-vault-2\n"
+    );
+
+    // A stack kept somewhere else (`--node-dir`) is found through its container, so a
+    // run that names no directory never starts a second daemon for that vault.
+    let elsewhere = TempDir::new().unwrap();
+    stack_serving(elsewhere.path(), "stacks/tasks", "/srv/sync/team");
+    let custom = elsewhere.path().join("stacks/tasks");
+    std::fs::write(
+        home.join("containers"),
+        format!(
+            "abc|/srv/sync/obsidian|{}\ndef|/srv/sync/team|{}\n",
+            home.join("restask").display(),
+            custom.display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        node_stack(home, "/srv/sync/team"),
+        format!("{}\n", custom.display())
+    );
+    // A stack in the home directory is named as before, relative to it.
+    assert_eq!(node_stack(home, "/srv/sync/obsidian"), "restask\n");
 }
 
 #[test]

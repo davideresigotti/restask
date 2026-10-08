@@ -3,7 +3,8 @@
 # Secrets: a literal `password` key here is a validation error. Use password_file (0600)
 #   or password_env instead. Reference: docs/spec/config.md §14.2, §17.
 
-# vault (optional; usually discovered per §13.3)
+# One file per vault: this one for the machine's first vault, a further vault's in
+# vaults/<vault folder>/config.toml beside it (§14.2). `path` says which vault a file is for.
 [vault]
 path = "/opt/docker/syncthing/data/obsidian"
 
@@ -24,7 +25,7 @@ allow_create_lists = true           # MKCOL missing collections on first push
 #
 # [node]
 # host = "myserver"                 # ssh host of the sync node
-# dir = "restask"                   # its stack directory there
+# dir = "restask"                   # this vault's stack directory there
 # vault = "/srv/sync/vault"         # the vault's folder there
 # url = "http://192.168.1.10:5232"  # the endpoint that daemon syncs with
 # username = "me"

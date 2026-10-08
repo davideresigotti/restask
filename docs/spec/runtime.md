@@ -153,11 +153,20 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
      session, writes `$XDG_CONFIG_HOME/systemd/user/restask.service` (absolute, quoted
      `ExecStart=<this binary> daemon --vault <vault>`, `Restart=on-failure`), runs
      `systemctl --user daemon-reload` and `enable --now`, and enables linger. No
-     systemd, or a failure, is a warning — never a failed setup.
+     systemd, or a failure, is a warning — never a failed setup. A further vault of
+     the machine (§14.2) gets a unit of its own, `restask-<name>.service`
+     (`daemon_unit_name`): setting it up never repoints the first vault's daemon.
    - **`Node`** (`--node <ssh-host> --node-vault <path> [--node-dir <dir>]`). Before
-     step 1 — before anything is written — `prepare_node` checks the host (ssh, Docker
-     with compose, the vault folder, a stack directory that is free or serves this
-     vault) and stops a daemon running there, so that this machine's first sync is the
+     step 1 — before anything is written — `prepare_node` settles the vault's **stack
+     directory** and checks the host (ssh, Docker with compose, the vault folder, a
+     stack directory that is free or serves this vault). A server holds one stack per
+     vault. Without `--node-dir` the server is asked (`node.sh stack`, App. E): the
+     stack that already serves this vault's folder — so no run ever starts a second
+     daemon for a vault (§1.1) —, else `restask` in the ssh user's home directory,
+     else, when another vault's stack is there, `restask-<vault folder>`. The answer
+     is what the install uses, what the summary and a failed run's finishing command
+     name, and what `[node] dir` records. `prepare_node` also stops a daemon running
+     in that stack, so that this machine's first sync is the
      only pass while the vault changes; a URL that names this machine (`localhost`,
      `127.x`, `::1`) is refused, the node could not reach it. After step 5
      `install_node` creates the stack, builds the image from the restask sources,
@@ -176,8 +185,8 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    and not taken for done. Whichever machine this is, setup creates the directory of
    the machine config when it is missing (a computer restask was never set up on has
    none). The installer is an injectable port (`DaemonInstaller`:
-   `install`, `connect_node`, `prepare_node`, `install_node`; the real one is
-   `SystemInstaller`); tests record instead.
+   `install`, `connect_node`, `prepare_node` — which returns the stack directory —,
+   `install_node`; the real one is `SystemInstaller`); tests record instead.
 7. **The plugin in a running Obsidian** (`SetupSummary::load_plugin`,
    `load_obsidian_plugin`). Obsidian reads a vault's plugins when it opens the vault
    and never again, and it writes the list back from memory when a plugin is switched
@@ -280,6 +289,9 @@ set up, or to finish a setup whose node step failed: `prepare_node`, `PROPFIND`,
   a client, whatever else the config holds. `doctor` reports the server check as left to
   the node, with the command that shows its log; `lists` prints the collection URLs from
   the endpoint recorded in `[node]`.
+- Every command loads the machine config of the vault it works on (§14.2), never
+  another vault's: on a machine with two vaults, `sync` in one cannot reach the other's
+  server, and each is an editing machine or a sync node in its own right.
 - `--vault` resolution: flag → `RESTASK_VAULT` → upward search from the working directory.
   `done/undone --file <absolute path>` and `settle --file <absolute path>` search upward
   from the file instead, so editor integrations work from any directory.

@@ -38,8 +38,9 @@ pub fn parse_collections(raw: &[String]) -> Result<Vec<(String, String)>, Restas
         .collect()
 }
 
-/// Stack directory on the sync node when none is given: `restask` in the home directory
-/// of the ssh user.
+/// Stack directory of the first vault a sync node serves: `restask` in the home directory
+/// of the ssh user. A further vault gets a directory of its own beside it
+/// (`restask-<vault folder>`), chosen on the node ([`DaemonInstaller::prepare_node`]).
 pub const NODE_DIR: &str = "restask";
 
 /// Where the daemon goes when it is installed on another machine (§13.2 step 6).
@@ -49,8 +50,17 @@ pub struct NodeTarget {
     pub host: String,
     /// The vault's folder on that machine, as the file sync keeps it there.
     pub vault: String,
-    /// Directory of the daemon's compose stack there (sources, machine config).
-    pub dir: String,
+    /// Directory of the daemon's compose stack there (sources, machine config), one per
+    /// vault. `None` until the node was asked: the stack that already serves the vault,
+    /// else one no other vault has ([`DaemonInstaller::prepare_node`]).
+    pub dir: Option<String>,
+}
+
+impl NodeTarget {
+    /// The stack directory: the one given or found, [`NODE_DIR`] before either.
+    pub fn stack(&self) -> &str {
+        self.dir.as_deref().unwrap_or(NODE_DIR)
+    }
 }
 
 /// Which machine runs the vault's one daemon (§1.1) — the question setup settles.
@@ -92,7 +102,7 @@ impl DaemonFlags {
                     reason: "--node needs --node-vault: the vault's folder on that machine"
                         .to_string(),
                 })?,
-                dir: self.node_dir.unwrap_or_else(|| NODE_DIR.to_string()),
+                dir: self.node_dir,
             })),
             (None, true) => Ok(DaemonHost::Elsewhere),
             (None, false) => Ok(DaemonHost::Here),
@@ -155,7 +165,7 @@ impl DaemonFlags {
         Ok(DaemonHost::Node(NodeTarget {
             host,
             vault,
-            dir: self.node_dir.unwrap_or_else(|| NODE_DIR.to_string()),
+            dir: self.node_dir,
         }))
     }
 }
@@ -710,7 +720,7 @@ async fn prepare_and_sync<C: CaldavPort>(
     // A node is looked at before anything is written here: a setup that cannot place
     // its daemon leaves the vault as it found it. The daemon already running there is
     // stopped, so this machine's first sync is the only pass while the vault changes.
-    prepare_node(installer, &args)?;
+    let args = prepare_node(installer, args)?;
 
     // Step 1 — vault: §14-default restask.toml when missing, plus `.restask/`.
     let config_path = vault.join("restask.toml");
@@ -891,14 +901,16 @@ fn place_daemon(
     Ok(note)
 }
 
-/// Runs [`DaemonInstaller::prepare_node`] when the daemon goes to a node. A URL that
-/// names this machine itself is refused first: the node could not reach it.
+/// Runs [`DaemonInstaller::prepare_node`] when the daemon goes to a node, and returns
+/// the arguments with the stack directory the node answered: the vault's own, whatever
+/// other vaults that server holds. A URL that names this machine itself is refused
+/// first: the node could not reach it.
 fn prepare_node(
     installer: Option<&dyn DaemonInstaller>,
-    args: &SetupArgs,
-) -> Result<(), RestaskError> {
-    let DaemonHost::Node(node) = &args.daemon else {
-        return Ok(());
+    mut args: SetupArgs,
+) -> Result<SetupArgs, RestaskError> {
+    let DaemonHost::Node(node) = &mut args.daemon else {
+        return Ok(args);
     };
     if is_loopback(&args.url) {
         return Err(RestaskError::Validation {
@@ -910,10 +922,10 @@ fn prepare_node(
             ),
         });
     }
-    match installer {
-        Some(installer) => installer.prepare_node(node),
-        None => Ok(()),
+    if let Some(installer) = installer {
+        node.dir = Some(installer.prepare_node(node)?);
     }
+    Ok(args)
 }
 
 /// Whether `url` names the local machine (`localhost`, `127.x.x.x`, `[::1]`).
@@ -941,7 +953,7 @@ fn node_error(node: &NodeTarget, error: &RestaskError) -> RestaskError {
              --node {host} --node-vault \"{vault}\" --node-dir \"{dir}\"`",
             host = node.host,
             vault = node.vault,
-            dir = node.dir,
+            dir = node.stack(),
         ),
     }
 }
@@ -961,12 +973,14 @@ fn save_machine(machine: &MachineConfig, path: &Path) -> Result<(), RestaskError
 /// and where the password is found — never the password (§17). On a machine that only
 /// edits: this vault and where its daemon is, with no way to reach the server (§14.2).
 fn machine_config(args: &SetupArgs) -> MachineConfig {
+    // The vault's own path is how this file is found again among the configs of the
+    // machine's vaults (`config::machine_config_of`).
     let vault = VaultSection {
-        path: Some(args.vault.clone()),
+        path: Some(std::path::absolute(&args.vault).unwrap_or_else(|_| args.vault.clone())),
     };
     let node = |target: Option<&NodeTarget>| NodeSection {
         host: target.map(|node| node.host.clone()),
-        dir: target.map(|node| node.dir.clone()),
+        dir: target.map(|node| node.stack().to_string()),
         vault: target.map(|node| node.vault.clone()),
         url: Some(args.url.clone()),
         username: Some(args.username.clone()),
@@ -1019,8 +1033,8 @@ async fn join_and_sync<C: CaldavPort>(
     let config_path = vault.join("restask.toml");
     let cfg =
         VaultConfig::load(&config_path).map_err(|error| config_error(&config_path, &error))?;
+    let args = prepare_node(installer, args)?;
     let machine = machine_config(&args);
-    prepare_node(installer, &args)?;
 
     // Endpoint and credentials are proven before anything is recorded.
     caldav.list_collections().await?;
@@ -1659,7 +1673,11 @@ pub trait DaemonInstaller {
     /// Checks that `node` can run the daemon — it is reachable, has what the install
     /// needs, holds the vault's folder — and stops a daemon already running there. Called
     /// before setup writes anything, so that no other pass runs while it does.
-    fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
+    ///
+    /// Returns the directory of the vault's stack there: the one `node` names, else the
+    /// stack that already serves this vault, else a directory no other vault's stack is
+    /// in. A server holds one stack per vault, and a vault never a second one.
+    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
         Err(no_node_support(node))
     }
 
@@ -1685,9 +1703,10 @@ fn no_node_support(node: &NodeTarget) -> RestaskError {
     }
 }
 
-/// Real [`DaemonInstaller`]. On this machine: writes `restask.service` into
+/// Real [`DaemonInstaller`]. On this machine: writes the vault's unit
+/// ([`daemon_unit_name`]: `restask.service`, and one of its own for a further vault) into
 /// `$XDG_CONFIG_HOME/systemd/user/`, runs `systemctl --user daemon-reload`,
-/// `systemctl --user enable --now restask.service`, and enables linger so the unit
+/// `systemctl --user enable --now` on it, and enables linger so the unit
 /// survives logout; re-running setup overwrites the unit (idempotent refresh). On a
 /// node: runs `contrib/node.sh` of the restask sources ([`node_script`]), which drives
 /// the server over ssh (App. E) — through one connection ([`NodeLink`]) that is opened
@@ -1819,16 +1838,21 @@ impl DaemonInstaller for SystemInstaller {
         self.link(host).map(|_| ())
     }
 
-    fn prepare_node(&self, node: &NodeTarget) -> Result<(), RestaskError> {
+    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
         let script = node_script()?;
         let control = self.link(&node.host)?;
         println!("checking {} …", node.host);
+        let dir = match &node.dir {
+            Some(dir) => dir.clone(),
+            None => script_answer(&script, &["stack", &node.host, &node.vault], &control)?,
+        };
         run_script(
             &script,
-            &["check", &node.host, &node.vault, &node.dir],
+            &["check", &node.host, &node.vault, &dir],
             None,
             &control,
-        )
+        )?;
+        Ok(dir)
     }
 
     fn install_node(
@@ -1852,14 +1876,16 @@ impl DaemonInstaller for SystemInstaller {
         );
         run_script(
             &script,
-            &["install", &node.host, &node.vault, &node.dir, &vault],
+            &["install", &node.host, &node.vault, node.stack(), &vault],
             Some(&input),
             &control,
         )?;
         Ok(format!(
             "daemon: running on {} (stack {}, vault {}); this computer runs none and \
              keeps no password",
-            node.host, node.dir, node.vault
+            node.host,
+            node.stack(),
+            node.vault
         ))
     }
 
@@ -1869,13 +1895,13 @@ impl DaemonInstaller for SystemInstaller {
         }
         let unit_dir = xdg_config_home().join("systemd").join("user");
         std::fs::create_dir_all(&unit_dir)?;
-        let unit_path = unit_dir.join("restask.service");
+        // The unit carries no environment: the daemon it starts finds its config by the
+        // vault, and so does the unit's name.
+        let unit = daemon_unit_name(&crate::config::machine_config_path_for(vault));
+        let unit_path = unit_dir.join(&unit);
         std::fs::write(&unit_path, daemon_unit_content(vault, exec))?;
         run("systemctl", &["--user", "daemon-reload"])?;
-        run(
-            "systemctl",
-            &["--user", "enable", "--now", "restask.service"],
-        )?;
+        run("systemctl", &["--user", "enable", "--now", &unit])?;
         if let Err(error) = run("loginctl", &["enable-linger"]) {
             tracing::warn!(%error, "could not enable linger; the daemon stops at logout");
         }
@@ -1897,6 +1923,22 @@ pub fn systemd_user_available() -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+/// The name of the unit that runs the daemon of the vault whose machine config is
+/// `config_path` (§14.2): `restask.service` for the machine's first vault, and
+/// `restask-<name>.service` for a further one, `<name>` being the directory of its
+/// config (`…/restask/vaults/<name>/config.toml`). A unit per vault: setting up a second
+/// vault never repoints the daemon of the first.
+pub fn daemon_unit_name(config_path: &Path) -> String {
+    let dir = config_path.parent();
+    let further = dir
+        .and_then(Path::parent)
+        .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "vaults"));
+    match dir.and_then(Path::file_name) {
+        Some(name) if further => format!("restask-{}.service", name.to_string_lossy()),
+        _ => "restask.service".to_string(),
     }
 }
 
@@ -1984,6 +2026,30 @@ pub fn node_script() -> Result<PathBuf, RestaskError> {
 /// Environment variable that hands `contrib/node.sh` the `ControlPath` of an ssh
 /// connection that is already open: the script uses it and leaves it open.
 pub const ENV_SSH_CONTROL: &str = "RESTASK_SSH_CONTROL";
+
+/// Runs `contrib/node.sh` with `args` for the one line it answers on standard output
+/// (`stack`); what it says besides goes to the terminal.
+fn script_answer(script: &Path, args: &[&str], control: &str) -> Result<String, RestaskError> {
+    let output = Command::new("bash")
+        .arg(script)
+        .args(args)
+        .env(ENV_SSH_CONTROL, control)
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()?;
+    let answer = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() && !answer.is_empty() && !answer.contains('\n') {
+        Ok(answer)
+    } else {
+        Err(std::io::Error::other(format!(
+            "{} {} failed: {}",
+            script.display(),
+            args.first().copied().unwrap_or_default(),
+            output.status
+        ))
+        .into())
+    }
+}
 
 /// Runs `contrib/node.sh` with `args`, its output going to the terminal, `input` to its
 /// standard input, its ssh calls through the connection behind `control`.

@@ -7,8 +7,9 @@ use std::str::FromStr;
 
 use pretty_assertions::assert_eq;
 use restask::config::{
-    expand_tilde, machine_config_path_from, ConfigError, MachineConfig, VaultConfig,
-    ENV_CALDAV_PASSWORD, ENV_CALDAV_URL, ENV_CALDAV_USERNAME, ENV_CONFIG, ENV_VAULT,
+    expand_tilde, machine_config_of, machine_config_path_for_from, machine_config_path_from,
+    ConfigError, MachineConfig, VaultConfig, ENV_CALDAV_PASSWORD, ENV_CALDAV_URL,
+    ENV_CALDAV_USERNAME, ENV_CONFIG, ENV_VAULT,
 };
 use restask::daemon::DaemonConfig;
 use tempfile::tempdir;
@@ -363,6 +364,90 @@ fn machine_config_path_precedence() {
     assert_eq!(
         machine_config_path_from(env_map(&[("HOME", "/home")])),
         PathBuf::from("/home/.config/restask/config.toml")
+    );
+}
+
+/// A machine config at `path` that names `vault`.
+fn config_naming(path: &Path, vault: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, format!("[vault]\npath = \"{}\"\n", vault.display())).unwrap();
+}
+
+#[test]
+fn every_vault_has_a_machine_config_of_its_own() {
+    // One computer, two vaults, two task servers: a command run in one vault must never
+    // find the other's server (or the other's sync node) in the config it loads.
+    let home = tempdir().unwrap();
+    let main = home.path().join("restask/config.toml");
+    let further = home.path().join("restask/vaults");
+    let folders = tempdir().unwrap();
+    let first = folders.path().join("Obsidian");
+    let second = folders.path().join("Work Notes");
+    let third = folders.path().join("elsewhere/Work Notes");
+    for vault in [&first, &second, &third] {
+        fs::create_dir_all(vault).unwrap();
+    }
+
+    // A machine restask was never set up on: the first vault gets the one config.
+    assert_eq!(machine_config_of(&main, &first), main);
+    config_naming(&main, &first);
+    assert_eq!(machine_config_of(&main, &first), main);
+
+    // A second vault gets a config in a directory called after its folder — before it
+    // is set up too: a command there finds no config, not the first vault's.
+    let own = further.join("work-notes/config.toml");
+    assert_eq!(machine_config_of(&main, &second), own);
+    config_naming(&own, &second);
+    assert_eq!(machine_config_of(&main, &second), own);
+    assert_eq!(machine_config_of(&main, &first), main);
+
+    // Another vault whose folder has the same name does not take that directory.
+    assert_eq!(
+        machine_config_of(&main, &third),
+        further.join("work-notes-2/config.toml")
+    );
+
+    // The vault is one folder, however it is reached.
+    #[cfg(unix)]
+    {
+        let link = folders.path().join("link");
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+        assert_eq!(machine_config_of(&main, &link), own);
+    }
+}
+
+#[test]
+fn one_config_still_serves_a_machine_with_one_vault() {
+    let home = tempdir().unwrap();
+    let main = home.path().join("restask/config.toml");
+    let vault = tempdir().unwrap();
+    fs::create_dir_all(main.parent().unwrap()).unwrap();
+
+    // A config that names no vault — written by hand — is the machine's.
+    fs::write(&main, "[caldav]\nurl = \"http://192.168.1.10:5232\"\n").unwrap();
+    assert_eq!(machine_config_of(&main, vault.path()), main);
+
+    // So is one that names a folder this machine does not have: the example path of a
+    // hand-written config in a container, a vault that was moved. Without this the
+    // daemon of such a machine would lose its server with the update.
+    config_naming(
+        &main,
+        Path::new("/opt/docker/syncthing/data/not-on-this-machine"),
+    );
+    assert_eq!(machine_config_of(&main, vault.path()), main);
+
+    // A config that does not parse is still the one that is loaded, and reported.
+    fs::write(&main, "[vault\n").unwrap();
+    assert_eq!(machine_config_of(&main, vault.path()), main);
+
+    // `RESTASK_CONFIG` names the config outright, whatever vault it is used for.
+    config_naming(&main, tempdir().unwrap().path());
+    assert_eq!(
+        machine_config_path_for_from(
+            vault.path(),
+            env_map(&[(ENV_CONFIG, "/tmp/custom.toml"), ("HOME", "/home")])
+        ),
+        PathBuf::from("/tmp/custom.toml")
     );
 }
 
