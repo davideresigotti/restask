@@ -1,5 +1,8 @@
 //! The `test-vault/` sandbox as ready-made test input: tests work on a temporary copy
 //! and never write to the sandbox itself (AGENTS.md, "Fixtures and the sandbox").
+//!
+//! Nothing here asserts what the notes say: the sandbox is where trials are made, so its
+//! notes change (routing, `🆔`, whole files) while the tests must stay green.
 
 mod common;
 
@@ -30,21 +33,4 @@ fn writing_to_the_copy_leaves_the_sandbox_untouched() {
     fs::write(copy.path().join("TODO.md"), "changed by a test\n").unwrap();
 
     assert_eq!(fs::read(&sandbox).unwrap(), before);
-}
-
-#[test]
-fn the_notes_are_routed_and_carry_no_ids_yet() {
-    let copy = copy_test_vault();
-    let note = |relative: &str| fs::read_to_string(copy.path().join(relative)).unwrap();
-
-    assert!(note("Project Alpha.md").contains("restask-list: dev-project"));
-    assert!(note("Homelab/Home Lab.md").contains("restask-list-root: dev-home"));
-    assert!(!note("Ideas.md").contains("restask-list"));
-    for relative in [
-        "Project Alpha.md",
-        "Homelab/Home Lab.md",
-        "Homelab/Caddy design.md",
-    ] {
-        assert!(!note(relative).contains('🆔'), "{relative} already has ids");
-    }
 }
