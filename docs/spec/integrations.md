@@ -401,7 +401,7 @@ The local work (invariant 12) is the engine's own, run when a buffer is written.
   blink.cmp's own keys. A menu that is open already is not replaced. Without blink.cmp
   nothing is offered.
 - `init.lua`: `require("restask").setup({ keymaps = true, conceal = true })` →
-  `<leader>td` toggle, `<leader>ta` add, tokens concealed (`conceal = false` turns that
+  `<leader>tt` toggle, `<leader>ta` add, tokens concealed (`conceal = false` turns that
   off, `concealcursor = "…"` chooses the modes), new lines of a TODO section started
   (`start_tasks = false` turns that off), metadata suggested while typing
   (`suggest = false` turns that off), the vault settled on every write

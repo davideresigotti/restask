@@ -125,10 +125,10 @@ function M.name_group(wk)
 	return false
 end
 
---- Registers the global keymaps (§16): `<leader>td` toggle, `<leader>ta` add. Where the
+--- Registers the global keymaps (§16): `<leader>tt` toggle, `<leader>ta` add. Where the
 -- configuration has which-key, their prefix is named there; without it nothing is asked.
 function M.register_keymaps()
-	vim.keymap.set("n", M.PREFIX .. "d", M.toggle, { silent = true, desc = "restask: toggle task" })
+	vim.keymap.set("n", M.PREFIX .. "t", M.toggle, { silent = true, desc = "restask: toggle task" })
 	vim.keymap.set("n", M.PREFIX .. "a", M.add, { silent = true, desc = "restask: add task" })
 	local found, wk = pcall(require, "which-key")
 	if found then

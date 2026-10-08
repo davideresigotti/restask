@@ -114,7 +114,7 @@ Changes made in either app show up in the other.
 
 ## Desktop
 - **Obsidian**: view and manage tasks in your notes and in `TODO.md`.
-- **Neovim**: saving a note settles it on the spot. `<leader>td` toggles the task under the cursor, `<leader>ta` captures a new one.
+- **Neovim**: saving a note settles it on the spot. `<leader>tt` toggles the task under the cursor, `<leader>ta` captures a new one.
 - **Thunderbird**: view and edit the tasks as a regular CalDAV task list.
 
 # Contributing & Disclaimer

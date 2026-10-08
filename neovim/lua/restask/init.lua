@@ -13,7 +13,7 @@ local lock = require("restask.lock")
 --
 -- Options:
 --   { keymaps = true }  register the global keymaps (§16):
---     `<leader>td`  toggle the task under the cursor (done/undone)
+--     `<leader>tt`  toggle the task under the cursor (done/undone)
 --     `<leader>ta`  prompt for a task and append it to the TODO.md inbox
 --     With which-key.nvim in the configuration, `<leader>t` is named `restask` in its
 --     hint; load the integration at startup for the keys to be there from the start.
