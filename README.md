@@ -1,5 +1,5 @@
 # Overview
-[![CI](https://github.com/Davide-Resigotti/restask/actions/workflows/ci.yml/badge.svg)](https://github.com/Davide-Resigotti/restask/actions/workflows/ci.yml)
+[![CI](https://github.com/davideresigotti/restask/actions/workflows/ci.yml/badge.svg)](https://github.com/davideresigotti/restask/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Restask is a self-hosted system that connects selected `.md` notes in your vault to your CalDAV server. Checkboxes in your `.md` files are linked to tasks in your Radicale (or similar) collections, so reminders and calendar tasks on your phone, desktop, etc. stay in sync with your Obsidian vault notes.
