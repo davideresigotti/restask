@@ -14,7 +14,7 @@ cd /path/to/your/vault && restask setup
 
 `restask setup` is the whole installation — for the computer, the server and the phone. It asks, once:
 
-1. **The Radicale URL, username and password.** Use the address the server has on your network (`http://192.168.1.10:5232`), not `localhost`.
+1. **The Radicale URL, username and password.** Use the address the server has on your network (`http://192.168.1.10:5232`), not `localhost`. A name works too (`https://radicale.example.org`), also one only your home network knows: setup tries the server from the always-on server before it changes anything, and when that machine does not know the name it gives its daemon the address the name has on this computer.
 2. **Which calendars `TODO.md` shows** — a checklist of the server's calendars, all ticked: move with the arrows, untick the ones you do not want with the spacebar (`a` ticks or unticks all), Enter to confirm. When you chose more than one it asks **which of them new tasks go to**: a task typed in `TODO.md` without a calendar belongs to that one, a task of another carries `📁 <calendar>` on its line. Every task of the chosen calendars is brought into the vault — completed ones under `Done` — and stays the task its app created.
 3. **The ssh host of your always-on server**, if one holds a copy of the vault. Press Enter if there is none: this computer then keeps the vault in sync itself. Setup connects to the server at once: if it logs you in with a password (or your key has a passphrase), ssh asks for it here, once — restask does not keep it.
 4. **The vault's folder on that server** (only when you named one).

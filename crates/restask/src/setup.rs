@@ -904,7 +904,7 @@ fn place_daemon(
 /// Runs [`DaemonInstaller::prepare_node`] when the daemon goes to a node, and returns
 /// the arguments with the stack directory the node answered: the vault's own, whatever
 /// other vaults that server holds. A URL that names this machine itself is refused
-/// first: the node could not reach it.
+/// first: the node could not reach it. Any other URL is tried from the node.
 fn prepare_node(
     installer: Option<&dyn DaemonInstaller>,
     mut args: SetupArgs,
@@ -923,7 +923,7 @@ fn prepare_node(
         });
     }
     if let Some(installer) = installer {
-        node.dir = Some(installer.prepare_node(node)?);
+        node.dir = Some(installer.prepare_node(node, &args.url)?);
     }
     Ok(args)
 }
@@ -1671,13 +1671,16 @@ pub trait DaemonInstaller {
     }
 
     /// Checks that `node` can run the daemon — it is reachable, has what the install
-    /// needs, holds the vault's folder — and stops a daemon already running there. Called
-    /// before setup writes anything, so that no other pass runs while it does.
+    /// needs, holds the vault's folder, and reaches the server at `url` — and stops a
+    /// daemon already running there. Called before setup writes anything, so that no
+    /// other pass runs while it does and a node that cannot sync leaves no vault half
+    /// set up.
     ///
     /// Returns the directory of the vault's stack there: the one `node` names, else the
     /// stack that already serves this vault, else a directory no other vault's stack is
     /// in. A server holds one stack per vault, and a vault never a second one.
-    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
+    fn prepare_node(&self, node: &NodeTarget, url: &str) -> Result<String, RestaskError> {
+        let _ = url;
         Err(no_node_support(node))
     }
 
@@ -1838,7 +1841,7 @@ impl DaemonInstaller for SystemInstaller {
         self.link(host).map(|_| ())
     }
 
-    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
+    fn prepare_node(&self, node: &NodeTarget, url: &str) -> Result<String, RestaskError> {
         let script = node_script()?;
         let control = self.link(&node.host)?;
         println!("checking {} …", node.host);
@@ -1848,7 +1851,7 @@ impl DaemonInstaller for SystemInstaller {
         };
         run_script(
             &script,
-            &["check", &node.host, &node.vault, &dir],
+            &["check", &node.host, &node.vault, &dir, url],
             None,
             &control,
         )?;

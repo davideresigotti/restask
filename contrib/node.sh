@@ -11,10 +11,11 @@
 #       no stack is in: `restask`, then `restask-<vault folder>` (a folder called
 #       `restask-x` gives `restask-x`).
 #
-#   contrib/node.sh check   <ssh-host> <vault-on-host> [<stack-dir>]
+#   contrib/node.sh check   <ssh-host> <vault-on-host> [<stack-dir> [<caldav-url>]]
 #       The host is reachable, has Docker with compose, holds the vault folder, and
 #       <stack-dir> is free or already serves that vault. A daemon running there is
-#       stopped: setup is about to change the vault.
+#       stopped: setup is about to change the vault. With <caldav-url>: the host can
+#       reach that server (see "The server's name" below).
 #
 #   contrib/node.sh install <ssh-host> <vault-on-host> <stack-dir> <local-vault>
 #       Standard input: CalDAV URL, username, password — one per line.
@@ -26,9 +27,19 @@
 #   contrib/node.sh update  <ssh-host> [<stack-dir>]
 #       Ships the sources of this tree, rebuilds, restarts, shows the first log lines.
 #
+# The server's name. The daemon must reach the CalDAV server from the host, and a name
+# only the home network's DNS answers is not known to a host that asks another resolver.
+# `check` and `install` test it: the host resolves the URL's name and connects to its
+# port. A name the host does not know is pinned to the address it has on this machine,
+# when the host reaches the server there: `install` writes it into the stack's
+# docker-compose.override.yml (`extra_hosts`), which compose reads with every command.
+# A server the host cannot reach either way stops the run, before anything is installed.
+#
 # <stack-dir> defaults to `restask`, relative to the ssh user's home directory. The
 # stack holds  docker-compose.yml  .env  src/  data/ ; install and update replace src/
-# and the image, install also writes data/ (the machine config) through the join.
+# and the image, install also writes data/ (the machine config) through the join and
+# docker-compose.override.yml when the server's name is pinned (the file is setup's:
+# written or removed by every install, left alone when it is someone else's).
 # A stack's own docker-compose.yml and .env are never rewritten once they exist.
 # Project, container and image of a stack are named after its directory (.env), so the
 # stacks of two vaults share nothing.
@@ -74,6 +85,107 @@ remote_in() {
     shift
     # shellcheck disable=SC2029  # the command line is meant to be expanded here
     ssh "${ssh_opts[@]}" "$host" "cd $(printf '%q' "$dir") && $(printf '%q ' "$@")"
+}
+
+# server_endpoint <url> — sets server_name and server_port to what the URL names.
+server_endpoint() {
+    local url="$1" scheme rest authority
+    scheme="${url%%://*}"
+    rest="${url#*://}"
+    authority="${rest%%[/?#]*}"
+    authority="${authority##*@}"
+    case "$authority" in
+    \[*)
+        server_name="${authority#\[}"
+        server_name="${server_name%%\]*}"
+        server_port="${authority##*\]}"
+        server_port="${server_port#:}"
+        ;;
+    *:*)
+        server_name="${authority%%:*}"
+        server_port="${authority##*:}"
+        ;;
+    *)
+        server_name="$authority"
+        server_port=""
+        ;;
+    esac
+    if [ -z "$server_port" ]; then
+        if [ "$scheme" = https ]; then server_port=443; else server_port=80; fi
+    fi
+    [ -n "$server_name" ] || die "\`$url\` names no server"
+}
+
+# Run on the host with <name> <port> <address>: 3 when the host does not know the name
+# (asked only without an address), 4 when nothing answers on the port.
+probe='
+name="$1"; port="$2"; target="${3:-$1}"
+if [ -z "$3" ] && command -v getent >/dev/null 2>&1; then
+    getent ahosts "$name" >/dev/null 2>&1 || exit 3
+fi
+timeout 8 bash -c "exec 3<>\"/dev/tcp/\$0/\$1\"" "$target" "$port" 2>/dev/null || exit 4
+'
+
+# server_pin <url> — checks that the host reaches the CalDAV server, and prints the
+# address its name must be pinned to there: nothing when the host knows the name, the
+# address the name has on this machine when it does not. Dies when the host cannot
+# reach the server either way. Called in a command substitution: the caller names the
+# server itself (server_endpoint) when it needs server_name.
+server_pin() {
+    local url="$1" code=0 address
+    server_endpoint "$url"
+    remote "$server_name" "$server_port" "" <<<"$probe" || code=$?
+    case "$code" in
+    0) return 0 ;;
+    3) ;;
+    4) die "$host cannot connect to $server_name, port $server_port: is $url the address the server has on the network, and does a firewall let $host through?" ;;
+    *) die "cannot test from $host whether it reaches $url" ;;
+    esac
+    address="$(getent ahostsv4 "$server_name" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    if [ -z "$address" ]; then
+        address="$(getent ahosts "$server_name" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    fi
+    [ -n "$address" ] || die "neither this computer nor $host knows the name $server_name"
+    case "$address" in
+    127.* | ::1) die "$server_name is this computer itself; the daemon on $host needs the address the server has on the network" ;;
+    esac
+    case "$server_name" in
+    *[!A-Za-z0-9.-]*) die "$host does not know the name $server_name" ;;
+    esac
+    code=0
+    remote "$server_name" "$server_port" "$address" <<<"$probe" || code=$?
+    [ "$code" -eq 0 ] ||
+        die "$host does not know the name $server_name (its DNS is not the one of this computer), and cannot connect to the address the name has here ($address, port $server_port). Give setup a URL that $host reaches too, or add the name to the DNS $host uses"
+    printf '%s\n' "$address"
+}
+
+# pin_server <stack> <address> — makes the stack's containers know the server's name by
+# that address, or by the host's own DNS when the address is empty. The override file
+# is this script's (its first line says so); one that is not is left as it is.
+pin_server() {
+    local stack="$1" address="$2"
+    remote "$stack" "$server_name" "$address" <<'REMOTE' || die "could not record the server's address in $host:$stack"
+set -e
+cd "$1"
+file=docker-compose.override.yml
+mark='# restask setup: the address of the CalDAV server'
+if [ -f "$file" ] && ! grep -qF "$mark" "$file"; then
+    [ -n "$3" ] || exit 0
+    echo "node: $1/$file is not one setup wrote. Add to its service restask:  extra_hosts: [\"$2:$3\"]  and run setup again" >&2
+    exit 1
+fi
+if [ -z "$3" ]; then
+    rm -f "$file"
+    exit 0
+fi
+printf '%s\n' \
+    "$mark, whose name this server's DNS does not know." \
+    "# Written by every \`restask setup\` for this vault; edits are lost." \
+    "services:" \
+    "  restask:" \
+    "    extra_hosts:" \
+    "      - \"$2:$3\"" >"$file"
+REMOTE
 }
 
 # What the image is built from, as it is in this tree: tracked and new files in a
@@ -159,9 +271,10 @@ REMOTE
     ;;
 
 check)
-    [ $# -ge 3 ] || die "usage: node.sh check <ssh-host> <vault-on-host> [<stack-dir>]"
+    [ $# -ge 3 ] || die "usage: node.sh check <ssh-host> <vault-on-host> [<stack-dir> [<caldav-url>]]"
     vault="${3%/}"
     stack="${4:-restask}"
+    url="${5-}"
     ssh "${ssh_opts[@]}" "$host" true || die "cannot reach \`$host\` over ssh (does \`ssh $host\` work?)"
     remote "$vault" "$stack" <<'REMOTE'
 vault="$1"
@@ -183,6 +296,15 @@ if [ -f "$stack/docker-compose.yml" ]; then
 fi
 REMOTE
     say "$host can run the daemon (Docker, $vault)"
+    if [ -n "$url" ]; then
+        server_endpoint "$url"
+        pin="$(server_pin "$url")" || exit 1
+        if [ -n "$pin" ]; then
+            say "$host does not know the name $server_name: its daemon will use $pin, the address the name has here"
+        else
+            say "$host reaches $server_name"
+        fi
+    fi
     ;;
 
 install)
@@ -227,6 +349,13 @@ REMOTE
     if ! remote_in "$stack" test -f docker-compose.yml </dev/null; then
         remote_in "$stack" sh -c 'cat >docker-compose.yml' <contrib/docker/docker-compose.yml
         say "created the stack $host:$stack"
+    fi
+    # Before the build: a server the host cannot reach is known in seconds.
+    server_endpoint "$url"
+    pin="$(server_pin "$url")" || exit 1
+    pin_server "$stack" "$pin"
+    if [ -n "$pin" ]; then
+        say "$host does not know the name $server_name: the daemon uses $pin, the address the name has here"
     fi
     ship_sources "$stack"
     build_image "$stack"

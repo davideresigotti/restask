@@ -167,7 +167,7 @@ async fn set_up_vault() -> (TempDir, MockCaldav) {
 struct RecordingInstaller {
     calls: Arc<std::sync::Mutex<Vec<String>>>,
     fail: bool,
-    /// One line per node call, in order: `prepare <host> | <TODO.md at that moment>` and
+    /// One line per node call, in order: `prepare <host> <url> | <TODO.md at that moment>` and
     /// `install <host> <vault there> <dir> <url> <username> <password> | <TODO.md>`.
     node_calls: Arc<std::sync::Mutex<Vec<String>>>,
     /// The vault the node calls look at when they record its TODO.md.
@@ -238,14 +238,15 @@ impl DaemonInstaller for RecordingInstaller {
         Ok(())
     }
 
-    fn prepare_node(&self, node: &NodeTarget) -> Result<String, RestaskError> {
+    fn prepare_node(&self, node: &NodeTarget, url: &str) -> Result<String, RestaskError> {
         if self.fail_prepare {
             return Err(Self::injected());
         }
-        self.node_calls
-            .lock()
-            .unwrap()
-            .push(format!("prepare {} | {}", node.host, self.todo()));
+        self.node_calls.lock().unwrap().push(format!(
+            "prepare {} {url} | {}",
+            node.host,
+            self.todo()
+        ));
         Ok(node
             .dir
             .clone()
@@ -1031,7 +1032,7 @@ async fn setup_puts_the_daemon_on_the_node_with_the_credentials_typed_here() {
     assert_eq!(
         installer.node_calls(),
         vec![
-            format!("prepare homeserver | {legacy}"),
+            format!("prepare homeserver http://radicale.local:5232 | {legacy}"),
             format!(
                 "install homeserver /srv/sync/vault restask http://radicale.local:5232 \
                  me s3cret | {todo}"
@@ -1592,6 +1593,126 @@ esac
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
+}
+
+/// Runs `contrib/node.sh check` for a vault whose server is at `url`, against a stand-in
+/// for the two machines: an `ssh` that runs the script it is sent, a `getent` that knows
+/// the names in `here` on this computer and those in `there` on the server (`name=address`),
+/// and a `timeout` — the connection attempt — that fails for the address `dead`. Nothing
+/// is contacted. Returns whether the check passed, and what it printed (both streams).
+#[cfg(unix)]
+fn node_check(url: &str, here: &str, there: &str, dead: &str) -> (bool, String) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = TempDir::new().unwrap();
+    let vault = TempDir::new().unwrap();
+    let ssh = "#!/bin/bash\nON_SERVER=1 eval \"${@: -1}\"\n";
+    let docker = "#!/bin/bash\n[ \"$1 $2\" = \"compose version\" ]\n";
+    let getent = r#"#!/bin/bash
+if [ -n "$ON_SERVER" ]; then known="$NAMES_THERE"; else known="$NAMES_HERE"; fi
+for entry in $known; do
+    if [ "${entry%%=*}" = "$2" ]; then
+        echo "${entry#*=} STREAM $2"
+        exit 0
+    fi
+done
+exit 2
+"#;
+    let timeout = "#!/bin/bash\n[ \"$5\" != \"$DEAD\" ]\n";
+    for (name, body) in [
+        ("ssh", ssh),
+        ("docker", docker),
+        ("getent", getent),
+        ("timeout", timeout),
+    ] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let output = std::process::Command::new("bash")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/node.sh"))
+        .args(["check", "homeserver"])
+        .arg(vault.path())
+        .args(["restask-none", url])
+        .current_dir(vault.path())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("NAMES_HERE", here)
+        .env("NAMES_THERE", there)
+        .env("DEAD", dead)
+        .env(
+            restask::setup::ENV_SSH_CONTROL,
+            "/run/user/1000/restask-ssh-7/%C",
+        )
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let mut said = String::from_utf8(output.stdout).unwrap();
+    said.push_str(&String::from_utf8(output.stderr).unwrap());
+    (output.status.success(), said)
+}
+
+#[cfg(unix)]
+#[test]
+fn the_server_is_tried_from_the_node_before_the_vault_is_touched() {
+    // The owner's run: the server's name is one only the home network's DNS answers,
+    // the node asks a public resolver. Setup changed the vault, built the image, and
+    // then the daemon's join failed with "error sending request". The check that runs
+    // before anything is written now tries the server from the node.
+    let url = "https://radicale.home.example";
+    let lan = "radicale.home.example=192.168.1.10";
+
+    // A name the node knows, a port that answers: nothing to do.
+    let (passed, said) = node_check(url, lan, lan, "");
+    assert!(passed, "{said}");
+    assert!(said.contains("homeserver reaches radicale.home.example"));
+
+    // A name only this computer knows: the daemon is given the address it has here.
+    let (passed, said) = node_check(url, lan, "", "");
+    assert!(passed, "{said}");
+    assert!(said.contains("its daemon will use 192.168.1.10"), "{said}");
+
+    // … unless the node cannot connect to that address either: the run stops, and says
+    // which of the two it was.
+    let (passed, said) = node_check(url, lan, "", "192.168.1.10");
+    assert!(!passed);
+    assert!(said.contains("does not know the name radicale.home.example"));
+    assert!(said.contains("192.168.1.10, port 443"), "{said}");
+
+    // A name the node knows, and nothing answering there.
+    let (passed, said) = node_check(
+        "http://radicale.home.example:5232/",
+        lan,
+        lan,
+        "radicale.home.example",
+    );
+    assert!(!passed);
+    assert!(
+        said.contains("cannot connect to radicale.home.example, port 5232"),
+        "{said}"
+    );
+
+    // A name nobody knows, and one that means this computer.
+    let (passed, said) = node_check(url, "", "", "");
+    assert!(!passed);
+    assert!(said.contains("neither this computer nor homeserver knows"));
+    let (passed, said) = node_check(url, "radicale.home.example=127.0.0.1", "", "");
+    assert!(!passed);
+    assert!(said.contains("is this computer itself"), "{said}");
+
+    // An address needs no name.
+    let (passed, said) = node_check(
+        "http://192.168.1.10:5232",
+        "",
+        "192.168.1.10=192.168.1.10",
+        "",
+    );
+    assert!(passed, "{said}");
 }
 
 /// A stack directory in `home` whose compose file mounts `vault`.

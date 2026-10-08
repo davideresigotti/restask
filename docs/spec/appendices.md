@@ -108,16 +108,29 @@ On push and pull request, three jobs on `ubuntu-latest`:
     container); else the first of `restask`, `restask-<name>`, `restask-<name>-2` …
     that holds no compose file, `<name>` being the vault folder's name in lower case
     with dashes (a leading `restask-` of its own is not doubled).
-  - `check <host> <vault> [<dir>]` (setup's `prepare_node`): ssh works; `docker compose
-    version` answers; `<vault>` is a folder; a stack already in `<dir>` mounts that
-    folder (`docker compose config`), else it is refused; a running stack is stopped.
+  - `check <host> <vault> [<dir> [<url>]]` (setup's `prepare_node`): ssh works; `docker
+    compose version` answers; `<vault>` is a folder; a stack already in `<dir>` mounts
+    that folder (`docker compose config`), else it is refused; a running stack is
+    stopped. With `<url>`, the **server check**: on the host, the URL's name resolves
+    (`getent ahosts`) and its port accepts a connection (8 s). A name the host does not
+    know — one only the home network's DNS answers, while the host asks another
+    resolver — is looked up on this machine instead, and the connection is tried to
+    that address: when it answers, the name will be *pinned* to it (below). The run
+    fails, naming which of the two it was, when the name is known to neither machine,
+    means this machine (`127.x`, `::1`), or nothing answers from the host.
   - `install <host> <vault> <dir> <local-vault>` (setup's `install_node`; URL, username
     and password on standard input, one per line): creates `<dir>/data`, owned by the
     owner of the vault's files; when the stack has no compose file yet, writes `.env`
     (that owner, this machine's time zone — completion dates are the user's local days,
     whatever the server's clock says —, and `COMPOSE_PROJECT_NAME`, the directory's
     name: the compose file names project, container and image after it, so two vaults'
-    stacks share none of them) and the compose file; replaces `src/` with the
+    stacks share none of them) and the compose file; repeats the server check and
+    records its answer in `docker-compose.override.yml`, which compose merges into
+    every command of the stack: `extra_hosts: ["<name>:<address>"]` for the service
+    when the name is pinned, no file when the host knows the name. The file is the
+    script's (its first line says so) and is rewritten or removed by every install; an
+    override file that is not is left alone, and fails the install when a pin is
+    needed. Then it replaces `src/` with the
     files the image is built from (tracked and new ones under `Cargo.toml`,
     `Cargo.lock`, `crates/`, the Dockerfile; without git, those paths minus `target/`);
     builds. Then the **barrier**: the SHA-256 of every `*.md`, of `restask.toml` and of
@@ -130,6 +143,8 @@ On push and pull request, three jobs on `ubuntu-latest`:
     A pass over files still on their way would be the second writer of §1.1.
   - `update <host> [<dir>]`: `src/`, build, `up -d`, log, running check, and the images
     the build replaced are pruned by label.
+  A pinned address is the one the name had when setup ran: a server that moves is
+  followed by running setup again (`--join --node …`).
   It never rewrites an existing compose file or `.env` (a stack from before the
   per-directory names keeps `restask` for all three; it is the first vault's). `<dir>`
   defaults to `restask` in the ssh user's home directory.

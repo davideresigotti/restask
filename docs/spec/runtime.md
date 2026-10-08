@@ -159,7 +159,9 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    - **`Node`** (`--node <ssh-host> --node-vault <path> [--node-dir <dir>]`). Before
      step 1 — before anything is written — `prepare_node` settles the vault's **stack
      directory** and checks the host (ssh, Docker with compose, the vault folder, a
-     stack directory that is free or serves this vault). A server holds one stack per
+     stack directory that is free or serves this vault, and that the host reaches the
+     server of step 3 — App. E *server check*: a node that could never sync must not
+     leave a vault half set up). A server holds one stack per
      vault. Without `--node-dir` the server is asked (`node.sh stack`, App. E): the
      stack that already serves this vault's folder — so no run ever starts a second
      daemon for a vault (§1.1) —, else `restask` in the ssh user's home directory,
