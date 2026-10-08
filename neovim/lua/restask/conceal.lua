@@ -112,11 +112,22 @@ function M.settle()
 	local last = vim.w.restask_cursor
 	local prev = last and last[1] == row and last[2] or nil
 	local target = guard.settle(vim.api.nvim_get_current_line(), col, prev, kind ~= "n")
+	local winline = vim.fn.winline()
 	if target then
-		col = target
-		vim.api.nvim_win_set_cursor(0, { row, col })
+		-- `gj` onto a wrapped row that holds only the hidden token: the cursor went down a
+		-- screen row from the line's last visible character, so it belongs on the next line.
+		local down = kind == "n" and prev == target and col > target and vim.w.restask_winline and winline > vim.w.restask_winline
+		if down and row < vim.api.nvim_buf_line_count(buf) then
+			vim.cmd("normal! j")
+			row, col = unpack(vim.api.nvim_win_get_cursor(0))
+		else
+			col = target
+			vim.api.nvim_win_set_cursor(0, { row, col })
+		end
+		winline = vim.fn.winline()
 	end
 	vim.w.restask_cursor = { row, col }
+	vim.w.restask_winline = winline
 end
 
 --- The line ranges in which `old` and `new` differ: a list of
