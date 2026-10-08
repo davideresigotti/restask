@@ -540,6 +540,12 @@ impl<C: CaldavPort> Engine<C> {
         let mut remote = BTreeMap::new();
         let mut created = BTreeSet::new();
         let mut bound = BTreeMap::new();
+        // A collection is one list's. Two names of the vault can find the same one — a
+        // note routed to `homelab`, the calendar's path, and `todo_lists` naming it
+        // `home-lab` after its display name: synced as two lists, each pass would push
+        // the tasks as the one and delete them as strays of the other.
+        let own_paths = scope.clone();
+        let mut taken: BTreeMap<String, ListSlug> = BTreeMap::new();
         for slug in scope {
             if let Some(resources) = self.caldav.list_tasks(slug.as_str(), &slug).await? {
                 // At its own path — also when it was found elsewhere before.
@@ -556,6 +562,23 @@ impl<C: CaldavPort> Engine<C> {
             };
             match resolve_list(collections, &slug) {
                 Bound::At(collection) => {
+                    let holder = own_paths
+                        .iter()
+                        .find(|other| other.as_str() == collection && **other != slug)
+                        .or_else(|| taken.get(&collection));
+                    if let Some(holder) = holder {
+                        // Left out of the pass: unknown, not empty (invariant: nothing is
+                        // deleted on evidence that is merely absent).
+                        tracing::warn!(
+                            list = %slug.as_str(),
+                            same_as = %holder.as_str(),
+                            calendar = %collection,
+                            "two list names of the vault are one calendar of the server; this one is not synced until the vault uses one name"
+                        );
+                        calendars.bound.remove(&slug);
+                        continue;
+                    }
+                    taken.insert(collection.clone(), slug.clone());
                     // Gone between the two requests: not listed, so nothing is concluded.
                     let Some(resources) = self.caldav.list_tasks(&collection, &slug).await? else {
                         continue;

@@ -83,7 +83,13 @@ TODO.md, a line with `📁 work`     (the line says so, §7.5)      → work
      page) has a generated path; its name is the only one the user ever gave it.
   Calendars that hold no tasks are found by their path only. Two calendars that answer
   alike are not chosen between: the list is left out of the pass (unknown, not empty)
-  and a warning names them. Routing is declared in the notes and nowhere else; where
+  and a warning names them. The same holds the other way round: **a collection is one
+  list's.** When two names of the vault find one calendar — a note routed to `homelab`,
+  which is the calendar's path, and `todo_lists` naming it `home-lab` after its display
+  name `Home Lab` — the list at its own path keeps it (between two found by name, the
+  first), and the other is left out of the pass with a warning that names both, until
+  the vault uses one name. Synced as two lists, each pass would push the tasks as the
+  one and delete them as strays of the other. Routing is declared in the notes and nowhere else; where
   a list was found is remembered in `.restask/calendars.json` (§9) only to notice that
   it is somewhere else now — such a list is a *reset* one for that pass (§11.4): what
   is missing in its new collection was not deleted.

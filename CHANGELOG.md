@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Two names for one calendar no longer make the daemon push and delete its tasks in turns. A calendar at `/homelab/` shown as "Home Lab" answers to both `homelab` and `home-lab`; a vault that used both (a note routed to one, `todo_lists` naming the other) had the calendar's tasks created and deleted on the server at every pass. The name that is the calendar's path is used; the other is reported in the log and not synced.
 - `restask setup --join` has a running Obsidian load the plugin that is in the vault. A setup that stopped at the server's daemon and was finished with `--join` left Obsidian without the plugin until it was restarted, and said nothing.
 - A repeating task without a date (`🔁 every 2 weeks` and no `📅`/`🛫`) reaches the server. Radicale refused it (`HTTP 400`, "push failed; the next pass retries" at every pass). Its `VTODO` now carries a start date marked as restask's anchor; the line in the note gets no date. Other apps show that date as the task's start.
 - `restask setup` tries the task server from the always-on server before it changes the vault. A server URL with a name that only the home network's DNS knows no longer ends in "the daemon could not join the vault … error sending request": the daemon is given the address the name has on the computer setup runs on. A server that cannot be reached from there stops the run at once, with the reason.

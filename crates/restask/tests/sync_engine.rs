@@ -1792,11 +1792,11 @@ async fn a_repeating_task_without_a_date_reaches_the_server_and_gets_no_date_in_
     // pass writes no file and sends nothing.
     assert!(read(&dir, "notes/home.md").contains(&line));
     let files = snapshot(&dir);
-    let (_, puts, _) = mock.counters();
+    let (puts, _, _) = mock.counters();
     let again = engine.reconcile().await.unwrap();
     assert_eq!(again.pushes, 0);
     assert_eq!(snapshot(&dir), files);
-    assert_eq!(mock.counters().1, puts);
+    assert_eq!(mock.counters().0, puts);
     assert!(!read(&dir, "notes/home.md").contains('\u{1F6EB}'));
 
     // A date typed later is the task's own: the anchor gives way to it.
@@ -3184,6 +3184,48 @@ async fn a_task_pushed_before_links_were_written_is_written_again_once() {
 
 /// The path a phone gave the calendar it made.
 const PHONE_PATH: &str = "56de6126-33a4-46fd-a66e-3cc49ad32fe5";
+
+/// The owner's sandbox: the calendar at `/homelab/` is shown as "Home Lab". The notes
+/// are routed to `homelab`, its path; the wizard listed it under its name, so
+/// `todo_lists` says `home-lab`. Both names found the one calendar, and every pass
+/// pushed the ten tasks as list `homelab` and deleted them as strays of list `home-lab`
+/// — for as long as the daemon ran (`collection_reset` every 11 s in its log).
+#[tokio::test]
+async fn two_names_of_one_calendar_do_not_push_and_delete_its_tasks_in_turns() {
+    let dir = vault_showing("\"home-lab\"");
+    note(
+        &dir,
+        "Homelab/Networking.md",
+        "homelab",
+        &format!(
+            "- [ ] Update the firewall rules {ID} {UID}\n- [ ] Check the DNS records {ID} {UID2}\n"
+        ),
+    );
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_collection("homelab", "Home Lab");
+    let engine = engine(&dir, &mock);
+
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.pushes, report.deletes, report.failed), (2, 0, 0));
+    assert_eq!(mock.resource_names("homelab").len(), 2);
+    assert_eq!(mock.collection_names(), vec!["homelab", "inbox"]);
+
+    // The next passes leave the calendar, the notes and the view alone.
+    for _ in 0..3 {
+        let (counters, files) = (mock.counters(), snapshot(&dir));
+        let again = engine.reconcile().await.unwrap();
+        assert_eq!((again.pushes, again.deletes, again.inserts), (0, 0, 0));
+        assert_eq!(
+            (mock.counters().0, mock.counters().1),
+            (counters.0, counters.1)
+        );
+        assert_eq!(snapshot(&dir), files);
+        assert_eq!(mock.resource_names("homelab").len(), 2);
+    }
+    let note = read(&dir, "Homelab/Networking.md");
+    assert!(note.contains(UID) && note.contains(UID2), "{note}");
+}
 
 #[tokio::test]
 async fn a_calendar_made_in_another_client_is_found_by_its_name() {
