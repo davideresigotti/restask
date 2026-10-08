@@ -11,7 +11,7 @@ If you are using an AI agent to install restask, point it to [docs/INSTALL-AI.md
 Three commands, on your computer:
 
 ```bash
-git clone <repo-url> restask && cd restask
+git clone https://github.com/Davide-Resigotti/restask.git && cd restask
 cargo install --path crates/restask --locked
 cd /path/to/your/vault && restask setup
 ```

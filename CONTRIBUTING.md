@@ -33,4 +33,7 @@ If you touched `neovim/`: `luac -p neovim/lua/restask/*.lua && lua neovim/test/t
 - A change to a local rule must be made in the engine **and** the Obsidian plugin, with a test on each side (see "Local parity" in AGENTS.md).
 - No new dependency without discussion. Never commit secrets.
 
+## Your execution state file stays private
+Keeping a working log in `docs/EXECUTION_STATE.md` is handy: where your work stands, open items, decisions, what you saw in a trial. [AGENTS.md](AGENTS.md) tells coding agents to read and update it. It is yours alone: it ends up naming your machines, server, vault and calendars, so it is listed in `.gitignore` and must never be committed, force-added or pasted into an issue or pull request. Put what others need in the commit message, the spec or `CHANGELOG.md`.
+
 By contributing you agree that your work is released under the [MIT licence](LICENSE).

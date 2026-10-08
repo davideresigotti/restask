@@ -43,14 +43,14 @@ The symbols for priority, dates and other metadata are inspired by [Tasks](https
 
 # Task Structure & Workflow
 
-## Main File: [[test-vault/TODO.md|TODO.md]]
+## Main File: `TODO.md`
 - `TODO.md` is the main inbox. It holds the tasks you jot down on the fly, plus every prioritized task gathered from the vault.
 - It shows all the calendars you choose, not just one. `restask setup` asks which calendars appear and which one receives new tasks. A task from another calendar carries its name on the line (`- [ ] Update README 🔺 📁 work`); change the name to move the task.
 - Tasks are grouped by priority. Those without a priority sit under `## No Priority`.
 - The section and the priority emoji always agree: type a task under a heading and it gets that priority, move it to another section and the priority follows, and the other way round.
 - The file is generated, so only the tasks you add or edit there are kept. Besides the tasks, it contains just two frontmatter properties, `restask-list` and `restask-render`. Leave them alone.
 
-## Vault Tasks & Subtasks: [[Obsidian/Home Lab.md]]
+## Vault Tasks & Subtasks
 - Every checkbox in a routed note is a task. An indented checkbox is a subtask of the one above it.
 - A task with a priority also appears in `TODO.md`. It is not a copy but the same task: check it off, reword it or re-prioritize it in either place.
 - A task without a priority stays in its note only (ideas, loose thoughts).

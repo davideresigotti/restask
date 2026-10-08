@@ -10,6 +10,8 @@ behaviour updates the spec in the same commit.
 1. Read `ARCHITECTURE.md` — it is short, and the invariants in it are the review
    checklist for every change.
 2. Read `docs/EXECUTION_STATE.md` — where the work stands, open items, past decisions.
+   It is your own private log: git-ignored and never committed (§5). If you have none
+   yet, start one.
 3. Read the spec file(s) for the area you touch (index in `ARCHITECTURE.md`) and the code
    itself. Read as much as you need to be sure; a wrong change to the sync core costs
    someone their notes.
@@ -190,6 +192,10 @@ Every bug fix ships with a regression test at the level where the bug showed
 2. Close the task in `docs/EXECUTION_STATE.md`: session-log line, any new decision, any
    open item you found but did not fix. Keep the file under 150 lines (trim the oldest
    session-log lines first; decisions that the spec now states can go too).
+   The file is private to each contributor: it names machines, vaults, calendars and
+   trials. It is listed in `.gitignore`; never commit it, never force-add it, and never
+   paste it into an issue or a pull request. What others need to know goes in the
+   commit message, the spec or `CHANGELOG.md`.
 3. Never push, never amend, never force. Never commit secrets.
 4. Update what runs restask. When the task changed the binary (anything under
    `crates/`) or the plugin, and the gates are green, run — without asking, as part of
@@ -244,7 +250,7 @@ recommendation.
 - **Gates red on files you did not touch:** find the commit that broke them
   (`git log`, `git bisect`) and fix it as its own task before continuing.
 - **`docs/EXECUTION_STATE.md` missing or stale:** rebuild it from `git log` and the code;
-  history is in git, the file is a convenience.
+  history is in git, the file is a private convenience and is not in the repository.
 - **Unsure whether a sync change is safe:** write the scenario as a test in
   `tests/sync_engine.rs` first. If you cannot state the scenario, you do not understand
   the change yet.

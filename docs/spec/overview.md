@@ -99,7 +99,7 @@ pass; pushing stays the daemon's.
 ├── docs/
 │   ├── spec/*.md              this specification
 │   ├── contracts/vtodo-golden.ics   byte-exact serializer contract (App. A)
-│   └── EXECUTION_STATE.md     state of the work, decisions, open items
+│   └── EXECUTION_STATE.md     state of the work, decisions, open items (private, git-ignored)
 ├── neovim/
 │   ├── lua/restask/{init,toggle}.lua
 │   └── test/toggle_test.lua

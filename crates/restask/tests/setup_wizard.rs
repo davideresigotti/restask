@@ -1476,9 +1476,8 @@ fn daemon_unit_content_is_a_valid_user_unit() {
         Path::new("/srv/My Vault"),
         Path::new("/home/me/.cargo/bin/restask"),
     );
-    assert!(content.contains(
-        "ExecStart=\"/home/me/.cargo/bin/restask\" daemon --vault \"/srv/My Vault\""
-    ));
+    assert!(content
+        .contains("ExecStart=\"/home/me/.cargo/bin/restask\" daemon --vault \"/srv/My Vault\""));
     assert!(content.contains("Restart=on-failure"));
     assert!(content.contains("RestartSec=5"));
     assert!(content.contains("WantedBy=default.target"));

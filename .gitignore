@@ -4,6 +4,8 @@ node_modules/
 /plugins/obsidian/main.js
 *.restask-tmp
 *.pre-restask-*.md
+# each contributor's private working log (AGENTS.md §5): never committed
+/docs/EXECUTION_STATE.md
 # test-vault/: only the notes are committed, not the app and sync state
 /test-vault/.obsidian/
 /test-vault/.stfolder/

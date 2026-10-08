@@ -213,6 +213,7 @@ re-planned from fresh snapshots in the next pass.
 ## Pointers
 
 - `AGENTS.md` — how to work on this repository (gates, rules, workflow).
-- `docs/EXECUTION_STATE.md` — where the work stands; decision log.
+- `docs/EXECUTION_STATE.md` — where the work stands; decision log. Private to each
+  contributor and git-ignored: it is not in the repository.
 - `README.md` — what the project is for. `INSTALL.md` — how to install it (`docs/INSTALL-AI.md` is the detailed guide).
 - `test-vault/` — a sandbox vault for manual trials. Tests may use a temporary copy of it (`copy_test_vault`), never the folder itself.
