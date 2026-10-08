@@ -233,6 +233,10 @@ deleted on the server). A missing line is absence, and absence proves nothing
   has no seal line at all;
 - the task's UID is **nowhere** in the view any more (a line mangled into something that
   is not a task is not a deletion);
+- **no line of the view is that line under another UID**: same text, same fields, only
+  the `🆔` differs. Such a line was not deleted but given a new identity — an engine
+  from before §7.6 does that to the mirror lines of a root note — and the task it
+  showed is where it was;
 - the note **still shows the task as it was rendered** (`mirror_line(source)` equals the
   remembered line). If the note changed the task since, the note wins.
 

@@ -3931,3 +3931,65 @@ async fn a_task_ticked_above_the_view_of_a_root_note_is_kept_under_its_done_head
     assert_eq!(snapshot(&dir), files);
     assert_eq!((mock.counters().0, mock.counters().1), (puts, deletes));
 }
+
+/// The incident of 2026-10-08 (T99): an engine from before views (§7.6) settled a vault
+/// a newer one had rendered. It read the mirror lines of the root note as copied task
+/// lines and gave each a UID of its own; the newer daemon then missed the old UIDs in
+/// its view, took that for the user deleting the mirror lines, and deleted the tasks
+/// from their notes. A line that is still there under another UID is not a deletion —
+/// in the view of a root note and in TODO.md alike.
+#[tokio::test]
+async fn a_mirror_line_given_another_uid_is_not_a_deleted_task() {
+    let dir = temp_vault();
+    homelab(&dir);
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let net = read(&dir, NET);
+    let disks = read(&dir, "Homelab/Storage/Disks.md");
+
+    // What the older engine left: the line re-rendered as a task line, under a new UID.
+    let fresh = [
+        "restask-01jz000000000000000000000a",
+        "restask-01jz000000000000000000000b",
+    ];
+    let reassign = |text: String| {
+        text.replace(
+            &format!(
+                "- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}"
+            ),
+            &format!(
+                "- [ ] update the firewall [[Networking#TODO|Networking]] {HIGHEST} {ID} {}",
+                fresh[0]
+            ),
+        )
+        .replace(
+            &format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}"),
+            &format!(
+                "- [ ] replace the disk [[Disks|Disks]] {HIGHEST} {ID} {}",
+                fresh[1]
+            ),
+        )
+    };
+    for view in [ROOT, "TODO.md"] {
+        let before = read(&dir, view);
+        let after = reassign(before.clone());
+        assert_ne!(after, before, "{view}");
+        write_vault_file(&dir, view, &after);
+    }
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.failed, 0);
+
+    assert_eq!(read(&dir, NET), net, "the task is where it was");
+    assert_eq!(read(&dir, "Homelab/Storage/Disks.md"), disks);
+    assert!(mock.resource("homelab", UID3).is_some());
+    assert!(mock.resource("homelab", UID5).is_some());
+    // The views show the tasks again.
+    for view in [ROOT, "TODO.md"] {
+        let text = read(&dir, view);
+        assert!(
+            text.contains(&format!("{ID} {UID3}")) && text.contains(&format!("{ID} {UID5}")),
+            "{text}"
+        );
+    }
+}

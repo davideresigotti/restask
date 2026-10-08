@@ -493,6 +493,18 @@ pub(crate) fn edits_between(
         }
     }
     if edited_from(current, rendered) {
+        // A line that is still in the view under another UID was not deleted: something
+        // gave it a new identity — an engine from before views reads a mirror line as a
+        // copied task line (§7.6) — and the task it showed is where it was.
+        let unidentified = |draft: &TaskDraft| TaskDraft {
+            uid: None,
+            ..draft.clone()
+        };
+        let kept: Vec<TaskDraft> = parse(current.body, cfg)
+            .tasks
+            .iter()
+            .map(|line| unidentified(&line.draft))
+            .collect();
         for (uid, was) in &shown {
             let Some(source) = local.get(uid) else {
                 continue;
@@ -500,6 +512,7 @@ pub(crate) fn edits_between(
             if source.source.path == own_path
                 || current.body.contains(uid.as_str())
                 || mirror_line(source) != was.raw
+                || kept.contains(&unidentified(&was.draft))
             {
                 continue;
             }
