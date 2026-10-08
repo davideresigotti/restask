@@ -35,6 +35,7 @@ import {
 	TASK_START,
 	declaresRoot,
 	disclaimed,
+	freeLine,
 	inTodoSection,
 	inView,
 	isMirrorShaped,
@@ -550,6 +551,30 @@ export function taskStart(host: FilingHost): Extension {
 		return [tr, { changes: { from: at, insert: TASK_START }, selection: EditorSelection.cursor(at + TASK_START.length), sequential: true }];
 	});
 	return Prec.highest(filter);
+}
+
+/**
+ * The editor extension of §15.8: in the TODO.md view the cursor skips the lines that are
+ * not the user's to edit — the frontmatter and the headings — as Vim's motions do over
+ * folded lines. A selection change that ends on one moves on to the next free line in
+ * the direction of travel. A click is left alone (a heading can be folded or selected
+ * with the pointer), and so is a selection that spans text. It needs no view, so it is
+ * tested against a bare `EditorState`.
+ */
+export function viewLock(host: FilingHost): Extension {
+	return EditorState.transactionFilter.of((tr) => {
+		if (tr.docChanged || tr.selection === undefined || tr.isUserEvent("select.pointer")) return tr;
+		const selection = tr.newSelection;
+		if (selection.ranges.length !== 1 || !selection.main.empty || !host.isInboxView(tr.startState)) return tr;
+		const doc = tr.newDoc;
+		const line = doc.lineAt(selection.main.head);
+		const from = tr.startState.doc.lineAt(tr.startState.selection.main.head).number - 1;
+		const target = freeLine(doc.toJSON(), line.number - 1, from);
+		if (target === undefined || target === line.number - 1) return tr;
+		const free = doc.line(target + 1);
+		const column = Math.min(selection.main.head - line.from, free.length);
+		return [tr, { selection: EditorSelection.cursor(free.from + column), scrollIntoView: true, sequential: true }];
+	});
 }
 
 /** What settling one line of an editor comes to. */

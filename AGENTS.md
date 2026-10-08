@@ -32,22 +32,22 @@ the maintainer's machine config). **Never contact it** from tests or while devel
 `#[ignore]`d `tests/e2e_server.rs`, which the owner runs by hand and which touches the
 `restask-dev` collection only. Never read `~/.config/restask/radicale.passwd`.
 
-**Testing uses the `dev` calendar and `test-vault/`, and nothing else** (owner,
+**Testing uses the `dev` calendar and `restask-vault/`, and nothing else** (owner,
 2026-10-02, after a trial deleted two tasks of the owner's `inbox` calendar — T75).
 There are two kinds of test, and no third:
 
 - *Automated tests* (`cargo test`, Vitest, the Lua tests) are hermetic: temporary
   directories and `MockCaldav`, no real server, no real calendar, no systemd, no ssh. They
-  may use `test-vault/` as ready-made input, but only a copy of it in a temporary
+  may use `restask-vault/` as ready-made input, but only a copy of it in a temporary
   directory (see "Fixtures and the sandbox").
 - *A trial of the real thing* — the installed or built `restask` binary, the plugin in
-  Obsidian, Neovim, the daemon — happens in `test-vault/`, whose tasks live in the
+  Obsidian, Neovim, the daemon — happens in `restask-vault/`, whose tasks live in the
   calendar `dev` through the sync node's daemon. No other vault, no other calendar.
 
 What follows from it, each point a thing that went wrong once:
 
 - Never run the real binary's `setup`, `daemon`, `sync`, `add`, `done` or `undone` on
-  a vault other than `test-vault/` — no throwaway vault, no scratch copy, no
+  a vault other than `restask-vault/` — no throwaway vault, no scratch copy, no
   `--vault` / `RESTASK_VAULT` pointing anywhere else. The machine config of this
   computer names the live server; a vault whose `restask.toml` says `inbox_list =
   "inbox"`, or whose notes route to lists of their own, is synced with the owner's
@@ -69,7 +69,7 @@ What follows from it, each point a thing that went wrong once:
 There is one daemon per vault (`docs/spec/overview.md` §1.1), and for the sandbox it does
 not run on the development machine. It runs on the sync node — the compose stack
 `/opt/docker/restask` on the ssh host `docker`, the machine Radicale is on — and serves
-that machine's copy of `test-vault` (Syncthing folder `obsidian-dev`, calendar `dev`).
+that machine's copy of `restask-vault` (Syncthing folder `obsidian-dev`, calendar `dev`).
 `contrib/update.sh docker` (§5.4) is how a change gets there. A second daemon — or a
 one-shot `restask sync` — on this machine is not redundant but harmful: it races the
 file sync and leaves conflict copies of notes (§1.1 *Why not two*).
@@ -229,7 +229,7 @@ Every bug fix ships with a regression test at the level where the bug showed
    not seen, and why).
 
 **Fixtures and the sandbox.** `crates/restask/tests/fixtures/` and
-`plugins/obsidian/test/fixtures/` are immutable test inputs. `test-vault/` is the
+`plugins/obsidian/test/fixtures/` are immutable test inputs. `restask-vault/` is the
 sandbox (the sync node's daemon is syncing it, through the file sync, with the calendar
 `dev`): the one place a trial of the real thing is made (§2). An automated test may
 read it as input, but works on a copy in a temporary directory and never writes to the

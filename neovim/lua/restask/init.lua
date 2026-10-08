@@ -7,6 +7,7 @@ local conceal = require("restask.conceal")
 local start = require("restask.start")
 local suggest = require("restask.suggest")
 local settle = require("restask.settle")
+local lock = require("restask.lock")
 
 --- Sets up the integration: `require("restask").setup({ keymaps = true })`.
 --
@@ -27,6 +28,8 @@ local settle = require("restask.settle")
 --   { settle = true }  writing a vault note does restask's local work at once, through
 --     the CLI: new lines are registered, a checked one moves under the done heading,
 --     TODO.md follows — no daemon, no network (§16)
+--   { lock = true }  in the TODO.md view the cursor skips the frontmatter and the
+--     headings, and a view opens on the line under `# TODO` (§16)
 --
 -- Errors from the CLI are surfaced through `vim.notify` (§16).
 ---@param opts table|nil Options table; `keymaps`, `conceal`, `start_tasks`, `suggest` and `settle` default to true.
@@ -49,6 +52,9 @@ function M.setup(opts)
 	end
 	if opts.settle ~= false then
 		settle.register()
+	end
+	if opts.lock ~= false then
+		lock.register()
 	end
 end
 

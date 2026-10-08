@@ -339,13 +339,13 @@ pub fn temp_vault() -> TempDir {
     dir
 }
 
-/// Copies the repository's `test-vault/` sandbox into a fresh temporary directory, so a
+/// Copies the repository's `restask-vault/` sandbox into a fresh temporary directory, so a
 /// test can use ready-made notes without ever writing to the sandbox itself (the file
 /// sync would carry such a write to the sync node). Hidden files and folders are left
 /// out: they are not part of the vault (`.restask/`, `.obsidian/`, `.stfolder/`, ...).
 /// The caller keeps the [`TempDir`] alive for the test's duration.
 pub fn copy_test_vault() -> TempDir {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-vault");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../restask-vault");
     let dir = tempfile::tempdir().unwrap();
     copy_visible(&source, dir.path());
     dir

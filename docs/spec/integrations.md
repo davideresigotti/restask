@@ -301,6 +301,23 @@ The filter runs after §15.5's guard, so a break made in front of a hidden token
 its line behind the token. The `startTasks` setting turns the rule off; it is
 independent of `settleTasks`.
 
+### 15.8 `filing.ts`, `editor.ts`, `main.ts` — the view's fixed lines are skipped, and it opens under `# TODO`
+
+An editing aid for the TODO.md view (the file at the inbox path) only; it decides nothing
+about the vault and writes nothing.
+
+- **Locked lines** (`lockedLines`): the frontmatter block and every heading outside a
+  fenced block (§6.2). They are the render's, not the user's: the seal, the title and the
+  section headings. Blank lines and task lines are free.
+- **The cursor skips them** (`viewLock`, a transaction filter; `freeLine`): a selection
+  change that puts the cursor on a locked line moves it on to the nearest free line in the
+  direction of travel — down when it came from above or from nowhere — and, with none that
+  way, the nearest one the other way, so a cursor pushed against the top stays on the first
+  free line (`gg` lands there). The column is kept where the line is long enough. Clicks
+  (`select.pointer`) and selections that span text are left alone.
+- **Opening** (`homeLine`, `main.ts`): when the view is opened in the editor, the cursor
+  goes to the line under the first heading (`# TODO`), where a new task is typed at once.
+
 ## §16 Neovim (`neovim/lua/restask/`)
 
 A thin wrapper over the CLI — no Markdown logic in Lua beyond recognising a task line,
@@ -365,6 +382,12 @@ The local work (invariant 12) is the engine's own, run when a buffer is written.
   task, at its indentation; a second Enter on the empty checkbox opens another one —
   the box is deleted by hand where a line is to stay empty. Keys that arrive as
   typeahead (a macro, a mapping's right-hand side) open plain lines.
+- `lock.lua` (its rules pure, `lua neovim/test/lock_test.lua`): §15.8 for a buffer. In the
+  TODO.md view, `CursorMoved`/`CursorMovedI` in normal and insert mode send a cursor that
+  landed on the frontmatter or a heading on to the next free line (`lock.free`, the plugin's
+  `freeLine`; the cases of the two tests are the same), and a view buffer shown for the
+  first time puts the cursor on the line under `# TODO` (`lock.home`). `lock = false`
+  turns both off.
 - `suggest.lua` (its rules pure, `lua neovim/test/suggest_test.lua`), `blink.lua`:
   §15.2 while typing — the same keyword table, `suggestions_for` and `trigger_at` as
   `modal.ts`, with the cases of its test. In a Markdown file of a vault (where the token

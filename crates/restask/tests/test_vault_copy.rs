@@ -1,4 +1,4 @@
-//! The `test-vault/` sandbox as ready-made test input: tests work on a temporary copy
+//! The `restask-vault/` sandbox as ready-made test input: tests work on a temporary copy
 //! and never write to the sandbox itself (AGENTS.md, "Fixtures and the sandbox").
 //!
 //! Nothing here asserts what the notes say: the sandbox is where trials are made, so its
@@ -26,7 +26,7 @@ fn the_copy_holds_the_visible_notes_and_none_of_the_hidden_state() {
 
 #[test]
 fn writing_to_the_copy_leaves_the_sandbox_untouched() {
-    let sandbox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-vault/TODO.md");
+    let sandbox = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../restask-vault/TODO.md");
     let before = fs::read(&sandbox).unwrap();
 
     let copy = copy_test_vault();

@@ -1,5 +1,5 @@
 //! §6.1–§6.2 grammar-port conformance tests: same case matrix as the Rust
-//! `tests/markdown_parser.rs` suite, run against byte-exact copies of `test-vault/`.
+//! `tests/markdown_parser.rs` suite, run against byte-exact copies of `restask-vault/`.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";

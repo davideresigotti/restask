@@ -112,5 +112,5 @@ pass; pushing stays the daemon's.
 ├── plugins/obsidian/
 │   ├── src/{main,settings,markdown,modal,toggle,conceal,editor,filing}.ts
 │   └── test/*.test.ts  test/fixtures/
-└── test-vault/                manual sandbox (may be live-synced; tests never read it)
+└── restask-vault/                manual sandbox (may be live-synced; tests never read it)
 ```

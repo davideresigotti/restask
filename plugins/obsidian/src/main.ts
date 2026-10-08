@@ -28,11 +28,12 @@ import {
 } from "obsidian";
 import type { EditorState, Extension } from "@codemirror/state";
 import { stripUid } from "./conceal";
-import { taskFiling, taskStart, uidConcealment, type Carried, type DroppedMirror, type FilingHost } from "./editor";
+import { taskFiling, taskStart, uidConcealment, viewLock, type Carried, type DroppedMirror, type FilingHost } from "./editor";
 import {
 	completedByUid,
 	declaresRoot,
 	disclaimed,
+	homeLine,
 	inView,
 	isSealed,
 	mirrorDropped,
@@ -177,13 +178,18 @@ export default class RestaskPlugin extends Plugin {
 		await this.loadSettings();
 		await this.loadInboxPath();
 		// `restask.toml` may arrive, or change, through the file sync while the app is open.
-		this.registerEvent(this.app.workspace.on("file-open", () => void this.loadInboxPath()));
+		this.registerEvent(
+			this.app.workspace.on("file-open", (file) => {
+				void this.loadInboxPath().then(() => this.openAtHome(file));
+			}),
+		);
 		this.addSettingTab(new RestaskSettingTab(this.app, this));
 		this.registerEditorSuggest(new MetadataSuggest(this.app, this));
 		this.registerEditorExtension(this.editorExtensions);
 		const host = this.filingHost();
 		this.registerEditorExtension(taskFiling(host));
 		this.registerEditorExtension(taskStart(host));
+		this.registerEditorExtension(viewLock(host));
 		// Reading view changes a checkbox without the editor: seen here, before Obsidian handles the tap.
 		this.registerDomEvent(document, "click", (event) => this.onPreviewClick(event), { capture: true });
 		this.registerMarkdownPostProcessor((el) => {
@@ -218,6 +224,16 @@ export default class RestaskPlugin extends Plugin {
 		this.app.workspace.iterateAllLeaves((leaf) => {
 			if (leaf.view instanceof MarkdownView) leaf.view.previewMode.rerender(true);
 		});
+	}
+
+	/** Opening the TODO.md view puts the cursor on the line under `# TODO` (§15.8). */
+	private openAtHome(file: TFile | null): void {
+		if (file === null || file.path !== this.inboxPath) return;
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (view === null || view.file?.path !== file.path || view.getMode() !== "source") return;
+		const idx = homeLine(view.editor.getValue().split("\n"));
+		// Obsidian restores the cursor of the last visit once the file is shown; this comes after.
+		if (idx !== undefined) window.setTimeout(() => view.editor.setCursor({ line: idx, ch: 0 }), 0);
 	}
 
 	/** Whether this device settles tasks itself (§15.6, the `settleTasks` setting). */

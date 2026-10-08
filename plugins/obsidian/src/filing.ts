@@ -292,6 +292,44 @@ export function inView(view: View | undefined, idx: number): view is View {
 	return view !== undefined && idx < view.to && (view.root ? idx > view.from : idx >= view.from);
 }
 
+/**
+ * The lines of the TODO.md view that are not the user's to edit (§15.8): the frontmatter
+ * block and every heading outside a fenced block (§6.2). Indexes are 0-based.
+ */
+export function lockedLines(lines: readonly string[]): Set<number> {
+	const locked = new Set<number>();
+	const body = bodyStartLine(lines);
+	for (let i = 0; i < body; i++) locked.add(i);
+	for (const heading of headings(lines)) locked.add(heading.idx);
+	return locked;
+}
+
+/**
+ * Where a cursor that arrived on line `idx` belongs in the view: there when the line is
+ * free, else on the nearest free line in the direction of travel (down when `from` is
+ * unknown or above), else on the nearest one the other way — a cursor pushed against the
+ * top or the bottom stays on the first or last free line. Undefined when every line is locked.
+ */
+export function freeLine(lines: readonly string[], idx: number, from?: number): number | undefined {
+	const locked = lockedLines(lines);
+	if (!locked.has(idx)) return idx;
+	const step = from !== undefined && idx < from ? -1 : 1;
+	const seek = (dir: number): number | undefined => {
+		for (let at = idx + dir; at >= 0 && at < lines.length; at += dir) if (!locked.has(at)) return at;
+		return undefined;
+	};
+	return seek(step) ?? seek(-step);
+}
+
+/** The line a view opens on (§15.8): the one under its first heading, `# TODO`, where a new task is typed. */
+export function homeLine(lines: readonly string[]): number | undefined {
+	const locked = lockedLines(lines);
+	for (let i = bodyStartLine(lines); i < lines.length; i++) {
+		if (locked.has(i)) return i + 1 < lines.length ? i + 1 : undefined;
+	}
+	return undefined;
+}
+
 /** Runs `edit` on the lines of `view` as a document of their own and puts what it returns back among `lines`. */
 function within(lines: readonly string[], view: View, edit: (sub: string[]) => string[] | undefined): string[] | undefined {
 	const out = edit(lines.slice(view.from, view.to));

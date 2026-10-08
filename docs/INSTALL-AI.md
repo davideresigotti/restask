@@ -103,7 +103,7 @@ All of them use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>
 - **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()` (needs `restask` on `PATH`). With which-key.nvim, `<leader>t` shows up as `restask` in the key hint; load the integration at startup (not only for Markdown) to have it there from the first keypress.
   - Saving a vault note does restask's work at once and offline, and reloads the buffer with the result (`setup({ settle = false })` leaves it to the daemon).
   - `<leader>td` toggles the task under the cursor, `<leader>ta` adds one (`keymaps = false` turns them off).
-  - The `🆔` tokens are concealed (`conceal = false`), a line opened under a `TODO` heading starts with `- [ ] ` (`start_tasks = false`), and with [blink.cmp](https://github.com/Saghen/blink.cmp) the same suggestions appear while typing (`suggest = false`).
+  - The `🆔` tokens are concealed (`conceal = false`), a line opened under a `TODO` heading starts with `- [ ] ` (`start_tasks = false`), the cursor skips the frontmatter and headings of TODO.md and opens under `# TODO` (`lock = false`), and with [blink.cmp](https://github.com/Saghen/blink.cmp) the same suggestions appear while typing (`suggest = false`).
 
 ## 5. Verify
 

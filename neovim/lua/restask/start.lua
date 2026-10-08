@@ -67,11 +67,15 @@ local function heading(line)
 	return #marks, text
 end
 
+M.heading = heading
+
 --- The character a fence line opens or closes a fenced block with (§6.2), or nil.
 local function fence(line)
 	local marks = line:match("^%s*(```+)") or line:match("^%s*(~~~+)")
 	return marks and marks:sub(1, 1)
 end
+
+M.fence = fence
 
 --- True when line `row` (1-based) lies in the TODO section of its note (§15.7). In a
 -- note that is the lines below a heading whose text is `TODO` (in any letter case) down
@@ -229,6 +233,8 @@ local function kind_of(buf, lines)
 	kinds[buf] = kind
 	return kind
 end
+
+M.kind_of = kind_of
 
 --- Looks at `buf` after a change made in insert mode, or on entering it: when the buffer
 -- grew by exactly one line since the last look and the cursor is on a blank line of the

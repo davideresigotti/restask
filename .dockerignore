@@ -3,5 +3,5 @@ target/
 plugins/
 neovim/
 docs/
-test-vault/
+restask-vault/
 **/node_modules/
