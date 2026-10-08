@@ -1,7 +1,9 @@
 //! TTY primitives for the setup wizard (§13.2). Thin by design — reading a line, hiding
-//! a password; the wizard's logic lives in [`crate::setup`].
+//! a password, a list to pick from; the wizard's logic lives in [`crate::setup`].
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
+
+use dialoguer::{MultiSelect, Select};
 
 use crate::RestaskError;
 
@@ -40,5 +42,44 @@ pub fn confirm_yes(message: &str) -> Result<bool, RestaskError> {
             "n" | "N" | "no" | "No" => return Ok(false),
             _ => {}
         }
+    }
+}
+
+/// `true` when the wizard talks to a person at a terminal, so a list can be moved through
+/// with the keys ([`pick_many`], [`pick_one`]); with piped input the questions are typed
+/// answers instead.
+pub fn interactive() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+/// Shows `items` as a checklist, each ticked as `checked` says, and returns the indexes
+/// left ticked when Enter is pressed: arrows move, the spacebar ticks and unticks one,
+/// `a` all of them.
+pub fn pick_many(
+    message: &str,
+    items: &[String],
+    checked: &[bool],
+) -> Result<Vec<usize>, RestaskError> {
+    MultiSelect::new()
+        .with_prompt(message)
+        .items(items)
+        .defaults(checked)
+        .interact()
+        .map_err(picker_error)
+}
+
+/// Shows `items` as a list and returns the index of the one Enter is pressed on.
+pub fn pick_one(message: &str, items: &[String]) -> Result<usize, RestaskError> {
+    Select::new()
+        .with_prompt(message)
+        .items(items)
+        .default(0)
+        .interact()
+        .map_err(picker_error)
+}
+
+fn picker_error(error: dialoguer::Error) -> RestaskError {
+    match error {
+        dialoguer::Error::IO(error) => error.into(),
     }
 }

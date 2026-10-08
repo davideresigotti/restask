@@ -117,13 +117,18 @@ pub async fn run(vault, machine, dc, shutdown: watch::Receiver<bool>) -> Result<
    referenced via an env var — never to `config.toml`. On an editing machine (step 6)
    it is kept nowhere: it is used for this run's requests, handed to the node's
    installer, and a password file an earlier setup left beside the config is removed.
-4. **The calendars of TODO.md** (§7.5): the server's calendars are listed and two
-   things are asked. *Which calendars TODO.md shows* — names separated by commas,
-   case-insensitive, Enter for all that can hold tasks; a name the server does not have
-   re-prompts; no calendars at all aborts (`select_collections`). *Which of them new
-   tasks go to* — asked when more than one was chosen: a line typed in TODO.md without
-   a calendar belongs to it. Its slug becomes `vault.inbox_list`, the others
-   `vault.todo_lists`. Lists that live in notes are declared there (§5).
+4. **The calendars of TODO.md** (§7.5): two things are asked. *Which calendars TODO.md
+   shows* — at a terminal a checklist of the server's calendars that can hold tasks
+   (`offered_collections`), **all ticked**: arrows move, the spacebar ticks or unticks
+   one, `a` all, Enter confirms; a calendar is listed by its slug, with the name other
+   clients show in front when that is another one (`collection_label`); none ticked
+   asks again. *Which of them new tasks go to* — a list of the ticked ones, asked when
+   more than one was: a line typed in TODO.md without a calendar belongs to it. Its
+   slug becomes `vault.inbox_list`, the others `vault.todo_lists`. With piped input,
+   or when no calendar of the server holds tasks, both are typed answers instead:
+   names separated by commas, case-insensitive, Enter for all that can hold tasks, a
+   name the server does not have re-prompts (`select_collections`). No calendars at
+   all aborts. Lists that live in notes are declared there (§5).
 5. **First sync** — from this machine, also when the daemon goes elsewhere: the vault
    leaves it converged, and the node's first pass finds nothing to do in it.
 6. **The daemon** (`SetupArgs::daemon`, a `DaemonHost`). The interactive wizard asks

@@ -16,6 +16,7 @@ description = "restask: Markdown checkboxes ⇄ VTODO (CalDAV) sync"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 clap = { version = "4", features = ["derive"] }
+dialoguer = { version = "0.11", default-features = false }
 fnv = "1.0"
 globset = "0.4"
 notify = "6"

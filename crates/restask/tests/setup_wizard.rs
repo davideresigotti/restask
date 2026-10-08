@@ -17,10 +17,10 @@ use common::{FixedClock, MockCaldav};
 use restask::cli;
 use restask::config::{MachineConfig, VaultConfig};
 use restask::setup::{
-    daemon_unit_content, install_obsidian_plugin, is_loopback, is_obsidian_main, joins,
-    match_collection, node_link_args, open_vault_id, parse_collections, run_setup,
-    select_collections, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess, NodeTarget,
-    ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
+    collection_label, daemon_unit_content, install_obsidian_plugin, is_loopback, is_obsidian_main,
+    joins, match_collection, node_link_args, offered_collections, open_vault_id, parse_collections,
+    run_setup, select_collections, DaemonFlags, DaemonHost, DaemonInstaller, NodeAccess,
+    NodeTarget, ObsidianApp, PluginInstall, PluginLoad, SetupArgs,
 };
 use restask::store::Index;
 use restask::RestaskError;
@@ -598,6 +598,44 @@ fn the_calendars_todo_md_shows_are_chosen_from_the_servers_by_name() {
     assert_eq!(chosen("work, wrok").unwrap_err(), "wrok");
     // One that was typed is taken at the user's word.
     assert_eq!(chosen("birthdays").unwrap(), vec!["birthdays"]);
+}
+
+#[test]
+fn the_wizards_checklist_offers_every_calendar_that_holds_tasks_under_a_name_the_user_knows() {
+    let calendar =
+        |slug: &str, display: Option<&str>, tasks: bool| restask::caldav::CollectionInfo {
+            href: format!("/me/{slug}/"),
+            slug: slug.to_string(),
+            display_name: display.map(str::to_string),
+            supports_vtodo: tasks,
+            ctag: None,
+        };
+    let server = vec![
+        calendar("personal", Some("Personal"), true),
+        calendar("birthdays", None, false),
+        calendar("work", None, true),
+        // Made in another client: the path is not the name the user gave it.
+        calendar(
+            "0b1f6c1e-3a52-4c0e-9d58-0f3c2f6f1a77",
+            Some("University"),
+            true,
+        ),
+    ];
+    // All that can hold tasks, in the server's order — the list opens with each ticked.
+    let offered = offered_collections(&server);
+    assert_eq!(
+        offered
+            .iter()
+            .map(|collection| collection_label(collection))
+            .collect::<Vec<_>>(),
+        vec![
+            "personal",
+            "work",
+            "University (0b1f6c1e-3a52-4c0e-9d58-0f3c2f6f1a77)"
+        ]
+    );
+    // Enter on the typed question is the same choice.
+    assert_eq!(select_collections("", &server).unwrap(), offered);
 }
 
 #[test]

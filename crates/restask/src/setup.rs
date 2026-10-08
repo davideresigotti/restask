@@ -502,22 +502,65 @@ pub async fn run_interactive(
                 .to_string(),
         });
     }
+    let offered = offered_collections(&server_collections);
+    // At a terminal the calendars are a checklist, all of them ticked; the typed
+    // questions remain for piped input and for a server with nothing to tick.
+    let pick = crate::tui::interactive() && !offered.is_empty();
     let names: Vec<&str> = server_collections
         .iter()
         .map(|collection| collection.slug.as_str())
         .collect();
-    println!("Server calendars: {}", names.join(", "));
-    let shown = loop {
-        let typed = crate::tui::prompt(
-            "Calendars TODO.md shows (comma-separated, Enter for all of them):",
-        )?;
-        match select_collections(&typed, &server_collections) {
-            Ok(shown) => break shown,
-            Err(miss) => println!("`{miss}` is not one of: {}", names.join(", ")),
+    let shown = if pick {
+        let labels: Vec<String> = offered
+            .iter()
+            .map(|collection| collection_label(collection))
+            .collect();
+        let ticked = vec![true; offered.len()];
+        loop {
+            let picked = crate::tui::pick_many(
+                "Calendars TODO.md shows (space: tick or untick, a: all, Enter: confirm)",
+                &labels,
+                &ticked,
+            )?;
+            if picked.is_empty() {
+                println!("TODO.md needs at least one calendar.");
+                continue;
+            }
+            break picked
+                .into_iter()
+                .filter_map(|at| offered.get(at).copied())
+                .collect::<Vec<_>>();
+        }
+    } else {
+        println!("Server calendars: {}", names.join(", "));
+        loop {
+            let typed = crate::tui::prompt(
+                "Calendars TODO.md shows (comma-separated, Enter for all of them):",
+            )?;
+            match select_collections(&typed, &server_collections) {
+                Ok(shown) => break shown,
+                Err(miss) => println!("`{miss}` is not one of: {}", names.join(", ")),
+            }
         }
     };
     let inbox = match shown.as_slice() {
         [only] => only.slug.clone(),
+        _ if pick => {
+            let labels: Vec<String> = shown
+                .iter()
+                .map(|collection| collection_label(collection))
+                .collect();
+            let at = crate::tui::pick_one("New tasks typed in TODO.md go to", &labels)?;
+            match shown.get(at) {
+                Some(collection) => collection.slug.clone(),
+                None => {
+                    return Err(RestaskError::Validation {
+                        field: "collections",
+                        reason: "no calendar chosen for new tasks".to_string(),
+                    })
+                }
+            }
+        }
         _ => {
             let shown_names: Vec<&str> = shown
                 .iter()
@@ -580,6 +623,27 @@ pub fn match_collection<'a>(
         .find(|collection| collection.slug.eq_ignore_ascii_case(typed))
 }
 
+/// The calendars the wizard offers for TODO.md (§13.2 step 4): those of the server that
+/// can hold tasks, in the server's order. All of them are ticked when the list opens.
+pub fn offered_collections(collections: &[CollectionInfo]) -> Vec<&CollectionInfo> {
+    collections
+        .iter()
+        .filter(|collection| collection.supports_vtodo)
+        .collect()
+}
+
+/// How the wizard's list names a calendar: by its slug, the name `restask.toml` and a
+/// `📁` token use — with the name other clients show in front when that is another one
+/// (a calendar made in a CalDAV client has a path the user never saw).
+pub fn collection_label(collection: &CollectionInfo) -> String {
+    match &collection.display_name {
+        Some(name) if !name.trim().eq_ignore_ascii_case(&collection.slug) => {
+            format!("{} ({})", name.trim(), collection.slug)
+        }
+        _ => collection.slug.clone(),
+    }
+}
+
 /// The calendars TODO.md shows, as typed in step 4 of the wizard (§13.2): names of the
 /// server's calendars separated by commas, matched like [`match_collection`], each once
 /// and in the order typed; nothing typed means all of them that can hold tasks. `Err`
@@ -589,12 +653,6 @@ pub fn select_collections<'a>(
     typed: &str,
     collections: &'a [CollectionInfo],
 ) -> Result<Vec<&'a CollectionInfo>, String> {
-    let all = || {
-        collections
-            .iter()
-            .filter(|collection| collection.supports_vtodo)
-            .collect()
-    };
     let mut chosen: Vec<&CollectionInfo> = Vec::new();
     for name in typed
         .split(',')
@@ -607,7 +665,7 @@ pub fn select_collections<'a>(
         }
     }
     if chosen.is_empty() {
-        return Ok(all());
+        return Ok(offered_collections(collections));
     }
     Ok(chosen)
 }
