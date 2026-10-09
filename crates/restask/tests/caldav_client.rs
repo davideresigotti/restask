@@ -634,6 +634,38 @@ async fn network_errors_exhaust_retry_budget() {
 }
 
 #[tokio::test]
+async fn a_server_that_never_answers_is_a_network_error() {
+    // Accepts the connection, reads the request and says nothing, for as long as the
+    // test runs. Without a time limit the request never returned.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = read_request(&mut stream);
+            held.push(stream);
+        }
+    });
+    let silent = CaldavClient::with_limits(
+        &format!("http://127.0.0.1:{port}"),
+        "me".to_string(),
+        Some("secret".to_string()),
+        vec![Duration::ZERO],
+        Duration::from_millis(200),
+    )
+    .unwrap();
+    let result = silent.list_tasks("inbox", &slug("inbox")).await;
+    match result {
+        Err(RestaskError::Caldav {
+            kind: CaldavErrorKind::Network,
+            status: None,
+            ..
+        }) => {}
+        other => panic!("expected a network error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn basic_auth_header_is_sent() {
     let server = spawn_server(Box::new(|_request| RawResponse::status(404)));
     client(&server.base_url)

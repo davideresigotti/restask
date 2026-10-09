@@ -4,6 +4,10 @@
 //! plus an HTTP `Basic` header built from the configured password source. The header and
 //! the password are never logged (§17). Collection URL shape: `{url}/{username}/{slug}/`.
 //!
+//! Every request has a time limit (§10.4): 10 s to connect, 60 s in all. A server that
+//! accepts a connection and then says nothing fails the request like any other network
+//! error — it does not hold the pass, and the daemon with it, for ever.
+//!
 //! Retry budget (§10.4): network errors, `5xx` and `429` are retried with 1 s / 2 s / 4 s
 //! backoff (4 attempts total). `401/403` are fatal for the cycle (`CaldavErrorKind::Auth`);
 //! `412` returns `CaldavErrorKind::Conflict` immediately (no budget consumed): the engine
@@ -28,6 +32,13 @@ use crate::{CaldavErrorKind, RestaskError};
 
 /// Standard retry budget (§10.4): 1 s, 2 s, 4 s — four attempts total.
 const DEFAULT_RETRY_DELAYS: [u64; 3] = [1, 2, 4];
+
+/// How long a connection may take to open (§10.4).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one request may take from its first byte to the last of its answer (§10.4):
+/// well above the `REPORT` of a large collection on a slow server, far below "for ever".
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The concrete [`CaldavPort`] over HTTP (§10.3).
 #[derive(Clone)]
@@ -74,8 +85,23 @@ impl CaldavClient {
         password: Option<String>,
         delays: Vec<Duration>,
     ) -> Result<Self, RestaskError> {
+        Self::with_limits(base_url, username, password, delays, REQUEST_TIMEOUT)
+    }
+
+    /// [`CaldavClient::with_retry_delays`] with an explicit time limit per request.
+    /// Production uses [`REQUEST_TIMEOUT`]; hermetic tests pass a short one.
+    #[doc(hidden)]
+    pub fn with_limits(
+        base_url: &str,
+        username: String,
+        password: Option<String>,
+        delays: Vec<Duration>,
+        request_timeout: Duration,
+    ) -> Result<Self, RestaskError> {
         let http = Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
+            .connect_timeout(CONNECT_TIMEOUT.min(request_timeout))
+            .timeout(request_timeout)
             .build()
             .map_err(|error| RestaskError::Caldav {
                 kind: CaldavErrorKind::Network,

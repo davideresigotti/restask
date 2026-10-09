@@ -71,12 +71,16 @@ preconditions like a server).
 
 ### 10.3 `client.rs`
 
-`reqwest::Client` (rustls only, ≤ 10 redirects), HTTP Basic auth when a password is
-configured. The password and the header are never logged.
+`reqwest::Client` (rustls only, ≤ 10 redirects, 10 s to connect and 60 s per request),
+HTTP Basic auth when a password is configured. The password and the header are never logged.
 
 ### 10.4 Failures
 
-- Network errors, `5xx`, `429` → retried with 1 s, 2 s, 4 s backoff (4 attempts), then
+- Every request has a time limit: 10 s to open the connection, 60 s for the whole
+  exchange. A server that accepts the connection and then stalls is a network error
+  like a refused one — without the limit one stalled answer held the pass, and so the
+  daemon, until it was restarted.
+- Network errors (a timeout is one), `5xx`, `429` → retried with 1 s, 2 s, 4 s backoff (4 attempts), then
   `CaldavErrorKind::Network`.
 - `401` / `403` → `CaldavErrorKind::Auth`, not retried.
 - `412` → `CaldavErrorKind::Conflict`, not retried: the resource changed since it was
