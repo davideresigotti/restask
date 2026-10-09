@@ -372,6 +372,11 @@ pub struct MachineConfig {
     /// Where the vault's daemon runs, on a machine that is not the sync node.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeSection>,
+    /// The file this machine keeps the identity it mints UIDs under in (§9.4): beside
+    /// the config, set by whoever loaded it. No key of the config; without one the
+    /// identity lives as long as the process.
+    #[serde(skip)]
+    pub device_file: Option<PathBuf>,
 }
 
 impl MachineConfig {

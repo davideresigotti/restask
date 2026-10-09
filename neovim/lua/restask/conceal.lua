@@ -1,4 +1,4 @@
--- restask conceal (§16): keeps the `🆔 restask-…` token of task lines off the screen and
+-- restask conceal (§16): keeps the `🆔` token of task lines (`🆔 a42`) off the screen and
 -- out of reach. The token stays in the file — it links the line to its task on the
 -- server. A window match conceals it in every mode, the cursor is kept off it, and an
 -- edit that would damage it is repaired at once (the rules are in `guard.lua`).
@@ -6,8 +6,10 @@ local M = {}
 
 local guard = require("restask.guard")
 
---- The token of §6.1 on a task line, with the one blank before it, as a Vim pattern.
-M.PATTERN = [[^[ \t]*[-*+][ \t]\+\[[ xX]\][ \t]\+.\{-}\zs[ \t]\=🆔[ \t]\+\%(restask\|taskres\)-[0-9a-hjkmnp-tv-z]\{26}]]
+--- The token of §6.1 on a task line, with the one blank before it, as a Vim pattern: a
+-- counted UID (§3.1) — a device tag and a number, as a whole word — or a long one. Case
+-- matters, whatever 'ignorecase' says.
+M.PATTERN = [[\C^[ \t]*[-*+][ \t]\+\[[ xX]\][ \t]\+.\{-}\zs[ \t]\=🆔[ \t]\+\%(\%(restask\|taskres\)-[0-9a-hjkmnp-tv-z]\{26}\|[a-z]\{1,4}[1-9][0-9]\{,14}\%([0-9A-Za-z_]\)\@!\)]]
 
 --- The seal of a rendered view (§7.2), a frontmatter line the engine owns: hidden whole.
 -- The line is not drawn at all (`conceal_lines`, Neovim 0.11), so no blank row is left.

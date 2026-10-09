@@ -519,7 +519,8 @@ async fn the_calendars_todo_md_shows_are_recorded_and_their_tasks_come_in() {
     }
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     assert!(
-        todo.contains("## No Priority\n- [ ] Update restask README 📁 work 🆔 restask-"),
+        todo.contains("## No Priority\n- [ ] Update restask README 📁 work 🆔 ")
+            && !todo.contains("🆔 restask-"),
         "{todo}"
     );
     assert_eq!(mock.resource_names("work"), vec!["from-phone"]);
@@ -684,7 +685,7 @@ async fn setup_takes_a_calendar_made_in_another_client_by_its_name() {
     assert_eq!(mock.collection_names(), vec![phone, "personal"]);
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     assert!(
-        todo.contains("- [ ] Try the new list 📁 prova 🆔 restask-"),
+        todo.contains("- [ ] Try the new list 📁 prova 🆔 ") && !todo.contains("🆔 restask-"),
         "{todo}"
     );
     assert_eq!(mock.resource_names(phone), vec!["from-phone"]);

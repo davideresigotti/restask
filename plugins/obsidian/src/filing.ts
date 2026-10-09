@@ -17,8 +17,10 @@ import {
 	PRIORITIES,
 	PRIORITY_EMOJI,
 	checkOffset,
+	countedUid,
 	parse,
 	parseLine,
+	uidOrder,
 	type ParsedTask,
 	type Priority,
 	type TaskDraft,
@@ -97,10 +99,12 @@ const TIME_DIGITS = 10;
 const RANDOM_DIGITS = 16;
 
 /**
- * A source of fresh task UIDs (§3.1): `restask-` + a ULID of `now()` milliseconds and 80
- * random bits taken from `randomBytes(16)`. Like the engine's generator it is monotonic:
- * a UID made in the same millisecond as the previous one (or after the clock stepped
- * back) is the previous one plus one, so tasks registered together keep their order.
+ * A source of fresh long UIDs (§3.1): `restask-` + a ULID of `now()` milliseconds and 80
+ * random bits taken from `randomBytes(16)` — what a device mints in a vault that its
+ * sync node has not switched to counted UIDs (§9.4), and whenever it has no tag it may
+ * use. Like the engine's generator it is monotonic: a UID made in the same millisecond
+ * as the previous one (or after the clock stepped back) is the previous one plus one,
+ * so tasks registered together keep their order.
  */
 export function uidGenerator(now: () => number, randomBytes: (count: number) => Uint8Array): () => string {
 	let lastTime = -1;
@@ -124,6 +128,77 @@ export function uidGenerator(now: () => number, randomBytes: (count: number) => 
 		}
 		return `restask-${stamp}${random.map((digit) => ALPHABET[digit]).join("")}`;
 	};
+}
+
+/**
+ * What a device mints UIDs under in one vault (§9.4): its tag, the secret its claim
+ * file holds, and the last number it used.
+ */
+export interface Device {
+	tag: string;
+	secret: string;
+	last: number;
+}
+
+/**
+ * A source of fresh task UIDs (§3.1): the device's tag and its next number, as a line
+ * spells them (`a42`). `device()` is the identity as it is now; `used` is told every
+ * number that was handed out, so it is never handed out again. While the device has no
+ * identity it may use — the vault is not switched to counted UIDs, or its claim is not
+ * known to hold (§9.4) — the UID is one of `long`.
+ */
+export function uidCounter(device: () => Device | undefined, used: (device: Device) => void, long: () => string): () => string {
+	return () => {
+		const now = device();
+		if (now === undefined) return long();
+		const next = { ...now, last: now.last + 1 };
+		used(next);
+		return `${next.tag}${next.last}`;
+	};
+}
+
+/** The identity a device stored for itself, read back: undefined when `stored` is not one. */
+export function deviceOf(stored: unknown): Device | undefined {
+	let value: unknown = stored;
+	if (typeof stored === "string") {
+		try {
+			value = JSON.parse(stored);
+		} catch {
+			return undefined;
+		}
+	}
+	if (typeof value !== "object" || value === null) return undefined;
+	const { tag, secret, last } = value as Record<string, unknown>;
+	if (typeof tag !== "string" || !/^[a-z]{1,4}$/.test(tag)) return undefined;
+	if (typeof secret !== "string" || secret === "") return undefined;
+	if (typeof last !== "number" || !Number.isSafeInteger(last) || last < 0) return undefined;
+	return { tag, secret, last };
+}
+
+/** The tags the claim files `names` of `.restask/devices/` hold (§9.4); a conflict copy of a claim (`a.sync-conflict-…`) is a claim. */
+export function claimedTags(names: readonly string[]): Set<string> {
+	return new Set(names.map((name) => name.split(".")[0]).filter((tag) => /^[a-z]{1,4}$/.test(tag)));
+}
+
+/** The shortest tags that are not in `taken`, in alphabetical order: what a device draws its own from (§9.4). */
+export function freeTags(taken: ReadonlySet<string>): string[] {
+	let tags = [""];
+	for (let letters = 1; letters <= 4; letters++) {
+		tags = tags.flatMap((head) => Array.from("abcdefghijklmnopqrstuvwxyz", (letter) => head + letter));
+		const free = tags.filter((tag) => !taken.has(tag));
+		if (free.length > 0) return free;
+	}
+	return [];
+}
+
+/** The highest number the UIDs `uids` carry under `tag`; 0 when none does. */
+export function highestNumber(tag: string, uids: Iterable<string>): number {
+	let highest = 0;
+	for (const uid of uids) {
+		const counted = countedUid(uid.replace(/^restask-/, ""));
+		if (counted !== undefined && counted.tag === tag && counted.number > highest) highest = counted.number;
+	}
+	return highest;
 }
 
 /**
@@ -490,10 +565,13 @@ function takeOut(out: string[], idx: number, layout: Layout): void {
 	out.splice(from, count);
 }
 
-/** Sort key of a `Done` line (§7): completion date, then UID — the render lists both descending. */
-function doneKey(line: string): string {
-	const draft = parseLine(line)?.draft;
-	return `${draft?.completedOn ?? ""} ${draft?.uid ?? ""}`;
+/** `true` when the `Done` line `a` stands above `b` (§7): the later completion date, then the later UID — the render lists both descending. */
+function doneAbove(a: string, b: string): boolean {
+	const [da, db] = [parseLine(a)?.draft, parseLine(b)?.draft];
+	const [on, other] = [da?.completedOn ?? "", db?.completedOn ?? ""];
+	if (on !== other) return on > other;
+	if (da?.uid === undefined || db?.uid === undefined) return da?.uid !== undefined && db?.uid === undefined;
+	return uidOrder(da.uid, db.uid) > 0;
 }
 
 /** Puts `line` into the section `target` of the view, in place, creating the section in render order when missing. */
@@ -507,7 +585,7 @@ function putIn(out: string[], line: string, target: string, layout: Layout): voi
 		for (let i = section.idx + 1; i < end; i++) {
 			if (parseLine(out[i]) === undefined) continue;
 			// `Done` is newest first; the other sections grow at the bottom.
-			if (target === layout.done && doneKey(line) > doneKey(out[i])) break;
+			if (target === layout.done && doneAbove(line, out[i])) break;
 			at = i + 1;
 		}
 		out.splice(at, 0, line);
@@ -670,7 +748,7 @@ export function settled(
 		for (const copy of copies) {
 			const fresh = uid();
 			out = out ?? [...lines];
-			out[copy.lineNo - 1] = out[copy.lineNo - 1].replace(new RegExp(`🆔[ \\t]+${id}`, "u"), `🆔 ${fresh}`);
+			out[copy.lineNo - 1] = out[copy.lineNo - 1].replace(new RegExp(`🆔[ \\t]+${id}(?![0-9A-Za-z_])`, "u"), `🆔 ${fresh}`);
 			if (copy.lineNo === idx + 1) id = fresh;
 		}
 	}

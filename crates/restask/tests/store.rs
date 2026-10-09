@@ -203,3 +203,172 @@ fn unchanged_state_files_are_not_rewritten() {
     Index::default().save(dir.path()).unwrap();
     assert_eq!(before, (stamp("tombstones.json"), stamp("index.json")));
 }
+
+// ---- wire names (§9.5) ----
+
+#[test]
+fn wires_roundtrip_and_say_what_is_news() {
+    use restask::store::Wires;
+    let dir = tempdir().unwrap();
+    assert!(Wires::load(dir.path()).unwrap().is_empty());
+    let mut wires = Wires::default();
+    let counted = uid("restask-a1");
+    assert!(wires.insert(UID1.to_string(), counted.clone()));
+    assert!(
+        !wires.insert(UID1.to_string(), counted.clone()),
+        "known already"
+    );
+    assert!(wires.insert("5417@tasks.org".to_string(), uid("restask-a2")));
+    wires.save(dir.path()).unwrap();
+    let back = Wires::load(dir.path()).unwrap();
+    assert_eq!(back, wires);
+    assert_eq!(back.get(UID1), Some(&counted));
+    assert_eq!(back.get("unknown"), None);
+    assert_eq!(back.uids().count(), 2);
+    // Unchanged content is not written again.
+    let path = dir.path().join("wires.json");
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    wires.save(dir.path()).unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+}
+
+// ---- device identity (§9.4) ----
+
+mod device {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use restask::domain::DeviceTag;
+    use restask::store::{device_file, Device};
+
+    fn none() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn a_device_claims_a_tag_once_and_counts_on_from_where_it_was() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join("vault/.restask");
+        let file = device_file(&dir.path().join("config/config.toml"));
+        assert_eq!(file, dir.path().join("config/device"));
+
+        let mut device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        let tag = device.tag().clone();
+        assert_eq!(tag.as_str().len(), 1, "the shortest free tag");
+        // The claim is in the vault, where the file sync carries it to every device;
+        // what makes it this device's is kept beside the machine config.
+        let claim = fs::read_to_string(state.join("devices").join(tag.as_str())).unwrap();
+        let identity = fs::read_to_string(&file).unwrap();
+        assert_eq!(identity, format!("{tag} {} 0\n", claim.trim()));
+
+        let ids = device.counter();
+        assert_eq!(ids.mint().token(), format!("{tag}1"));
+        assert_eq!(ids.mint().token(), format!("{tag}2"));
+        assert!(device.used(&ids, Some(&file)).unwrap());
+        assert!(!device.used(&ids, Some(&file)).unwrap(), "nothing new");
+
+        // The next run is the same device, and never hands a number out again.
+        let again = Device::open(&state, Some(&file), None, &none()).unwrap();
+        assert_eq!(again, device);
+        assert_eq!(again.counter().mint().token(), format!("{tag}3"));
+    }
+
+    #[test]
+    fn no_two_devices_of_a_vault_get_the_same_tag() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        let mut tags = BTreeSet::new();
+        for n in 0..26 {
+            let file = dir.path().join(format!("device-{n}"));
+            let device = Device::open(&state, Some(&file), None, &none()).unwrap();
+            assert_eq!(device.tag().as_str().len(), 1);
+            assert!(tags.insert(device.tag().clone()), "{} twice", device.tag());
+        }
+        // Every letter is taken: the next device gets two.
+        let file = dir.path().join("device-26");
+        let device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        assert_eq!(device.tag().as_str().len(), 2);
+    }
+
+    #[test]
+    fn a_tag_that_uids_of_the_vault_carry_is_not_taken() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        // The state directory was emptied: the claims are gone, the UIDs are not.
+        let taken: BTreeSet<String> = DeviceTag::all(1)
+            .into_iter()
+            .map(|tag| tag.as_str().to_string())
+            .filter(|tag| tag != "q")
+            .collect();
+        let device = Device::open(&state, Some(&dir.path().join("device")), None, &taken).unwrap();
+        assert_eq!(device.tag().as_str(), "q");
+    }
+
+    #[test]
+    fn a_device_whose_claim_another_device_holds_takes_another_tag() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        let file = dir.path().join("device");
+        let mut device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        let ids = device.counter();
+        ids.mint();
+        device.used(&ids, Some(&file)).unwrap();
+        let lost = device.tag().clone();
+
+        // Two devices took the tag before they saw each other; the file sync kept the
+        // other one's claim.
+        let claim = state.join("devices").join(lost.as_str());
+        fs::write(&claim, "someone-else\n").unwrap();
+        let device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        assert_ne!(device.tag(), &lost);
+        assert_eq!(
+            device.counter().last(),
+            0,
+            "a new tag counts from the start"
+        );
+        assert_eq!(fs::read_to_string(&claim).unwrap(), "someone-else\n");
+        // And it stays with the new one.
+        assert_eq!(
+            Device::open(&state, Some(&file), None, &none()).unwrap(),
+            device
+        );
+    }
+
+    #[test]
+    fn a_claim_that_is_gone_is_made_again() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        let file = dir.path().join("device");
+        let device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        fs::remove_dir_all(&state).unwrap();
+        let again = Device::open(&state, Some(&file), None, &none()).unwrap();
+        assert_eq!(again, device);
+        assert!(state.join("devices").join(device.tag().as_str()).is_file());
+    }
+
+    #[test]
+    fn without_a_file_the_identity_is_the_one_that_is_handed_back() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        let first = Device::open(&state, None, None, &none()).unwrap();
+        let again = Device::open(&state, None, Some(first.clone()), &none()).unwrap();
+        assert_eq!(again, first);
+        // Nobody handing it back is another device.
+        let other = Device::open(&state, None, None, &none()).unwrap();
+        assert_ne!(other.tag(), first.tag());
+    }
+
+    #[test]
+    fn an_identity_file_that_is_not_one_is_replaced() {
+        let dir = tempdir().unwrap();
+        let state = dir.path().join(".restask");
+        let file = dir.path().join("device");
+        fs::write(&file, "not an identity").unwrap();
+        let device = Device::open(&state, Some(&file), None, &none()).unwrap();
+        assert!(fs::read_to_string(&file)
+            .unwrap()
+            .starts_with(&format!("{} ", device.tag())));
+    }
+}

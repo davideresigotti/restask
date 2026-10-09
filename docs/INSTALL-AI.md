@@ -97,7 +97,7 @@ All of them use the same URL pattern: `http://<radicale-host>:5232/<user>/<list>
 - **Thunderbird**: Calendar → New calendar → On the Network → CalDAV; paste the URL, check "offline support".
 - **Obsidian**: installed by setup. What the plugin does:
   - a new task gets its ID when you leave the line, a task you check off moves under the done heading (and back), `TODO.md` and the notes follow each other — offline, on the phone as on the computer;
-  - the `🆔 restask-…` token of a task line is hidden in the editor and in reading view (it stays in the file; *Settings → restask → Hide task IDs* shows it);
+  - the `🆔` token of a task line (`🆔 a42`) is hidden in the editor and in reading view (it stays in the file; *Settings → restask → Hide task IDs* shows it);
   - suggestions while typing (`hi` → high/highest, `du` → due, `created` → a creation date), a *Toggle task done* command to bind a hotkey to, and a new line under a `TODO` heading starts with `- [ ] `.
   - Leave *Settings → restask → Apply task changes on the device* on *every device*.
 - **Neovim**: add `neovim/` to your runtimepath and call `require("restask").setup()` (needs `restask` on `PATH`). With which-key.nvim, `<leader>t` shows up as `restask` in the key hint; load the integration at startup (not only for Markdown) to have it there from the first keypress.

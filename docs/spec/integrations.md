@@ -14,8 +14,12 @@ Where this section still leaves something to the daemon, that is an open item
 
 Runs on desktop and mobile. `restask setup` installs and enables it in the vault (§13.2
 step 1); `.obsidian/` riding the file sync carries it to the other devices. It **edits
-Markdown and nothing else**: no state files, no network. Apart from the notes it reads
-one file, `restask.toml`, for the path of the inbox file. (It used to mirror tasks into `.restask/tasks/`; those files are now the
+Markdown and nothing else**: no network, and no state file but one — its device's
+claim, `.restask/devices/<tag>` (§9.4), without which a UID made on the device could
+be another device's too; it is written only in a vault the sync node has switched to
+counted UIDs. Apart from the notes it reads `restask.toml`, for the path of
+the inbox file, and of the state its claim and — to count on past what the vault
+knows — the UIDs of the index and the tombstones. (It used to mirror tasks into `.restask/tasks/`; those files are now the
 engine's base snapshots and no other program may write them.)
 
 ### 15.1 `markdown.ts` — grammar port
@@ -80,7 +84,8 @@ The token is the task's identity and **stays in the file**; the plugin only keep
 the screen. Nothing in the engine, the grammar or the vault changes.
 
 - **What is hidden** (`uidToken`, pure): on a task line (§6.1 shape), the token the
-  parser reads the UID from — the first `🆔` match, with a valid ULID — together with the
+  parser reads the UID from — the first `🆔` match, with a valid UID (§6.1: `🆔 a42`, or
+  a long one in full) — together with the
   one blank before it (further blanks are text the user typed, and stay visible: a blank
   typed at the visible end of a line must show and move the cursor). A token on a non-task line, a malformed one and a second one on the
   same line stay visible: they are not a task's identity, and the user should see them.
@@ -164,14 +169,21 @@ daemon's job.
 
 **What** (`settled`), for a task line by §6.1/§6.2 that has text:
 
-1. *Register* (`registeredLine`, §6.4). No `🆔` on the line → ` 🆔 restask-<ULID>` is
+1. *Register* (`registeredLine`, §6.4). No `🆔` on the line → ` 🆔 <tag><number>` — the
+   device's next UID (§3.1), e.g. ` 🆔 b7` — is
    appended behind everything else, trailing blanks removed. No creation date is
    written, unless the line asks for one with a bare `➕`: that gets `<today>` behind it,
    where it stands. A bare `➕` on a line that is registered already is left as it is —
    its date is the server's, which the daemon has (§6.4) and the plugin does not; it
-   appears when the daemon's edit comes back. The ULID is made on the device (`uidGenerator`: milliseconds + 80
-   random bits, monotonic like §3.1). To the engine this is a registered line it has not
-   seen: pushed (§11 R2), not rewritten. In the TODO.md view, a line that names no
+   appears when the daemon's edit comes back. The UID is made on the device
+   (`uidCounter`): the tag the device claimed in this vault and its next number, each
+   remembered in the vault's local storage as it is handed out (§9.4; `claimDevice`,
+   at load and whenever a note is opened). In a vault its sync node has not switched to
+   counted UIDs — and until the device knows that its claim holds — it is a long UID
+   (`uidGenerator`: `restask-` + a ULID of milliseconds and 80 random bits, monotonic),
+   which a sync node of any version reads.
+   To the engine this is a registered line it has not seen: pushed (§11 R2), not
+   rewritten. In the TODO.md view, a line that names no
    priority and stands under a priority section's heading gets that section's emoji,
    ahead of the two tokens (`sectionPriority`, §7.4). A calendar token the line ends
    in (`📁 Work`, §7.5) stays the last thing before the UID and is written as the
@@ -181,7 +193,8 @@ daemon's job.
    plugin files a line of the view by its priority and never by its calendar; which
    calendar a line belongs to is read by the engine alone (server work).
 2. *A copied line* (§6.4). When other task lines of the same note carry the line's UID,
-   the first occurrence keeps it and the others get fresh ones. Copies in other notes
+   the first occurrence keeps it and the others get fresh ones. A UID is matched as a
+   whole token everywhere (`hasUid`, `uidsIn`): `a4` is not in a note because `a42` is. Copies in other notes
    are the daemon's to find: only it sees the whole vault at one instant.
 3. *In a note — the checkbox is the status* (`statusRepaired`, the four rules of §6.4):
    checked outside the done region → stamped `✅ <today>` and moved, un-indented,
@@ -355,7 +368,8 @@ The local work (invariant 12) is the engine's own, run when a buffer is written.
   Without which-key nothing is asked and nothing fails. The keymaps exist once
   `setup()` has run: a configuration that loads the integration for Markdown buffers
   only shows them from the first note on, one that loads it at startup from the start.
-- `conceal.lua`: hides the `🆔` token (and the one blank before it, as §15.5) in windows that show a
+- `conceal.lua`: hides the `🆔` token — `🆔 a42`, or a long UID in full (§6.1) — and the
+  one blank before it, as §15.5, in windows that show a
   Markdown file of a vault (a `restask.toml` or `.restask/` above the file). The file is
   not changed: a window match conceals the text, `conceallevel` is raised to 2 and the
   modes of `concealcursor` (default `nc`) are added to the window's option; all three

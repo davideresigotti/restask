@@ -1,10 +1,12 @@
 //! Line mutations (§6.3): pure `String → String` rewriting of task lines. No I/O — callers
 //! persist the result through [`crate::fsio`].
 
+use std::collections::BTreeMap;
+
 use crate::config::VaultConfig;
 use crate::domain::{Clock, LocalDate, Priority, Recurrence, TaskUid, When};
 use crate::error::RestaskError;
-use crate::markdown::parser::{parse, parse_line, TaskDraft, TaskLine};
+use crate::markdown::parser::{parse, parse_line, uid_tokens, TaskDraft, TaskLine};
 
 /// Which date-bearing token a [`Mutation::SetWhen`] targets (§6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +251,7 @@ pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
         tail.push(format!("📁 {}", list.as_str()));
     }
     if let Some(u) = &draft.uid {
-        tail.push(format!("🆔 {u}"));
+        tail.push(format!("🆔 {}", u.token()));
     }
     let mut out = format!(
         "{indent}{marker} [{}]",
@@ -264,6 +266,37 @@ pub fn canonical_line(indent: &str, marker: char, draft: &TaskDraft) -> String {
         out.push_str(&item);
     }
     out
+}
+
+/// `contents` with every task line that carries a UID of `renumbered` carrying the UID
+/// it maps to instead (§11.7). Only the UID token changes: every other byte of the line
+/// — and every other line — is kept, wherever the line is: a note, a view, a remembered
+/// render. What is no task line (§6.2: frontmatter, a fenced block, prose) is not read.
+pub fn renumber(
+    contents: &str,
+    renumbered: &BTreeMap<TaskUid, TaskUid>,
+    cfg: &VaultConfig,
+) -> String {
+    let mut lines = split_lines(contents);
+    for task in parse(contents, cfg).tasks {
+        let Some((uid, new_uid)) = task
+            .draft
+            .uid
+            .as_ref()
+            .and_then(|uid| Some((uid, renumbered.get(uid)?)))
+        else {
+            continue;
+        };
+        let Some(line) = lines.get_mut(task.line_no - 1) else {
+            continue;
+        };
+        // The first token is the one the line is read by (§6.1).
+        if let Some(token) = uid_tokens(&line.text, uid).into_iter().next() {
+            line.text
+                .replace_range(token, &format!("🆔 {}", new_uid.token()));
+        }
+    }
+    join_lines(&lines)
 }
 
 /// Finds the first line carrying `🆔 uid`, returning its index and parsed form.

@@ -908,3 +908,65 @@ fn an_unanswered_created_request_survives_a_rewrite_of_its_line() {
     );
     assert_eq!(out.contents, format!("- [ ] Buy milk ⏫ ➕ 🆔 {UID1}\n"));
 }
+
+// ---- counted UIDs (§3.1) and the renumbering of long ones (§11.7) ----
+
+#[test]
+fn a_counted_uid_is_written_as_tag_and_number() {
+    let counted = uid("restask-a42");
+    let out = run(
+        "- [ ] Buy milk 🔺\n",
+        &[Mutation::Register {
+            line_no: 1,
+            uid: counted.clone(),
+            created: None,
+        }],
+    );
+    assert_eq!(out.contents, "- [ ] Buy milk 🔺 🆔 a42\n");
+    // The line is found again by that token, and by no other that begins like it.
+    let out = run(
+        "- [ ] first 🆔 a4\n- [ ] second 🆔 a42\n",
+        &[Mutation::EditText {
+            uid: counted,
+            text: "second, reworded".to_string(),
+        }],
+    );
+    assert_eq!(
+        out.contents,
+        "- [ ] first 🆔 a4\n- [ ] second, reworded 🆔 a42\n"
+    );
+}
+
+#[test]
+fn renumbering_changes_the_token_and_nothing_else() {
+    use restask::markdown::mutator::renumber;
+    let renumbered = [
+        (uid(UID1), uid("restask-a1")),
+        (uid(UID2), uid("restask-a2")),
+    ]
+    .into_iter()
+    .collect();
+    // A line that is not in canonical form stays as it was typed, but for the token;
+    // CRLF, prose, fenced blocks and lines of other tasks are not touched.
+    let before = format!(
+        "---\nrestask-list: Home\n---\n# Home\r\n\
+         *   [ ]   odd   spacing 🆔 {UID1}   📅 2026-09-25\r\n\
+         - [x] mirror ⏫ [[Alpha#Tasks|Alpha]] 🆔 {UID2}\n\
+         - [ ] another device's 🆔 b7\n\
+         prose that quotes 🆔 {UID1}\n\
+         ```\n- [ ] fenced 🆔 {UID1}\n```\n\
+         \t- [ ] nested 🆔 {UID1}"
+    );
+    let after = "---\nrestask-list: Home\n---\n# Home\r\n\
+         *   [ ]   odd   spacing 🆔 a1   📅 2026-09-25\r\n\
+         - [x] mirror ⏫ [[Alpha#Tasks|Alpha]] 🆔 a2\n\
+         - [ ] another device's 🆔 b7\n"
+        .to_string()
+        + &format!(
+            "prose that quotes 🆔 {UID1}\n```\n- [ ] fenced 🆔 {UID1}\n```\n\t- [ ] nested 🆔 a1"
+        );
+    let cfg = VaultConfig::default();
+    assert_eq!(renumber(&before, &renumbered, &cfg), after);
+    // Done once, done: nothing is left to renumber.
+    assert_eq!(renumber(&after, &renumbered, &cfg), after);
+}

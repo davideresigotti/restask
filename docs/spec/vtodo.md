@@ -19,8 +19,8 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 `BEGIN:VCALENDAR`, `VERSION:2.0`, `PRODID:-//restask//restask 0.1.0//EN`, `BEGIN:VTODO`,
 `UID`, `DTSTAMP`, `CREATED`, `LAST-MODIFIED`, `SUMMARY`, `STATUS`, `PERCENT-COMPLETE`,
 `PRIORITY`, `DTSTART`, `DUE`, `COMPLETED`, `RRULE`, `RELATED-TO`, `X-RESTASK-SCHEDULED`,
-`X-RESTASK-SOURCE`, `X-RESTASK-TEXT`, `X-RESTASK-UID`, *extras*, `END:VTODO`,
-`END:VCALENDAR`. `X-RESTASK-TEXT` only for a text with wikilinks (§8.4).
+`X-RESTASK-SOURCE`, `X-RESTASK-TEXT`, `X-RESTASK-UID`, `X-RESTASK-OF`, *extras*,
+`END:VTODO`, `END:VCALENDAR`. `X-RESTASK-TEXT` only for a text with wikilinks (§8.4).
 
 - `DTSTAMP` / `LAST-MODIFIED` = `now_utc`. `CREATED` only when the task has a creation
   date (§4).
@@ -35,8 +35,8 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
   `DTSTART;VALUE=DATE;X-RESTASK-ANCHOR=TRUE:<day>` in the place of `DTSTART`. A rule has
   no first occurrence without a date, and a server may refuse such a `VTODO` (Radicale
   answers 400 at every put, so the task never left the vault). The day is the scheduled
-  date, else the creation date, else the day the UID was minted (the same at every put),
-  else today. The anchor is the wire's alone: read back (§8.2) it is not a start date,
+  date, else the creation date — the server's own from the first put on (§11 R2), so
+  the same at every put — else the day a long UID was minted, else today. The anchor is the wire's alone: read back (§8.2) it is not a start date,
   so the line gets no `🛫` and the next occurrence is still counted from the day the task
   is done (§11.6). A date the task gets later replaces it. A client that rewrites the
   property without the parameter has given the task a start date, which then reaches
@@ -44,12 +44,17 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 - `RRULE:<canonical rule>` when the task has a repeat rule (§3.6). It is written once: an
   `RRULE` among the extras is dropped when the task carries its own.
 - `RELATED-TO;RELTYPE=PARENT:<uid>` when the task has a parent.
-- **Wire names** (`to_vcalendar_as`): a task another client created keeps the `UID` that
-  client gave it (§11 R5). With `wire.uid` the `UID` property is that value and
-  `X-RESTASK-UID:<the task's restask UID>` is written — the link between the resource
-  and its vault line. With `wire.parent` the parent relation names the parent by that
-  value (the parent is such a task). Without them — every task made in the vault — the
-  output is as above and there is no `X-RESTASK-UID`.
+- **Wire names** (`to_vcalendar_as`): a resource keeps the `UID` it has — the one
+  another client gave its task (§11 R5), or the long UID the task had before it was
+  renumbered (§11.7). With `wire.uid` the `UID` property is that value and
+  `X-RESTASK-UID:<the task's UID, in full>` is written — the link between the resource
+  and its vault line — followed, when the task's UID is a counted one, by
+  `X-RESTASK-OF;VALUE=TEXT:<wire.uid>`: the `UID` the link was written for. A counted
+  UID says nothing of the resource it names, and the pair is what tells the resource
+  from a copy another client made of it under a new `UID`, properties and all. With
+  `wire.parent` the parent relation names the parent by that value (the parent is such
+  a task). Without them — every task made in the vault since the counters — the output
+  is as above and there is neither property.
 - `X-RESTASK-SOURCE;VALUE=TEXT:<vault-relative path>` always: it routes the task back to
   its note when it reaches another device's vault first.
 - **Extras** — the unmanaged content of the resource being replaced (§8.2) — are written
@@ -63,8 +68,9 @@ A `VCALENDAR` with one `VTODO`, **CRLF** line endings, in this exact order:
 ```rust
 pub struct RemoteTask {
     pub raw_uid: String,                    // UID verbatim
-    pub managed: bool,                      // raw_uid is a restask UID
+    pub managed: bool,                      // raw_uid is a restask UID, in full (§3.1)
     pub adopted_as: Option<TaskUid>,        // X-RESTASK-UID (as written; §11 R5 checks it)
+    pub adopted_for: Option<String>,        // X-RESTASK-OF: the UID that link was written for
     pub task: Task,                         // uid is a placeholder when !managed
     pub source_path: Option<String>,        // X-RESTASK-SOURCE
     pub created_at: Option<DateTime<Utc>>,  // CREATED as an instant
@@ -92,8 +98,8 @@ Collections are shared with other clients, so the parser is forgiving:
   legacy `TOREL=PARENT`. Other relation types are extras.
 - `tz` is the device zone used for `Z`/`TZID` values (§4). Production passes
   `chrono::Local`; tests pass a `FixedOffset` or a `chrono_tz::Tz`.
-- `X-RESTASK-UID` is read as a restask UID or not at all; whether it is believed is the
-  planner's decision (§11 R5).
+- `X-RESTASK-UID` is read as a restask UID or not at all, `X-RESTASK-OF` as text;
+  whether the link is believed is the planner's decision (§11 R5).
 - A `DTSTART` with the parameter `X-RESTASK-ANCHOR` (§8.1 *Anchor*) is no start date
   and no extra: it is dropped, and written again by the next put that needs it.
 - `RRULE`: a rule the vault can spell exactly (§3.6) becomes `task.recurrence`; any other

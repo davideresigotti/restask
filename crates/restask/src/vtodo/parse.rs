@@ -28,10 +28,14 @@ pub struct RemoteTask {
     pub raw_uid: String,
     /// `true` when `raw_uid` parses as a [`TaskUid`] (i.e. a restask-managed resource).
     pub managed: bool,
-    /// `X-RESTASK-UID`: the UID restask adopted this task under, on a resource that
-    /// keeps another client's `UID`. The planner believes it only when it can have been
-    /// derived from that `UID` ([`TaskUid::adopts`]).
+    /// `X-RESTASK-UID`: the UID of the task this resource is, on a resource that keeps
+    /// another `UID` — another client's, or a long one of before the counters. The
+    /// planner believes it only when it is bound to that `UID`: by `adopted_for`, or —
+    /// a long UID — by having been derived from it ([`TaskUid::adopts`]).
     pub adopted_as: Option<TaskUid>,
+    /// `X-RESTASK-OF`: the `UID` the link `adopted_as` was written for. A copy of the
+    /// resource that another client made under a new `UID` still says the old one here.
+    pub adopted_for: Option<String>,
     /// Parsed task; when `!managed`, `uid` is a placeholder the planner replaces on adoption.
     pub task: Task,
     /// `X-RESTASK-SOURCE` value — the vault-relative path the task routes back to.
@@ -51,11 +55,8 @@ pub struct RemoteTask {
     pub vault_text: Option<String>,
 }
 
-/// Placeholder UID for foreign (unmanaged) tasks; the planner replaces it on adoption.
-const PLACEHOLDER_UID: &str = "restask-00000000000000000000000000";
-
 /// Properties the serializer owns; everything else inside the `VTODO` is an extra.
-const MANAGED: [&str; 17] = [
+const MANAGED: [&str; 18] = [
     "UID",
     "DTSTAMP",
     "CREATED",
@@ -72,6 +73,7 @@ const MANAGED: [&str; 17] = [
     "X-RESTASK-SOURCE",
     "X-TASKRES-SOURCE",
     "X-RESTASK-UID",
+    "X-RESTASK-OF",
     "X-RESTASK-TEXT",
 ];
 
@@ -106,6 +108,7 @@ pub fn from_vcalendar<Z: TimeZone>(
     let mut parent_raw: Option<String> = None;
     let mut source_path: Option<String> = None;
     let mut adopted_as: Option<TaskUid> = None;
+    let mut adopted_for: Option<String> = None;
     let mut recurrence: Option<Recurrence> = None;
     let mut extras: Vec<String> = Vec::new();
 
@@ -152,6 +155,9 @@ pub fn from_vcalendar<Z: TimeZone>(
             "X-RESTASK-UID" if adopted_as.is_none() => {
                 adopted_as = TaskUid::parse(&prop.value).ok();
             }
+            "X-RESTASK-OF" if adopted_for.is_none() => {
+                adopted_for = Some(unescape_text(&prop.value)).filter(|uid| !uid.is_empty());
+            }
             "X-RESTASK-TEXT" if vault_text.is_none() => {
                 vault_text =
                     Some(single_line(&unescape_text(&prop.value))).filter(|text| !text.is_empty());
@@ -188,7 +194,7 @@ pub fn from_vcalendar<Z: TimeZone>(
         None => summary.clone(),
     };
     let task = Task {
-        uid: uid.clone().unwrap_or_else(placeholder_uid),
+        uid: uid.clone().unwrap_or_else(TaskUid::placeholder),
         list: collection.clone(),
         text,
         status,
@@ -213,6 +219,7 @@ pub fn from_vcalendar<Z: TimeZone>(
         raw_uid,
         managed: uid.is_some(),
         adopted_as,
+        adopted_for,
         task,
         source_path,
         created_at,
@@ -221,14 +228,6 @@ pub fn from_vcalendar<Z: TimeZone>(
         summary,
         vault_text,
     })
-}
-
-/// Placeholder UID (deterministic all-zero ULID); the planner replaces it on adoption.
-fn placeholder_uid() -> TaskUid {
-    match TaskUid::parse(PLACEHOLDER_UID) {
-        Ok(uid) => uid,
-        Err(_) => TaskUid::generate(),
-    }
 }
 
 /// A parsed content line: `NAME;PARAM=value:value` with quoted-parameter support.

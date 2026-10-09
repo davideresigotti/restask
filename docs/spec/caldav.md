@@ -53,9 +53,9 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
   `VTODO` with its etag and body. `Ok(None)` = the collection does not exist. A resource
   with no parseable `VTODO` is skipped with a warning, never fatal. (A server that does
   not inline `calendar-data` costs one `GET` per resource; Radicale inlines.)
-- **`put`** writes resource `name` — the UID for a new resource, the listed name when
-  replacing one — with `wire`, the `UID`s to write where they are not restask's own
-  (§8.1). `if_match: Some(etag)` replaces exactly that version; `None` creates
+- **`put`** writes resource `name` — the UID in full (`restask-a42`) for a new resource,
+  the listed name when replacing one — with `wire`, the `UID`s to write where they are
+  not the task's own (§8.1). `if_match: Some(etag)` replaces exactly that version; `None` creates
   (`If-None-Match: *`). Returns the new etag (empty if the server sends none).
 - **`delete`** sends `If-Match` when given an etag; deleting what is already gone succeeds.
 - The port is **stateless**: no etag memo, no clock. Preconditions come from the snapshot
@@ -90,5 +90,10 @@ configured. The password and the header are never logged.
   adopted (§11 R5); elsewhere they are left alone. An adopted task stays the resource
   its client created — same name, same `UID` — so that client keeps editing the task
   the vault line is tied to. restask writes to it like to its own (managed properties
-  replaced, the rest handed back) and adds `X-RESTASK-SOURCE` and `X-RESTASK-UID`.
+  replaced, the rest handed back) and adds `X-RESTASK-SOURCE`, `X-RESTASK-UID` and
+  `X-RESTASK-OF`. So does a resource of restask's own from before the counters: it
+  keeps its long `UID` and its name (§11.7).
+- **A collection is one vault's.** A counted UID is unique among the devices of a vault
+  (§9.4), not in the world: two vaults that put their tasks into the same collection
+  would both call a task `restask-a1`.
 - Unmanaged content of any `VTODO` is preserved across writes (§8).

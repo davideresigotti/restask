@@ -9,7 +9,7 @@ use fnv::FnvHasher;
 use crate::config::VaultConfig;
 use crate::domain::{LocalDate, Priority, Status, Task, TaskUid};
 use crate::markdown::mutator::{canonical_line, fmt_when, Mutation, WhenField};
-use crate::markdown::parser::{parse, ParsedTask, TaskDraft};
+use crate::markdown::parser::{parse, uid_tokens, ParsedTask, TaskDraft};
 
 /// Opens the seal line of a render (§7.2): a property of the view's frontmatter block,
 /// below `restask-list`. Nothing restask writes goes into the body but the view itself.
@@ -206,7 +206,7 @@ pub fn mirror_line(task: &Task) -> String {
         parts.push(format!("📅 {}", fmt_when(when)));
     }
     parts.push(source_link(task));
-    parts.push(format!("🆔 {}", task.uid));
+    parts.push(format!("🆔 {}", task.uid.token()));
     parts.join(" ")
 }
 
@@ -248,8 +248,8 @@ fn line_for(task: &Task, cfg: &VaultConfig) -> String {
 /// sections, then `## No Priority` — are emitted only when non-empty, in that fixed order;
 /// `## Done` is always present. Each priority section holds active tasks with that priority
 /// ((source path asc, line) asc); `## No Priority` holds the inbox file's own active tasks
-/// without priority (ULID asc); `## Done` holds only TODO.md-sourced completed tasks
-/// newest-on-top (completed date desc, then ULID desc). Completed vault-note tasks never
+/// without priority (UID asc); `## Done` holds only TODO.md-sourced completed tasks
+/// newest-on-top (completed date desc, then UID desc). Completed vault-note tasks never
 /// appear (they live under their source file's Done heading), with or without a priority.
 pub fn render(vault_tasks: &BTreeMap<TaskUid, Task>, cfg: &VaultConfig) -> String {
     let mut unprioritized: Vec<&Task> = Vec::new();
@@ -286,7 +286,7 @@ pub fn render(vault_tasks: &BTreeMap<TaskUid, Task>, cfg: &VaultConfig) -> Strin
     done.sort_by(|a, b| {
         completed_on(b)
             .cmp(&completed_on(a))
-            .then_with(|| b.uid.as_str().cmp(a.uid.as_str()))
+            .then_with(|| b.uid.cmp(&a.uid))
     });
 
     let mut head = String::new();
@@ -510,7 +510,7 @@ pub(crate) fn edits_between(
                 continue;
             };
             if source.source.path == own_path
-                || current.body.contains(uid.as_str())
+                || !uid_tokens(current.body, uid).is_empty()
                 || mirror_line(source) != was.raw
                 || kept.contains(&unidentified(&was.draft))
             {

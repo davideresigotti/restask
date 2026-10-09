@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::{FixedOffset, TimeZone, Utc};
 use tempfile::TempDir;
 
-use common::{sample_task, temp_vault, write_vault_file, FixedClock, MockCaldav};
+use common::{fresh_uid, sample_task, temp_vault, write_vault_file, FixedClock, MockCaldav};
 use restask::cli::{self, Cli, Command, DoctorStatus, Selector};
 use restask::config::{CaldavConfig, MachineConfig};
 use restask::domain::{Priority, TaskUid};
@@ -68,22 +68,24 @@ async fn add(
     uid_of(vault, text)
 }
 
-/// Finds the rendered TODO.md line containing `text` and extracts its UID token.
+/// Finds the rendered TODO.md line containing `text` and returns the UID its token
+/// spells, in full (`🆔 a42` → `restask-a42`): the name of the task's resource.
 fn uid_of(vault: &TempDir, text: &str) -> String {
     let contents = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
-    contents
+    let token = contents
         .lines()
         .find(|line| line.contains(text))
         .and_then(|line| line.split("🆔 ").nth(1))
         .map(str::trim)
         .unwrap()
-        .to_string()
+        .to_string();
+    TaskUid::from_token(&token).unwrap().as_str().to_string()
 }
 
 /// Seeds one managed remote task into the mock's inbox collection.
 fn seed_remote(mock: &MockCaldav, text: &str) -> TaskUid {
     mock.seed_collection("inbox", "Inbox");
-    let uid = TaskUid::generate();
+    let uid = fresh_uid();
     let remote = sample_task(uid.as_str(), "inbox", text);
     let body = to_vcalendar(
         &remote,
@@ -103,7 +105,13 @@ async fn add_registers_pushes_and_renders() {
     let contents = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     let line = contents.lines().find(|l| l.contains("buy milk")).unwrap();
     assert!(line.starts_with("- [ ] buy milk"));
-    assert!(uid.starts_with("restask-"));
+    // A counted UID of this device: its tag and the first number.
+    let (_, number) = TaskUid::parse(&uid)
+        .unwrap()
+        .minted_by()
+        .map(|(tag, n)| (tag.to_string(), n))
+        .unwrap();
+    assert_eq!(number, 1);
 
     assert_eq!(mock.resource_names("inbox"), vec![uid.clone()]);
     let index = Index::load(&vault.path().join(".restask")).unwrap();
@@ -292,7 +300,7 @@ async fn rebuild_drops_the_sync_state_and_the_next_sync_rederives_it() {
     assert!(cache_path(&state, &alpha_uid).exists());
 
     // A deletion that must stay remembered across the rebuild.
-    let ghost = TaskUid::generate();
+    let ghost = fresh_uid();
     let mut tombstones = restask::store::Tombstones::load(&state).unwrap();
     tombstones.insert(
         ghost.clone(),
@@ -340,7 +348,7 @@ async fn sync_pulls_a_remote_task_into_the_inbox() {
 
     let contents = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     assert!(contents.contains("from server"));
-    assert!(contents.contains(uid.as_str()));
+    assert!(contents.contains(&format!("🆔 {}", uid.token())));
     let index = Index::load(&vault.path().join(".restask")).unwrap();
     assert!(index.get(&uid).is_some());
 }
@@ -406,6 +414,7 @@ async fn lists_and_local_commands_need_no_server() {
 #[tokio::test]
 async fn settle_registers_and_renders_without_asking_the_server() {
     let vault = temp_vault();
+    common::switch_vault(&vault);
     write_vault_file(
         &vault,
         "notes/home.md",
@@ -423,10 +432,11 @@ async fn settle_registers_and_renders_without_asking_the_server() {
     .unwrap();
     assert_eq!(code, 0);
     let note = std::fs::read_to_string(vault.path().join("notes/home.md")).unwrap();
-    assert!(
-        note.contains("- [ ] rack the switch 🔺 🆔 restask-"),
-        "{note}"
-    );
+    let registered = note
+        .lines()
+        .find_map(|line| line.strip_prefix("- [ ] rack the switch 🔺 🆔 "))
+        .and_then(|token| TaskUid::from_token(token).ok());
+    assert!(registered.is_some_and(|uid| !uid.is_long()), "{note}");
     let todo = std::fs::read_to_string(vault.path().join("TODO.md")).unwrap();
     assert!(todo.contains("- [ ] rack the switch 🔺 [[home"), "{todo}");
     assert_eq!(mock.counters(), (0, 0, 0));
@@ -638,8 +648,8 @@ async fn doctor_reports_an_invalid_vault_config_as_exit_four() {
 #[tokio::test]
 async fn doctor_reports_duplicated_lines_as_a_warning() {
     let vault = temp_vault();
-    let uid = TaskUid::generate();
-    let line = format!("- [ ] shared 🆔 {uid}");
+    let uid = fresh_uid();
+    let line = format!("- [ ] shared 🆔 {}", uid.token());
     write_vault_file(
         &vault,
         "notes/a.md",
@@ -663,7 +673,7 @@ async fn doctor_reports_duplicated_lines_as_a_warning() {
     // Doctor itself changed nothing.
     assert!(std::fs::read_to_string(vault.path().join("notes/b.md"))
         .unwrap()
-        .contains(uid.as_str()));
+        .contains(uid.token()));
 }
 
 /// A view is known by the seal line in its frontmatter (§7.2).

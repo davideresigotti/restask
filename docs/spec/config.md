@@ -50,9 +50,12 @@ own sync node, its own daemon; a command run in one never loads what belongs to 
    defaults: no server), never a borrowed one.
 
 `RESTASK_CONFIG` names the file outright and ends the search. What lies beside a config
-is per vault with it: the password file (§17), and the name of the daemon's unit on
+is per vault with it: the password file (§17), the name of the daemon's unit on
 this machine (`setup::daemon_unit_name`: `restask.service` beside `config.toml`,
-`restask-<name>.service` beside a further config).
+`restask-<name>.service` beside a further config), and the file `device` — the
+identity this machine mints UIDs under in that vault (§9.4), which restask writes
+itself, also on a machine that was never set up. It is no part of the config and is
+never synced: copied to another machine, the two would mint the same UIDs.
 
 ```toml
 [vault]

@@ -8,7 +8,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use restask::caldav::{CaldavClient, CaldavPort};
-use restask::domain::{ListSlug, Priority, SourceRef, Status, Task, TaskUid};
+use restask::domain::{DeviceTag, ListSlug, Priority, SourceRef, Status, Task, TaskUid};
 use restask::vtodo::WireNames;
 
 /// The dedicated development collection (slug `restask-dev`).
@@ -49,9 +49,19 @@ fn client_from_env() -> Option<(CaldavClient, ListSlug)> {
     Some((client, slug))
 }
 
+/// A UID no earlier run left on the server: the number is the instant of the call.
+fn probe_uid() -> TaskUid {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before the epoch")
+        .as_nanos();
+    let tag = DeviceTag::parse("e").expect("a device tag");
+    TaskUid::minted(&tag, (nanos % 1_000_000_000_000_000) as u64)
+}
+
 fn probe_task(slug: &ListSlug, text: &str) -> Task {
     Task {
-        uid: TaskUid::generate(),
+        uid: probe_uid(),
         list: slug.clone(),
         text: text.to_string(),
         status: Status::Active,

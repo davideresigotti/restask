@@ -8,12 +8,13 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use restask::caldav::RemoteResource;
 use restask::domain::{
-    ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
+    Counter, DeviceTag, ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task,
+    TaskUid, When,
 };
 use restask::markdown::mutator::{Mutation, WhenField};
 use restask::store::index::{Index, IndexEntry};
-use restask::sync::{plan, DeferReason, DeleteOp, Plan, Snapshots, DEFER_LIMIT};
-use restask::vtodo::{from_vcalendar, to_vcalendar_with};
+use restask::sync::{plan, renumbering, DeferReason, DeleteOp, Plan, Snapshots, DEFER_LIMIT};
+use restask::vtodo::{from_vcalendar, to_vcalendar_as, to_vcalendar_with, WireNames};
 
 /// The instant everything was last in agreement.
 const T0: i64 = 1_800_000_000;
@@ -1473,4 +1474,330 @@ fn snapshots_default_has_no_scope() {
     assert_eq!(s.tombstones, BTreeSet::new());
     assert_eq!(s.index, Index::default());
     assert_eq!(s.notes, BTreeMap::new());
+}
+
+// ── counted UIDs (§3.1): what the plan mints, and the names it goes by (§9.5, §11.7) ──
+
+/// The counter of the device `k`, whose highest number so far is `last`.
+fn counter(last: u64) -> Counter {
+    Counter::new(DeviceTag::parse("k").unwrap(), last)
+}
+
+/// The UID number `n` of the device `k`.
+fn counted(n: u64) -> TaskUid {
+    TaskUid::minted(&DeviceTag::parse("k").unwrap(), n)
+}
+
+/// `task` under the counted UID `n`, as a line of the vault.
+fn renamed(task: &Task, n: u64) -> Task {
+    let mut task = task.clone();
+    task.uid = counted(n);
+    task
+}
+
+/// The server copy of `task` on a resource that keeps the `UID` `wire` — the name of
+/// the resource too — with the link restask writes to it.
+fn linked_as(task: &Task, wire: &str, parent: Option<&str>, etag: &str) -> RemoteResource {
+    let names = WireNames {
+        uid: Some(wire.to_string()),
+        parent: parent.map(str::to_string),
+        obsidian_vault: None,
+    };
+    let body = to_vcalendar_as(task, at(T0), &[], &names);
+    RemoteResource {
+        name: wire.to_string(),
+        etag: etag.to_string(),
+        task: from_vcalendar(&body, &Utc, &task.list).unwrap(),
+    }
+}
+
+#[test]
+fn r5_with_a_counter_a_foreign_task_gets_the_devices_next_uid() {
+    // The device has used 3 numbers; a line of the vault carries its 7 already.
+    let mut world = World::new()
+        .local(&renamed(&task(1, "home", "there"), 7))
+        .remote(
+            resource(&renamed(&task(1, "home", "there"), 7), T0, "\"e1\""),
+            "home",
+        )
+        .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.s.ids = Some(counter(3));
+    let p = world.plan();
+
+    assert_eq!(p.adopted, vec![counted(8)]);
+    assert_eq!(p.minted, 8);
+    assert_eq!(p.inbox_inserts.len(), 1);
+    assert_eq!(p.inbox_inserts[0].uid, counted(8));
+    // The name the task goes by on the server is recorded with it — before the line is
+    // written — and the resource stays its client's.
+    assert_eq!(p.wires, vec![(TASKS_ORG_UID.to_string(), counted(8))]);
+    let link = p.puts.iter().find(|put| put.name == "5417").unwrap();
+    assert_eq!(link.task.uid, counted(8));
+    assert_eq!(link.wire.uid.as_deref(), Some(TASKS_ORG_UID));
+
+    // Same snapshots, same plan: the plan counts on a copy.
+    assert_eq!(world.plan(), p);
+    assert_eq!(world.s.ids, Some(counter(3)));
+}
+
+#[test]
+fn a_name_that_is_recorded_is_the_task_it_was_recorded_for() {
+    // The pass that adopted the task died after it recorded the name: no line, no link.
+    let mut world = World::new().remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.s.ids = Some(counter(8));
+    world.s.wires.insert(TASKS_ORG_UID.to_string(), counted(8));
+    let p = world.plan();
+    assert_eq!(
+        p.adopted,
+        vec![counted(8)],
+        "the same task, not a second one"
+    );
+    assert_eq!((p.minted, p.wires.len()), (0, 0));
+
+    // The line was written, the link was not: the task is merged, nothing is inserted.
+    let mut line = p.settled[0].task.clone();
+    line.created = None;
+    let mut world = World::new()
+        .local(&line)
+        .remote(foreign("inbox", "5417", &TASKS_ORG), "inbox");
+    world.s.ids = Some(counter(8));
+    world.s.wires.insert(TASKS_ORG_UID.to_string(), counted(8));
+    let p = world.plan();
+    assert!(p.inbox_inserts.is_empty() && p.adopted.is_empty() && p.mutations.is_empty());
+    assert_eq!(p.puts.len(), 1, "the link is written");
+    assert_eq!(p.puts[0].wire.uid.as_deref(), Some(TASKS_ORG_UID));
+    assert_eq!(p.minted, 0);
+}
+
+#[test]
+fn a_link_to_a_counted_uid_counts_only_on_the_resource_it_was_written_for() {
+    let mut line = task(1, "home", "kept");
+    line.uid = counted(5);
+    let mine = linked_as(&line, "x@other", None, "\"x\"");
+    assert_eq!(mine.task.adopted_as, Some(counted(5)));
+    assert_eq!(mine.task.adopted_for.as_deref(), Some("x@other"));
+
+    // Linked and bound: the task and its resource, nothing to do — with no state at all.
+    let mut world = World::new().local(&line).remote(mine.clone(), "home");
+    world.s.ids = Some(counter(5));
+    let p = world.plan();
+    assert!(
+        p.puts.is_empty() && p.mutations.is_empty() && p.deletes.is_empty(),
+        "{p:?}"
+    );
+    assert_eq!(p.wires, vec![("x@other".to_string(), counted(5))]);
+
+    // Another client copied the resource under a new `UID`, properties and all: the
+    // copy is a task of its own, never a second copy of this one.
+    let mut copy = mine.clone();
+    copy.name = "copy".to_string();
+    copy.etag = "\"copy\"".to_string();
+    copy.task.raw_uid = "copy@other".to_string();
+    let mut world = World::new()
+        .local(&line)
+        .settled(&line, "\"x\"")
+        .remote(mine, "home")
+        .remote(copy, "home");
+    world.s.ids = Some(counter(5));
+    world.s.wires.insert("x@other".to_string(), counted(5));
+    let p = world.plan();
+    assert!(p.deletes.is_empty(), "no copy is a stray: {:?}", p.deletes);
+    assert_eq!(p.adopted, vec![counted(6)]);
+    assert_eq!(p.wires, vec![("copy@other".to_string(), counted(6))]);
+}
+
+#[test]
+fn a_link_that_lost_its_binding_is_written_again() {
+    let mut line = task(1, "home", "kept");
+    line.uid = counted(5);
+    // A client kept `X-RESTASK-UID` and dropped `X-RESTASK-OF`.
+    let mut unbound = linked_as(&line, "x@other", None, "\"x\"");
+    unbound.task.adopted_for = None;
+    let mut world = World::new()
+        .local(&line)
+        .settled(&line, "\"x\"")
+        .remote(unbound, "home");
+    world.s.ids = Some(counter(5));
+    // Without the record the resource is nobody's link …
+    assert_eq!(world.plan().adopted, vec![counted(6)]);
+    // … with it, it is the task, and the link is made whole.
+    world.s.wires.insert("x@other".to_string(), counted(5));
+    let p = world.plan();
+    assert!(p.adopted.is_empty() && p.mutations.is_empty() && p.deletes.is_empty());
+    assert_eq!(p.puts.len(), 1);
+    assert_eq!(p.puts[0].task.uid, counted(5));
+    assert_eq!(p.puts[0].wire.uid.as_deref(), Some("x@other"));
+    assert_eq!(p.puts[0].if_match.as_deref(), Some("\"x\""));
+}
+
+/// §11.7: the lines got counted UIDs; the resources keep the long ones as their `UID`
+/// and are linked, in place, to the tasks they are.
+#[test]
+fn a_resource_under_a_long_uid_is_the_task_that_was_renumbered() {
+    let parent = task(1, "home", "parent");
+    let mut child = task(2, "home", "child");
+    child.parent = Some(uid(1));
+    let lines = (renamed(&parent, 1), {
+        let mut child = renamed(&child, 2);
+        child.parent = Some(counted(1));
+        child
+    });
+    let mut world = World::new()
+        .local(&lines.0)
+        .local(&lines.1)
+        .settled(&lines.0, "\"p\"")
+        .settled(&lines.1, "\"c\"")
+        .remote(resource(&parent, T0, "\"p\""), "home")
+        .remote(resource(&child, T0, "\"c\""), "home");
+    world.s.ids = Some(counter(2));
+    world
+        .s
+        .wires
+        .insert(uid(1).as_str().to_string(), counted(1));
+    world
+        .s
+        .wires
+        .insert(uid(2).as_str().to_string(), counted(2));
+    let p = world.plan();
+
+    // Nothing is deleted, created or pulled; no line changes — not even the child's
+    // parent, which the server still names by its long UID.
+    assert!(
+        p.deletes.is_empty() && p.tombstones.is_empty() && p.forgets.is_empty(),
+        "{p:?}"
+    );
+    assert!(p.mutations.is_empty() && p.inbox_inserts.is_empty() && p.adopted.is_empty());
+    assert_eq!((p.minted, p.wires.len()), (0, 0));
+    // Each resource is written once, where it is, to say which task it is.
+    assert_eq!(p.puts.len(), 2);
+    for (put, (long, etag)) in p.puts.iter().zip([(uid(1), "\"p\""), (uid(2), "\"c\"")]) {
+        assert_eq!(put.name, long.as_str());
+        assert_eq!(put.wire.uid.as_deref(), Some(long.as_str()));
+        assert_eq!(put.if_match.as_deref(), Some(etag));
+    }
+    assert_eq!(p.puts[1].wire.parent.as_deref(), Some(uid(1).as_str()));
+
+    // Linked, the pass is quiet — with the record of the names, and without it.
+    let quiet = |wires: bool| {
+        let mut world = World::new()
+            .local(&lines.0)
+            .local(&lines.1)
+            .settled(&lines.0, "\"p2\"")
+            .settled(&lines.1, "\"c2\"")
+            .remote(linked_as(&lines.0, uid(1).as_str(), None, "\"p2\""), "home")
+            .remote(
+                linked_as(&lines.1, uid(2).as_str(), Some(uid(1).as_str()), "\"c2\""),
+                "home",
+            );
+        world.s.ids = Some(counter(2));
+        if wires {
+            world
+                .s
+                .wires
+                .insert(uid(1).as_str().to_string(), counted(1));
+            world
+                .s
+                .wires
+                .insert(uid(2).as_str().to_string(), counted(2));
+        }
+        world.plan()
+    };
+    assert!(quiet(true).is_noop(), "{:?}", quiet(true));
+    let relearnt = quiet(false);
+    assert_eq!(relearnt.wires.len(), 2, "the names are read off the links");
+    assert!(
+        relearnt.puts.is_empty() && relearnt.mutations.is_empty() && relearnt.deletes.is_empty()
+    );
+}
+
+#[test]
+fn a_long_uid_that_is_not_renumbered_is_treated_as_before() {
+    // Deleted before the counters: its server copy coming back is purged, not pulled.
+    let gone = task(3, "home", "deleted long ago");
+    let mut world = World::new()
+        .tombstone(3)
+        .remote(resource(&gone, T0, "\"g\""), "home");
+    world.s.ids = Some(counter(0));
+    let p = world.plan();
+    assert_eq!(p.deletes.len(), 1);
+    assert!(p.mutations.is_empty() && p.inbox_inserts.is_empty());
+    assert_eq!((p.minted, p.wires.len()), (0, 0));
+
+    // A line the sync node could not renumber yet is still its resource's task.
+    let kept = task(4, "home", "still long");
+    let mut world = World::new()
+        .local(&kept)
+        .settled(&kept, "\"k\"")
+        .remote(resource(&kept, T0, "\"k\""), "home");
+    world.s.ids = Some(counter(0));
+    assert!(world.plan().is_noop());
+}
+
+#[test]
+fn with_a_counter_the_record_of_an_occurrence_gets_the_next_uid() {
+    let mut base = renamed(&task(1, "home", "water the plants"), 4);
+    base.recurrence = Recurrence::from_text("every week").map(|(rule, _)| rule);
+    base.due = Some(When::Date(date("2026-09-22")));
+    let mut done = base.clone();
+    done.status = Status::Completed {
+        on: date("2026-09-22"),
+    };
+    done.last_modified = at(T0 + 60);
+    let mut world = World::new()
+        .local(&done)
+        .settled(&base, "\"e1\"")
+        .remote(resource(&base, T0, "\"e1\""), "home");
+    world.s.ids = Some(counter(4));
+    let p = world.plan();
+    assert!(
+        matches!(
+            mutations_for(&p, "notes/home.md").first(),
+            Some(Mutation::Rekey { uid, new_uid }) if *uid == counted(4) && *new_uid == counted(5)
+        ),
+        "{:?}",
+        p.mutations
+    );
+    assert_eq!(p.minted, 5);
+    assert!(p
+        .puts
+        .iter()
+        .any(|put| put.task.uid == counted(5) && put.if_match.is_none()));
+}
+
+#[test]
+fn a_new_task_without_a_creation_date_is_created_on_the_day_of_the_pass() {
+    let mut fresh = renamed(&task(1, "home", "typed today"), 1);
+    fresh.created = None;
+    let mut world = World::new().local(&fresh);
+    world.s.today = Some(date("2026-10-09"));
+    assert_eq!(world.plan().puts[0].task.created, Some(date("2026-10-09")));
+    // A line that states the date keeps it.
+    fresh.created = Some(date("2026-09-01"));
+    let mut world = World::new().local(&fresh);
+    world.s.today = Some(date("2026-10-09"));
+    assert_eq!(world.plan().puts[0].task.created, Some(date("2026-09-01")));
+}
+
+#[test]
+fn renumbering_gives_long_uids_counted_ones_in_the_order_of_their_creation() {
+    let local = [uid(2), counted(3), uid(1), uid(5)];
+    let local: BTreeSet<TaskUid> = local.into_iter().collect();
+    let mut wires = restask::store::Wires::default();
+    // One was renumbered by a pass that died: it gets the UID it was given then.
+    wires.insert(uid(5).as_str().to_string(), counted(9));
+    let ids = counter(9);
+    ids.observe(&counted(3));
+    let renumbered = renumbering(local.iter(), &wires, &ids);
+    assert_eq!(
+        renumbered.into_iter().collect::<Vec<_>>(),
+        vec![
+            (uid(1), counted(10)),
+            (uid(2), counted(11)),
+            (uid(5), counted(9))
+        ]
+    );
+    // Nothing long, nothing to do — and no number is used.
+    let ids = counter(9);
+    assert!(renumbering([counted(3)].iter(), &wires, &ids).is_empty());
+    assert_eq!(ids.last(), 9);
 }

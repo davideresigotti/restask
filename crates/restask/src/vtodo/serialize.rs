@@ -27,7 +27,7 @@ const FOLD_LIMIT: usize = 75;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WireNames {
     /// The `UID` to write instead of the task's own; the task's UID then travels as
-    /// `X-RESTASK-UID`.
+    /// `X-RESTASK-UID`, bound to this one by `X-RESTASK-OF`.
     pub uid: Option<String>,
     /// The `UID` the parent goes by on the server, when it is not the parent's own.
     pub parent: Option<String>,
@@ -61,7 +61,9 @@ pub fn to_vcalendar_with(task: &Task, now_utc: DateTime<Utc>, extras: &[String])
 ///
 /// `wire` names the task and its parent as the server knows them: with `wire.uid` the
 /// `UID` is that one and `X-RESTASK-UID` carries the task's own (after
-/// `X-RESTASK-SOURCE`).
+/// `X-RESTASK-SOURCE`) — followed, for a counted UID, by `X-RESTASK-OF` with the `UID`
+/// the link is for: a counted UID says nothing of the resource it names, and a copy of
+/// the resource under a new `UID` must not pass for the task.
 ///
 /// A text with wikilinks is written in its wire form (§8.4): `SUMMARY` shows each as a
 /// Markdown link into the Obsidian vault `wire.obsidian_vault` (as plain text without
@@ -143,8 +145,14 @@ pub fn to_vcalendar_as(
             &format!("X-RESTASK-TEXT;VALUE=TEXT:{}", escape_text(&task.text)),
         );
     }
-    if wire.uid.is_some() {
+    if let Some(wire_uid) = &wire.uid {
         push_line(&mut out, &format!("X-RESTASK-UID:{}", task.uid.as_str()));
+        if !task.uid.is_long() {
+            push_line(
+                &mut out,
+                &format!("X-RESTASK-OF;VALUE=TEXT:{}", escape_text(wire_uid)),
+            );
+        }
     }
     let mut nested = 0usize;
     for extra in extras {
@@ -187,8 +195,9 @@ fn format_utc_midnight(day: chrono::NaiveDate) -> String {
 /// The day a repeating task without a start and without a due date is anchored at on
 /// the wire (§8.1), `None` for every other task. A rule has no first occurrence without
 /// a date, and servers refuse such a `VTODO` (Radicale answers 400). The day is the
-/// scheduled date, else the creation date, else the day the UID was minted — the same
-/// at every put — and only then today.
+/// scheduled date, else the creation date — the server's own from the first put on
+/// (§11 R2), so the same at every put — else the day a long UID was minted, and only
+/// then today.
 fn series_anchor(task: &Task, now_utc: DateTime<Utc>, extras: &[String]) -> Option<LocalDate> {
     if task.due.is_some() {
         return None;

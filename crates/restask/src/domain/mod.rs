@@ -11,4 +11,4 @@ pub use dates::{Clock, DateError, LocalDate, LocalDateTime, SystemClock, When};
 pub use priority::Priority;
 pub use recurrence::Recurrence;
 pub use task::{ListSlug, SourceRef, Status, Task};
-pub use uid::{TaskUid, UidError};
+pub use uid::{Counter, DeviceTag, Ids, TaskUid, UidError};

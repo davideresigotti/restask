@@ -5,10 +5,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::caldav::RemoteResource;
-use crate::domain::{ListSlug, LocalDate, LocalDateTime, Recurrence, Status, Task, TaskUid, When};
+use crate::domain::{
+    Counter, ListSlug, LocalDate, LocalDateTime, Recurrence, Status, Task, TaskUid, When,
+};
 use crate::markdown::mutator::Mutation;
 use crate::markdown::TaskDraft;
 use crate::store::index::{Index, IndexEntry};
+use crate::store::wires::Wires;
 use crate::sync::merge::{fields_differ, merge, RemoteView, TIE_WINDOW_SECS};
 use crate::vtodo::links::wire_title;
 use crate::vtodo::recurrence::{consume_count, find_in_extras};
@@ -54,6 +57,16 @@ pub struct Snapshots {
     /// Tasks whose line is in the view of a root note (§7.6): flat, like the lines of the
     /// inbox file — their indentation names no parent.
     pub flat: BTreeSet<TaskUid>,
+    /// The names tasks go by on the server where those are not their UIDs (§9.5).
+    pub wires: Wires,
+    /// This device's counter (§3.1): the UIDs of the tasks that enter the vault in this
+    /// pass — another client's (R5), the record of a recurring task's occurrence (§11.6).
+    /// The plan counts on from a copy of it. `None`: such a task gets a long UID derived
+    /// from what it is ([`TaskUid::derived`]), as before the counters.
+    pub ids: Option<Counter>,
+    /// The local day of the pass: the creation date the server is given for a task
+    /// whose line states none and whose UID tells none (R2).
+    pub today: Option<LocalDate>,
 }
 
 /// The mutation plan for one reconciliation pass (§11.1).
@@ -82,6 +95,12 @@ pub struct Plan {
     pub revived: Vec<TaskUid>,
     /// UIDs whose reconciliation was postponed, with the reason.
     pub deferred: Vec<(TaskUid, DeferReason)>,
+    /// Wire names learnt in this pass, each with the UID of its task (§9.5). They are
+    /// recorded before the vault is touched: a pass that dies after it wrote a line
+    /// must be taken up under the same UID.
+    pub wires: Vec<(String, TaskUid)>,
+    /// The highest number the plan took from the counter; 0 when it minted no UID.
+    pub minted: u64,
 }
 
 impl Plan {
@@ -224,7 +243,7 @@ pub fn plan(s: &Snapshots) -> Plan {
                 }
                 inserts.push(PendingInsert {
                     path,
-                    parent: ctx.parent_of(origin.1),
+                    parent: ctx.parent_of(origin.1).cloned(),
                     task,
                 });
             }
@@ -278,7 +297,7 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .or_default()
                     .extend(merged.mutations);
             }
-            if let Some(roll) = roll_forward(&merged.task, Some(resource)) {
+            if let Some(roll) = roll_forward(&merged.task, Some(resource), ctx.ids.as_ref()) {
                 // R8r — one occurrence of a recurring task was completed in the vault:
                 // the checked line becomes a record of its own, the series moves on.
                 let (task, extras) = apply_roll(&mut p, &ctx, local, roll);
@@ -316,7 +335,8 @@ pub fn plan(s: &Snapshots) -> Plan {
                     .extend(merged.mutations);
             }
             tracing::info!(uid = %uid, from = %origin.0.as_str(), to = %local.list.as_str(), "task_moved");
-            let (task, extras) = match roll_forward(&merged.task, Some(origin.1)) {
+            let (task, extras) = match roll_forward(&merged.task, Some(origin.1), ctx.ids.as_ref())
+            {
                 Some(roll) => apply_roll(&mut p, &ctx, local, roll),
                 None => (merged.task, origin.1.task.extras.clone()),
             };
@@ -348,13 +368,13 @@ pub fn plan(s: &Snapshots) -> Plan {
         } else {
             // R2 — the server has never seen it (or lost it wholesale): push. A recurring
             // task that is already checked rolls forward first (R8r).
-            let (mut task, extras) = match roll_forward(local, None) {
+            let (mut task, extras) = match roll_forward(local, None, ctx.ids.as_ref()) {
                 Some(roll) => apply_roll(&mut p, &ctx, local, roll),
                 None => (local.clone(), Vec::new()),
             };
             // The server records when the task was created even though its line does
-            // not say (§8.1): the day its UID was minted.
-            task.created = task.created.or_else(|| uid.created_on());
+            // not say (§8.1): the day a long UID was minted, else the day of this pass.
+            task.created = task.created.or_else(|| uid.created_on()).or(s.today);
             p.puts.push(PutOp {
                 wire: ctx.wire(&task),
                 task,
@@ -366,19 +386,50 @@ pub fn plan(s: &Snapshots) -> Plan {
     }
 
     schedule_inserts(&mut p, s, inserts);
+    p.wires = ctx.learnt;
+    if let (Some(ids), Some(before)) = (&ctx.ids, &s.ids) {
+        if ids.last() > before.last() {
+            p.minted = ids.last();
+        }
+    }
     p
+}
+
+/// The counted UIDs the long UIDs on the vault's lines get (§11.7): `local` are the UIDs
+/// of the vault's tasks. A long UID that was given one before — the pass died, or a file
+/// sync brought an old copy of a note back — gets that one again (`wires`); the others
+/// are numbered in the order of their creation, from `ids`. Empty when every task has a
+/// counted UID. PURE (but for the counter).
+pub fn renumbering<'a>(
+    local: impl Iterator<Item = &'a TaskUid>,
+    wires: &Wires,
+    ids: &Counter,
+) -> BTreeMap<TaskUid, TaskUid> {
+    local
+        .filter(|uid| uid.is_long())
+        .map(|uid| {
+            let counted = wires.get(uid.as_str()).cloned();
+            (uid.clone(), counted.unwrap_or_else(|| ids.mint()))
+        })
+        .collect()
 }
 
 /// Lookup tables derived once from the snapshots.
 struct Context<'a> {
     s: &'a Snapshots,
-    /// Task UID → every server copy, in collection order. A resource another client
-    /// created counts under the UID it is adopted as (R5).
+    /// Task UID → every server copy, in collection order. A resource that keeps another
+    /// `UID` — another client's (R5), or the long one its task had before it was
+    /// renumbered (§11.7) — counts under the UID of the task it is.
     managed: BTreeMap<TaskUid, Vec<Copy<'a>>>,
-    /// Adopted UID → the `UID` its resource carries on the server.
+    /// Task UID → the `UID` its resource carries on the server, where that is another.
     aliases: BTreeMap<TaskUid, &'a str>,
-    /// Foreign `UID` → adopted UID (resolves parent relations between foreign tasks).
+    /// Such a `UID` → the UID of its task (resolves parent relations).
     adopted_uids: BTreeMap<&'a str, TaskUid>,
+    /// The counter the plan mints from: a copy of the snapshots', which has seen every
+    /// UID of the snapshots.
+    ids: Option<Counter>,
+    /// Wire names not in the snapshots' record yet, with the UID of their task.
+    learnt: Vec<(String, TaskUid)>,
     /// Lists whose settled tasks vanished wholesale: a reset collection, not deletions.
     reset: BTreeSet<&'a ListSlug>,
 }
@@ -388,44 +439,94 @@ impl<'a> Context<'a> {
         let mut managed: BTreeMap<TaskUid, Vec<Copy<'_>>> = BTreeMap::new();
         let mut aliases = BTreeMap::new();
         let mut adopted_uids = BTreeMap::new();
+        let mut learnt: Vec<(String, TaskUid)> = Vec::new();
+        // No UID that exists anywhere is minted again.
+        let ids = s.ids.clone();
+        if let Some(ids) = &ids {
+            let resources = s.remote.values().flatten();
+            let remote = resources.flat_map(|resource| {
+                let own = resource.task.managed.then_some(&resource.task.task.uid);
+                own.into_iter().chain(&resource.task.adopted_as)
+            });
+            s.local
+                .keys()
+                .chain(s.base.keys())
+                .chain(s.index.entries.keys())
+                .chain(&s.tombstones)
+                .chain(s.wires.uids())
+                .chain(remote)
+                .for_each(|uid| ids.observe(uid));
+        }
+        // The task a long UID names now: the one it was renumbered to (§11.7).
+        let current = |uid: TaskUid| match s.wires.get(uid.as_str()) {
+            Some(counted) if uid.is_long() => counted.clone(),
+            _ => uid,
+        };
         for (slug, resources) in &s.remote {
             for resource in resources {
-                if resource.task.managed {
-                    managed
-                        .entry(resource.task.task.uid.clone())
-                        .or_default()
-                        .push((slug, resource));
-                    continue;
-                }
-                // Foreign tasks are adopted only where the vault has a place for them.
-                let has_home = s.inbox_list.as_ref() == Some(slug)
-                    || s.todo_lists.contains(slug)
-                    || s.homes.contains_key(slug);
-                let seed: &str = if resource.task.raw_uid.is_empty() {
-                    &resource.name
-                } else {
-                    &resource.task.raw_uid
+                let seed = seed_of(resource);
+                let own = resource.task.managed.then_some(&resource.task.task.uid);
+                // The link a resource carries to a counted UID, when it is bound to
+                // the resource's own `UID` (`X-RESTASK-OF`).
+                let bound = resource.task.adopted_as.as_ref().filter(|linked| {
+                    !linked.is_long() && resource.task.adopted_for.as_deref() == Some(seed)
+                });
+                let renumbered = own
+                    .filter(|uid| uid.is_long())
+                    .and_then(|uid| bound.or_else(|| s.wires.get(uid.as_str())));
+                let uid = match (own, renumbered) {
+                    (Some(own), None) => {
+                        managed
+                            .entry(own.clone())
+                            .or_default()
+                            .push((slug, resource));
+                        continue;
+                    }
+                    // A resource of restask's own that still has the long UID of a task
+                    // since renumbered: it stays what it is, linked like another client's.
+                    (_, Some(counted)) => counted.clone(),
+                    (None, None) => {
+                        // Foreign tasks are adopted only where the vault has a place for
+                        // them.
+                        let has_home = s.inbox_list.as_ref() == Some(slug)
+                            || s.todo_lists.contains(slug)
+                            || s.homes.contains_key(slug);
+                        // The UID the resource says it is linked under (`X-RESTASK-UID`),
+                        // when the link is bound to this `UID`; else the one the state
+                        // knows this `UID` by (a client may drop the properties); else a
+                        // long one the vault or the state knows that was derived from it
+                        // (a link of before the counters); else a new one.
+                        let linked = bound.or_else(|| {
+                            let linked = resource.task.adopted_as.as_ref();
+                            linked.filter(|linked| linked.adopts(seed))
+                        });
+                        let known = linked
+                            .or_else(|| s.wires.get(seed))
+                            .or_else(|| {
+                                s.local
+                                    .keys()
+                                    .chain(s.index.entries.keys())
+                                    .chain(&s.tombstones)
+                                    .find(|known| known.adopts(seed))
+                            })
+                            .cloned()
+                            .map(current);
+                        // A list that lost its place — taken out of `todo_lists` — takes
+                        // in nothing new, but a task whose line is in the vault is still
+                        // that resource: unseen here, it would read as deleted on the
+                        // server (R3).
+                        let in_vault = known.as_ref().is_some_and(|uid| s.local.contains_key(uid));
+                        if !has_home && !in_vault {
+                            continue;
+                        }
+                        known.unwrap_or_else(|| match &ids {
+                            Some(ids) => ids.mint(),
+                            None => TaskUid::derived(seed, resource.task.created_at),
+                        })
+                    }
                 };
-                // The UID the resource says it was linked under (`X-RESTASK-UID`), when
-                // that can have come from this `UID`; else the one the vault or the
-                // state already knows this `UID` by (a client may drop the property
-                // and rewrite `CREATED`); else the one derived from it.
-                let uid = match &resource.task.adopted_as {
-                    Some(linked) if linked.adopts(seed) => linked.clone(),
-                    _ => s
-                        .local
-                        .keys()
-                        .chain(s.index.entries.keys())
-                        .chain(&s.tombstones)
-                        .find(|known| known.adopts(seed))
-                        .cloned()
-                        .unwrap_or_else(|| TaskUid::derived(seed, resource.task.created_at)),
-                };
-                // A list that lost its place — taken out of `todo_lists` — takes in
-                // nothing new, but a task whose line is in the vault is still that
-                // resource: unseen here, it would read as deleted on the server (R3).
-                if !has_home && !s.local.contains_key(&uid) {
-                    continue;
+                if !uid.is_long() && s.wires.get(seed) != Some(&uid) {
+                    learnt.push((seed.to_string(), uid.clone()));
                 }
                 aliases.insert(uid.clone(), seed);
                 adopted_uids.insert(seed, uid.clone());
@@ -469,6 +570,8 @@ impl<'a> Context<'a> {
             managed,
             aliases,
             adopted_uids,
+            ids,
+            learnt,
             reset,
         }
     }
@@ -509,31 +612,34 @@ impl<'a> Context<'a> {
             .then(|| task.list.clone())
     }
 
-    /// Whether `resource` says which task it is: always for a resource of restask's
-    /// own; for another client's, once it carries the link (`X-RESTASK-UID`). A client
-    /// that drops the property on its next write has it written again.
+    /// Whether `resource` says which task it is: always for a resource whose `UID` is
+    /// the task's; for one that keeps another `UID`, once it carries the link
+    /// (`X-RESTASK-UID`) — bound to that `UID` (`X-RESTASK-OF`) when the task's UID is a
+    /// counted one. A client that drops a property on its next write has it written
+    /// again.
     fn linked(&self, uid: &TaskUid, resource: &RemoteResource) -> bool {
-        resource.task.managed || resource.task.adopted_as.as_ref() == Some(uid)
+        let remote = &resource.task;
+        (remote.managed && remote.task.uid == *uid)
+            || (remote.adopted_as.as_ref() == Some(uid)
+                && (uid.is_long() || remote.adopted_for.as_deref() == Some(seed_of(resource))))
     }
 
-    /// The parent of a server resource as a managed UID: its own when managed, else the
-    /// UID its foreign parent is adopted under.
-    fn parent_of(&self, resource: &RemoteResource) -> Option<TaskUid> {
-        resource.task.task.parent.clone().or_else(|| {
-            let raw = resource.task.parent_raw.as_deref()?;
-            self.adopted_uids.get(raw).cloned()
-        })
+    /// The parent of a server resource as a task UID: the task its parent relation
+    /// names — by another client's `UID`, by a long UID since renumbered, or by the
+    /// parent's own.
+    fn parent_of<'b>(&'b self, resource: &'b RemoteResource) -> Option<&'b TaskUid> {
+        let raw = resource.task.parent_raw.as_deref()?;
+        self.adopted_uids
+            .get(raw)
+            .or_else(|| self.s.wires.get(raw))
+            .or(resource.task.task.parent.as_ref())
     }
 
     /// The server-side view the merge compares against.
     fn view<'b>(&'b self, resource: &'b RemoteResource) -> RemoteView<'b> {
-        let parent = resource.task.task.parent.as_ref().or_else(|| {
-            let raw = resource.task.parent_raw.as_deref()?;
-            self.adopted_uids.get(raw)
-        });
         RemoteView {
             task: &resource.task.task,
-            parent,
+            parent: self.parent_of(resource),
             source_path: resource.task.source_path.as_deref(),
         }
     }
@@ -583,7 +689,7 @@ impl<'a> Context<'a> {
         });
         task.source.path = path.clone().unwrap_or_else(|| s.inbox_file.clone());
         // Only a parent in the same note can be expressed (by indentation).
-        task.parent = self.parent_of(resource);
+        task.parent = self.parent_of(resource).cloned();
         (path, task)
     }
 }
@@ -601,8 +707,13 @@ struct Roll {
 /// Rolls a recurring task forward when it is completed in the vault while the server
 /// copy (if any) is still open. `None` when the task does not recur, when this was the
 /// rule's last occurrence, or when the rule has ended: then the completion is an
-/// ordinary one.
-fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> {
+/// ordinary one. The record's UID is the next of `ids`; without a counter, a long one
+/// derived from the series and the occurrence.
+fn roll_forward(
+    merged: &Task,
+    remote: Option<&RemoteResource>,
+    ids: Option<&Counter>,
+) -> Option<Roll> {
     let Status::Completed { on } = merged.status else {
         return None;
     };
@@ -651,10 +762,13 @@ fn roll_forward(merged: &Task, remote: Option<&RemoteResource>) -> Option<Roll> 
     }
 
     let mut record = merged.clone();
-    record.uid = TaskUid::derived(
-        &format!("{}/{}", merged.uid.as_str(), anchor.to_ical()),
-        on.0.and_hms_opt(0, 0, 0).map(|at| at.and_utc()),
-    );
+    record.uid = match ids {
+        Some(ids) => ids.mint(),
+        None => TaskUid::derived(
+            &format!("{}/{}", merged.uid.as_str(), anchor.to_ical()),
+            on.0.and_hms_opt(0, 0, 0).map(|at| at.and_utc()),
+        ),
+    };
     record.parent = None;
     record.recurrence = None;
 
@@ -707,6 +821,15 @@ fn shift_days(value: When, shift: chrono::Duration) -> When {
     match value {
         When::Date(LocalDate(day)) => When::Date(LocalDate(day + shift)),
         When::DateTime(LocalDateTime(at)) => When::DateTime(LocalDateTime(at + shift)),
+    }
+}
+
+/// What a resource is known by on the server: its `UID`, or — it has none — its name.
+fn seed_of(resource: &RemoteResource) -> &str {
+    if resource.task.raw_uid.is_empty() {
+        &resource.name
+    } else {
+        &resource.task.raw_uid
     }
 }
 

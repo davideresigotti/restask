@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 
 use crate::config::{VaultConfig, VaultMatchers};
-use crate::domain::{Clock, ListSlug, LocalDate, SourceRef, Status, Task, TaskUid};
+use crate::domain::{Clock, Ids, ListSlug, LocalDate, SourceRef, Status, Task, TaskUid};
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::parser::{link_parents, ParsedTask};
@@ -35,11 +35,12 @@ const FRONTMATTER_MAX_LINES: usize = 512;
 
 /// Whether the scan may write to the vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScanMode {
+pub enum ScanMode<'a> {
     /// Report what is there; touch nothing (`status`, `doctor`).
     ReadOnly,
-    /// Register new task lines and normalize the ones edited by hand (§6.4).
-    Repair,
+    /// Register new task lines and normalize the ones edited by hand (§6.4); the UIDs
+    /// they get are this device's (§3.1).
+    Repair(&'a Ids),
 }
 
 /// Result of one vault scan.
@@ -78,6 +79,47 @@ pub struct Scan {
     /// Tasks whose line is a view's own (§7.6): a view is flat, so their indentation
     /// says nothing about a parent — as for the lines of the inbox file.
     pub flat: BTreeSet<TaskUid>,
+}
+
+impl Scan {
+    /// The scan as it reads once the task lines that carried a UID of `renumbered`
+    /// carry the UID it maps to (§11.7): the same lines of the same files — nothing is
+    /// read again, so nothing is read differently — under their new UIDs, parents and
+    /// views included.
+    pub fn renumbered(self, renumbered: &BTreeMap<TaskUid, TaskUid>, cfg: &VaultConfig) -> Scan {
+        let now = |uid: TaskUid| renumbered.get(&uid).cloned().unwrap_or(uid);
+        Scan {
+            local: self
+                .local
+                .into_values()
+                .map(|mut task| {
+                    task.uid = now(task.uid);
+                    task.parent = task.parent.map(now);
+                    (task.uid.clone(), task)
+                })
+                .collect(),
+            duplicates: self
+                .duplicates
+                .into_iter()
+                .map(|(uid, path)| (now(uid), path))
+                .collect(),
+            created_requests: self
+                .created_requests
+                .into_iter()
+                .map(|(uid, path)| (now(uid), path))
+                .collect(),
+            views: self
+                .views
+                .into_iter()
+                .map(|(path, text)| {
+                    let text = mutator::renumber(&text, renumbered, cfg);
+                    (path, text)
+                })
+                .collect(),
+            flat: self.flat.into_iter().map(now).collect(),
+            ..self
+        }
+    }
 }
 
 /// One routed file loaded for scanning.
@@ -145,7 +187,7 @@ pub fn scan(
     cfg: &VaultConfig,
     clock: &dyn Clock,
     index: &Index,
-    mode: ScanMode,
+    mode: ScanMode<'_>,
 ) -> Result<Scan, RestaskError> {
     let matchers = cfg.matchers().map_err(|error| RestaskError::Config {
         path: vault.join("restask.toml").display().to_string(),
@@ -288,6 +330,18 @@ pub fn scan(
         }
     }
 
+    // Every UID a line carries is seen before one is minted, wherever the line is.
+    if let ScanMode::Repair(ids) = mode {
+        let inbox_tasks = inbox
+            .iter()
+            .flat_map(|file| markdown::parse(&file.contents, cfg).tasks);
+        for task in parsed.iter().flatten().cloned().chain(inbox_tasks) {
+            if let Some(uid) = &task.draft.uid {
+                ids.observe(uid);
+            }
+        }
+    }
+
     // Pass 4 — repair and collect, note by note. A root note with a view waits for
     // pass 5: what its view shows is known only once the other notes are read.
     let today = clock.today_local();
@@ -317,8 +371,8 @@ pub fn scan(
                 .into_iter()
                 .filter(|task| !duplicate(task))
                 .collect::<Vec<_>>(),
-            ScanMode::Repair => {
-                let (mut ops, status) = repairs(&tasks, &duplicate, today, true);
+            ScanMode::Repair(ids) => {
+                let (mut ops, status) = repairs(&tasks, &duplicate, today, true, ids);
                 ops.extend(status);
                 if ops.is_empty() {
                     tasks
@@ -418,12 +472,12 @@ pub fn scan(
                     .collect::<Vec<_>>(),
                 view.clone(),
             ),
-            ScanMode::Repair => {
+            ScanMode::Repair(ids) => {
                 // Outside the view the note is repaired like any note; inside it only
                 // identity is, and a new line takes its section's priority (§7.4).
-                let (mut ops, status) = repairs(&outside, &duplicate, today, true);
+                let (mut ops, status) = repairs(&outside, &duplicate, today, true, ids);
                 let copied = |task: &ParsedTask| copies.contains(&task.line_no);
-                let (identity, _) = repairs(&own, &copied, today, false);
+                let (identity, _) = repairs(&own, &copied, today, false, ids);
                 let ranked = section_ranks(&identity, &own);
                 ops.extend(identity);
                 ops.extend(ranked);
@@ -488,7 +542,7 @@ pub fn scan(
         }
         let tasks = match mode {
             ScanMode::ReadOnly => tasks,
-            ScanMode::Repair => {
+            ScanMode::Repair(ids) => {
                 // Placement inside TODO.md is the render's job: only identity is repaired
                 // here, which rewrites lines in place and keeps every line number.
                 let own: Vec<ParsedTask> = tasks
@@ -497,7 +551,7 @@ pub fn scan(
                     .cloned()
                     .collect();
                 let duplicate = |task: &ParsedTask| duplicates.contains(&task.line_no);
-                let (mut ops, _) = repairs(&own, &duplicate, today, false);
+                let (mut ops, _) = repairs(&own, &duplicate, today, false, ids);
                 let ranked = section_ranks(&ops, &own);
                 ops.extend(ranked);
                 if ops.is_empty() {
@@ -619,12 +673,13 @@ fn section_ranks(identity: &[Mutation], own: &[ParsedTask]) -> Vec<Mutation> {
 
 /// The repair mutations for one file's task lines, in two batches: identity
 /// (line-number based, so it is applied first), and — when `placement` —
-/// status/placement fixes (UID based).
+/// status/placement fixes (UID based). New UIDs come from `ids`.
 fn repairs(
     tasks: &[ParsedTask],
     duplicate: &dyn Fn(&ParsedTask) -> bool,
     today: LocalDate,
     placement: bool,
+    ids: &Ids,
 ) -> (Vec<Mutation>, Vec<Mutation>) {
     let mut identity = Vec::new();
     let mut status = Vec::new();
@@ -634,7 +689,7 @@ fn repairs(
             // identity yet, and nothing to bring in line with its box.
             None if task.draft.text.is_empty() => continue,
             None => {
-                let uid = TaskUid::generate();
+                let uid = ids.mint();
                 identity.push(Mutation::Register {
                     line_no: task.line_no,
                     uid: uid.clone(),
@@ -643,7 +698,7 @@ fn repairs(
                 uid
             }
             Some(_) if duplicate(task) => {
-                let uid = TaskUid::generate();
+                let uid = ids.mint();
                 identity.push(Mutation::Reassign {
                     line_no: task.line_no,
                     uid: uid.clone(),

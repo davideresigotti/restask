@@ -58,6 +58,21 @@ describe("§15.5 uidToken", () => {
 	});
 });
 
+describe("§15.5 a counted UID (§3.1) is hidden like a long one", () => {
+	it("hides the short token and the blank before it", () => {
+		expect(shown("- [ ] Buy milk 🔺 📅 2026-10-05 🆔 a42")).toBe("- [ ] Buy milk 🔺 📅 2026-10-05");
+		expect(shown("\t- [x] done ✅ 2026-10-01 🆔 kq7")).toBe("\t- [x] done ✅ 2026-10-01");
+		expect(shown("- [ ] mirror ⏫ [[Home#TODO|Home]] 🆔 a42")).toBe("- [ ] mirror ⏫ [[Home#TODO|Home]]");
+		expect(stripUid("Buy milk 🔺 🆔 a42")).toBe("Buy milk 🔺");
+	});
+
+	it("shows what is not a UID", () => {
+		for (const line of ["- [ ] x 🆔 a42b", "- [ ] x 🆔 a042", "- [ ] x 🆔 restask-a42", "- [ ] x 🆔 42", "prose 🆔 a42"]) {
+			expect(shown(line), line).toBe(line);
+		}
+	});
+});
+
 describe("§15.5 stripUid (reading view)", () => {
 	it("removes the token from rendered text", () => {
 		expect(stripUid(` Buy milk ➕ 2026-09-22 🆔 ${UID}`)).toBe(" Buy milk ➕ 2026-09-22");

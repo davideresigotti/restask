@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
 
-use common::{sealed, temp_vault, write_vault_file, FixedClock, MockCaldav};
+use common::{sealed, switch_vault, temp_vault, write_vault_file, FixedClock, MockCaldav};
 use restask::caldav::{CaldavPort, CollectionInfo, Offline, RemoteResource};
 use restask::config::{CaldavConfig, MachineConfig, VaultConfig};
 use restask::domain::{ListSlug, Priority, Task, TaskUid};
@@ -21,8 +21,12 @@ use restask::sync::{Engine, ReconcileReport};
 use restask::vtodo::WireNames;
 use restask::RestaskError;
 
-const UID: &str = "restask-01jz0000000000000000000001";
-const UID2: &str = "restask-01jz0000000000000000000002";
+/// Two tasks of a device no engine under test is (`zz`): the UID in full — what the
+/// server and the state know the task by — and as a line spells it behind `🆔`.
+const UID: &str = "restask-zz1";
+const UID2: &str = "restask-zz2";
+const TOKEN: &str = "zz1";
+const TOKEN2: &str = "zz2";
 const ID: &str = "\u{1F194}";
 
 /// A clock frozen at the real "now": file mtimes and the engine's instants agree, as in
@@ -75,11 +79,14 @@ fn read(dir: &TempDir, path: &str) -> String {
     std::fs::read_to_string(dir.path().join(path)).unwrap()
 }
 
+/// The UID `value` spells: in full, or as a line does behind `🆔`.
 fn uid(value: &str) -> TaskUid {
-    TaskUid::parse(value).unwrap()
+    TaskUid::parse(value)
+        .or_else(|_| TaskUid::from_token(value))
+        .unwrap()
 }
 
-/// The UID the engine gave the line containing `text` in `path`.
+/// The UID the line containing `text` in `path` carries, as the line spells it.
 fn uid_of(dir: &TempDir, path: &str, text: &str) -> String {
     let contents = read(dir, path);
     let line = contents
@@ -93,8 +100,15 @@ fn uid_of(dir: &TempDir, path: &str, text: &str) -> String {
         .to_string()
 }
 
+/// The name of the resource of a task restask created: its UID in full. `name` is
+/// that, or the UID as a line spells it; any other name is another client's, and kept.
+fn named(name: &str) -> String {
+    TaskUid::from_token(name).map_or_else(|_| name.to_string(), |uid| uid.as_str().to_string())
+}
+
 fn body(mock: &MockCaldav, list: &str, name: &str) -> String {
-    mock.resource(list, name)
+    let name = named(name);
+    mock.resource(list, &name)
         .unwrap_or_else(|| panic!("no resource {list}/{name}"))
         .body
 }
@@ -124,7 +138,7 @@ fn edit_remote(
             out.push_str("\r\n");
         }
     }
-    mock.seed_resource(list, name, &out);
+    mock.seed_resource(list, &named(name), &out);
 }
 
 /// Completes a task on the server like Tasks.org does.
@@ -231,7 +245,7 @@ async fn a_second_pass_changes_nothing_anywhere() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] with created\n- [ ] without created {ID} {UID}\n- [x] done by hand\n"),
+        &format!("- [ ] with created\n- [ ] without created {ID} {TOKEN}\n- [x] done by hand\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -272,7 +286,7 @@ async fn a_whole_list_costs_one_request_per_pass() {
 #[tokio::test]
 async fn a_cut_and_pasted_line_survives() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] movable {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] movable {ID} {TOKEN}\n"));
     note(&dir, "notes/work.md", "Work", "");
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -287,7 +301,7 @@ async fn a_cut_and_pasted_line_survives() {
         &dir,
         "notes/work.md",
         "Work",
-        &format!("- [ ] movable {ID} {UID}\n"),
+        &format!("- [ ] movable {ID} {TOKEN}\n"),
     );
     engine.reconcile().await.unwrap();
 
@@ -360,7 +374,7 @@ async fn unrouted_notes_are_never_touched() {
 #[tokio::test]
 async fn a_duplicated_line_becomes_its_own_task() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] original {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] original {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -368,13 +382,13 @@ async fn a_duplicated_line_becomes_its_own_task() {
     // Duplicate the line (Ctrl-D in an editor) and reword the copy.
     home_note(
         &dir,
-        &format!("- [ ] original {ID} {UID}\n- [ ] the copy {ID} {UID}\n"),
+        &format!("- [ ] original {ID} {TOKEN}\n- [ ] the copy {ID} {TOKEN}\n"),
     );
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.normalized, 1);
-    assert_eq!(uid_of(&dir, "notes/home.md", "original"), UID);
+    assert_eq!(uid_of(&dir, "notes/home.md", "original"), TOKEN);
     let copy = uid_of(&dir, "notes/home.md", "the copy");
-    assert_ne!(copy, UID);
+    assert_ne!(copy, TOKEN);
     assert!(body(&mock, "home", UID).contains("SUMMARY:original"));
     assert!(body(&mock, "home", &copy).contains("SUMMARY:the copy"));
 }
@@ -382,12 +396,12 @@ async fn a_duplicated_line_becomes_its_own_task() {
 #[tokio::test]
 async fn sync_conflict_copies_are_not_scanned() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] original {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] original {ID} {TOKEN}\n"));
     note(
         &dir,
         "notes/home.sync-conflict-20260922-101500-ABCDEFG.md",
         "Home",
-        &format!("- [ ] original, other device {ID} {UID}\n"),
+        &format!("- [ ] original, other device {ID} {TOKEN}\n"),
     );
     let mock = MockCaldav::new();
     engine(&dir, &mock).reconcile().await.unwrap();
@@ -405,7 +419,7 @@ fn archived_copies(dir: &TempDir, archive: &str) -> Vec<(String, String)> {
         (
             format!("{archive}/Areas/Home Lab/Home Lab~20261002-195517.md"),
             format!(
-                "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] backup the phone \u{1F53C}\n- [ ] keep \u{23EB} {ID} {UID}\n"
+                "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] backup the phone \u{1F53C}\n- [ ] keep \u{23EB} {ID} {TOKEN}\n"
             ),
         ),
         (
@@ -430,7 +444,7 @@ async fn a_file_syncs_version_archive_is_not_part_of_the_vault() {
         &dir,
         "Areas/Home Lab/Home Lab.md",
         &format!(
-            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n"
+            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {TOKEN}\n"
         ),
     );
     write_vault_file(
@@ -469,7 +483,7 @@ async fn a_file_syncs_version_archive_is_not_part_of_the_vault() {
     let todo = read(&dir, "TODO.md");
     assert!(
         todo.contains(&format!(
-            "- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {UID}\n"
+            "- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {TOKEN}\n"
         )),
         "{todo}"
     );
@@ -502,7 +516,7 @@ async fn tasks_an_earlier_engine_took_from_the_version_archive_leave_with_it() {
         &dir,
         "Areas/Home Lab/Home Lab.md",
         &format!(
-            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n"
+            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {TOKEN}\n"
         ),
     );
     let mock = MockCaldav::new();
@@ -531,12 +545,14 @@ async fn tasks_an_earlier_engine_took_from_the_version_archive_leave_with_it() {
     assert_eq!(
         todo,
         sealed(&format!(
-            "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{23EB} High Priority\n- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {UID}\n\n## Done\n"
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{23EB} High Priority\n- [ ] keep \u{23EB} [[Home Lab#To Do|Home Lab]] {ID} {TOKEN}\n\n## Done\n"
         ))
     );
     assert_eq!(
         read(&dir, "Areas/Home Lab/Home Lab.md"),
-        format!("---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {UID}\n")
+        format!(
+            "---\nrestask-list-root: Home Lab\n---\n# To Do\n- [ ] keep \u{23EB} {ID} {TOKEN}\n"
+        )
     );
     // The copies are left as the earlier engine wrote them.
     let after = snapshot(&dir)
@@ -565,7 +581,7 @@ async fn tasks_an_earlier_engine_took_from_the_version_archive_leave_with_it() {
 #[tokio::test]
 async fn a_remote_completion_survives_an_unrelated_edit_of_the_same_note() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] target {ID} {UID}\n- [ ] other\n"));
+    home_note(&dir, &format!("- [ ] target {ID} {TOKEN}\n- [ ] other\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -580,7 +596,7 @@ async fn a_remote_completion_survives_an_unrelated_edit_of_the_same_note() {
     let note = read(&dir, "notes/home.md");
     assert!(
         note.contains(&format!(
-            "### Done\n- [x] target \u{2705} 2026-09-20 {ID} {UID}"
+            "### Done\n- [x] target \u{2705} 2026-09-20 {ID} {TOKEN}"
         )),
         "{note}"
     );
@@ -592,7 +608,7 @@ async fn a_remote_completion_survives_an_unrelated_edit_of_the_same_note() {
 #[tokio::test]
 async fn edits_on_both_sides_to_different_fields_are_both_kept() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] alpha {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] alpha {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -600,7 +616,7 @@ async fn edits_on_both_sides_to_different_fields_are_both_kept() {
     complete_remotely(&mock, "home", UID, Duration::minutes(1));
     home_note(
         &dir,
-        &format!("- [ ] alpha, reworded in the note {ID} {UID}\n"),
+        &format!("- [ ] alpha, reworded in the note {ID} {TOKEN}\n"),
     );
     engine.reconcile().await.unwrap();
 
@@ -617,7 +633,7 @@ async fn edits_on_both_sides_to_different_fields_are_both_kept() {
 #[tokio::test]
 async fn a_vault_edit_keeps_what_other_clients_stored_on_the_resource() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] pay the rent {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] pay the rent {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -638,7 +654,7 @@ async fn a_vault_edit_keeps_what_other_clients_stored_on_the_resource() {
         }
     });
     engine.reconcile().await.unwrap();
-    home_note(&dir, &format!("- [ ] pay the rent \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] pay the rent \u{23EB} {ID} {TOKEN}\n"));
     engine.reconcile().await.unwrap();
 
     let remote = body(&mock, "home", UID);
@@ -677,7 +693,7 @@ async fn a_task_deleted_on_the_server_leaves_the_vault() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] doomed {ID} {UID}\n- [ ] stays {ID} {UID2}\n"),
+        &format!("- [ ] doomed {ID} {TOKEN}\n- [ ] stays {ID} {TOKEN2}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -697,7 +713,7 @@ async fn a_task_deleted_on_the_server_leaves_the_vault() {
 #[tokio::test]
 async fn a_line_removed_from_the_vault_leaves_the_server() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] gone {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] gone {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -716,7 +732,7 @@ async fn a_line_removed_from_the_vault_leaves_the_server() {
 #[tokio::test]
 async fn rerouting_a_note_moves_its_tasks_between_collections() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] commute {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] commute {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -725,7 +741,7 @@ async fn rerouting_a_note_moves_its_tasks_between_collections() {
         &dir,
         "notes/home.md",
         "Work",
-        &format!("- [ ] commute {ID} {UID}\n"),
+        &format!("- [ ] commute {ID} {TOKEN}\n"),
     );
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.moves, 1);
@@ -738,7 +754,7 @@ async fn rerouting_a_note_moves_its_tasks_between_collections() {
 #[tokio::test]
 async fn a_task_created_under_a_managed_uid_lands_in_its_note() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] anchor {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] anchor {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -753,7 +769,7 @@ async fn a_task_created_under_a_managed_uid_lands_in_its_note() {
 
     let note = read(&dir, "notes/home.md");
     assert!(
-        note.contains(&format!("- [ ] from the server {ID} {UID2}")),
+        note.contains(&format!("- [ ] from the server {ID} {TOKEN2}")),
         "{note}"
     );
     assert!(!note.contains("[["), "a note line, not a mirror line");
@@ -802,7 +818,7 @@ async fn a_foreign_task_is_adopted_where_it_is_with_everything_it_carries() {
     assert_eq!(mock.resource_names("inbox"), vec![TASKS_ORG_NAME]);
     let linked = body(&mock, "inbox", TASKS_ORG_NAME);
     assert!(linked.contains("UID:5417861935824551742\r\n"), "{linked}");
-    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains(&format!("X-RESTASK-UID:restask-{adopted}\r\n")));
     assert!(linked.contains("X-RESTASK-SOURCE;VALUE=TEXT:TODO.md\r\n"));
     assert!(linked.contains("SUMMARY:Made in Tasks.org"));
     assert!(linked.contains("CREATED:20260921T000000Z\r\n"));
@@ -864,7 +880,7 @@ async fn a_priority_changed_in_tasks_org_changes_the_task_in_the_vault() {
     one_task("\u{1F53C}");
     let linked = body(&mock, "home", TASKS_ORG_NAME);
     assert!(linked.contains("PRIORITY:5\r\n"), "{linked}");
-    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains(&format!("X-RESTASK-UID:restask-{adopted}\r\n")));
 
     // And once more on the version restask wrote, properties kept.
     mock.seed_resource(
@@ -1026,7 +1042,7 @@ async fn an_interrupted_adoption_never_duplicates_the_task() {
     assert_eq!(mock.resource_names("inbox"), vec![TASKS_ORG_NAME]);
     let linked = body(&mock, "inbox", TASKS_ORG_NAME);
     assert!(linked.contains("DESCRIPTION:with a note"));
-    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains(&format!("X-RESTASK-UID:restask-{adopted}\r\n")));
     assert!(linked.contains("PRIORITY:9\r\n"), "{linked}");
     let todo = read(&dir, "TODO.md");
     assert_eq!(todo.matches("Made in Tasks.org").count(), 1);
@@ -1038,7 +1054,7 @@ async fn an_interrupted_adoption_never_duplicates_the_task() {
 #[tokio::test]
 async fn a_failed_push_is_replanned_from_the_current_vault_content() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] first wording {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] first wording {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let report = engine_with(&dir, PutRejected(mock.clone()), true)
         .reconcile()
@@ -1055,7 +1071,7 @@ async fn a_failed_push_is_replanned_from_the_current_vault_content() {
     );
 
     // The user keeps editing while the server is unhappy.
-    home_note(&dir, &format!("- [ ] second wording {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] second wording {ID} {TOKEN}\n"));
     engine(&dir, &mock).reconcile().await.unwrap();
     let remote = body(&mock, "home", UID);
     assert!(remote.contains("SUMMARY:second wording"));
@@ -1117,7 +1133,7 @@ async fn a_missing_collection_that_may_not_be_created_just_waits() {
 #[tokio::test]
 async fn a_box_checked_in_any_editor_is_completed_properly() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] by hand {ID} {UID}\n- [ ] stays\n"));
+    home_note(&dir, &format!("- [ ] by hand {ID} {TOKEN}\n- [ ] stays\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1130,7 +1146,7 @@ async fn a_box_checked_in_any_editor_is_completed_properly() {
     let note = read(&dir, "notes/home.md");
     assert!(
         note.ends_with(&format!(
-            "\n### Done\n- [x] by hand \u{2705} {} {ID} {UID}\n",
+            "\n### Done\n- [x] by hand \u{2705} {} {ID} {TOKEN}\n",
             today()
         )),
         "{note}"
@@ -1152,7 +1168,7 @@ async fn a_box_checked_in_any_editor_is_completed_properly() {
 #[tokio::test]
 async fn checking_a_mirrored_task_in_todo_md_completes_it_in_its_note() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1186,7 +1202,9 @@ async fn deleting_a_mirrored_task_in_todo_md_deletes_it_in_its_note() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] important \u{23EB} {ID} {UID}\n- [ ] other \u{23EB} {ID} {UID2}\nprose\n"),
+        &format!(
+            "- [ ] important \u{23EB} {ID} {TOKEN}\n- [ ] other \u{23EB} {ID} {TOKEN2}\nprose\n"
+        ),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1194,7 +1212,7 @@ async fn deleting_a_mirrored_task_in_todo_md_deletes_it_in_its_note() {
     assert!(mock.resource("home", UID).is_some());
 
     let todo = read(&dir, "TODO.md");
-    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {UID}\n");
+    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {TOKEN}\n");
     assert!(todo.contains(&line), "{todo}");
     write_vault_file(&dir, "TODO.md", &todo.replace(&line, ""));
     let report = engine.reconcile().await.unwrap();
@@ -1203,7 +1221,7 @@ async fn deleting_a_mirrored_task_in_todo_md_deletes_it_in_its_note() {
     let note = read(&dir, "notes/home.md");
     assert!(!note.contains("important"), "{note}");
     assert!(
-        note.contains(&format!("- [ ] other \u{23EB} {ID} {UID2}\nprose\n")),
+        note.contains(&format!("- [ ] other \u{23EB} {ID} {TOKEN2}\nprose\n")),
         "{note}"
     );
     assert!(
@@ -1233,14 +1251,14 @@ async fn deleting_a_mirrored_task_in_todo_md_deletes_it_in_its_note() {
 #[tokio::test]
 async fn a_mirror_line_that_is_merely_absent_deletes_nothing() {
     let dir = temp_vault();
-    let body_of_note = format!("- [ ] important \u{23EB} {ID} {UID}\n");
+    let body_of_note = format!("- [ ] important \u{23EB} {ID} {TOKEN}\n");
     home_note(&dir, &body_of_note);
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
     let todo = read(&dir, "TODO.md");
     let note = read(&dir, "notes/home.md");
-    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {UID}\n");
+    let line = format!("- [ ] important \u{23EB} [[home#Home|home]] {ID} {TOKEN}\n");
     assert!(todo.contains(&line), "{todo}");
     let gone = todo.replace(&line, "");
 
@@ -1270,7 +1288,7 @@ async fn a_mirror_line_that_is_merely_absent_deletes_nothing() {
 #[tokio::test]
 async fn reprioritizing_a_mirrored_task_in_todo_md_reaches_its_note() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1279,9 +1297,8 @@ async fn reprioritizing_a_mirrored_task_in_todo_md_reaches_its_note() {
     write_vault_file(&dir, "TODO.md", &todo);
     engine.reconcile().await.unwrap();
 
-    assert!(
-        read(&dir, "notes/home.md").contains(&format!("- [ ] very important \u{1F53A} {ID} {UID}"))
-    );
+    assert!(read(&dir, "notes/home.md")
+        .contains(&format!("- [ ] very important \u{1F53A} {ID} {TOKEN}")));
     let todo = read(&dir, "TODO.md");
     assert!(todo.contains(
         "## \u{1F53A} Highest Priority\n- [ ] very important \u{1F53A} [[home#Home|home]]"
@@ -1319,7 +1336,7 @@ async fn an_inbox_task_mentioning_a_note_is_a_task_not_a_mirror() {
 #[tokio::test]
 async fn a_task_typed_in_a_priority_section_takes_that_priority() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1352,7 +1369,7 @@ async fn a_task_typed_in_a_priority_section_takes_that_priority() {
     let typed = uid_of(&dir, "TODO.md", "typed here");
     assert!(body(&mock, "inbox", &typed).contains("PRIORITY:3"));
     // The mirrored note task is not touched by any of it.
-    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{23EB} {ID} {UID}")));
+    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{23EB} {ID} {TOKEN}")));
 
     // A second pass is quiet.
     let files = snapshot(&dir);
@@ -1500,7 +1517,7 @@ async fn a_task_moved_to_another_section_of_todo_md_takes_its_priority() {
 #[tokio::test]
 async fn a_mirror_line_moved_to_another_section_reprioritizes_its_note_task() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1513,7 +1530,9 @@ async fn a_mirror_line_moved_to_another_section_reprioritizes_its_note_task() {
     write_vault_file(&dir, "TODO.md", &todo);
     engine.reconcile().await.unwrap();
 
-    assert!(read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{1F53D} {ID} {UID}")));
+    assert!(
+        read(&dir, "notes/home.md").contains(&format!("- [ ] important \u{1F53D} {ID} {TOKEN}"))
+    );
     let todo = read(&dir, "TODO.md");
     assert!(
         todo.contains("## \u{1F53D} Low Priority\n- [ ] important \u{1F53D} [[home#Home|home]]"),
@@ -1534,7 +1553,7 @@ async fn a_mirror_line_moved_to_another_section_reprioritizes_its_note_task() {
 #[tokio::test]
 async fn a_sealed_view_with_a_line_elsewhere_is_not_read_as_a_move() {
     let dir = temp_vault();
-    let note = format!("- [ ] important \u{23EB} {ID} {UID}\n");
+    let note = format!("- [ ] important \u{23EB} {ID} {TOKEN}\n");
     home_note(&dir, &note);
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1593,7 +1612,7 @@ async fn a_changed_emoji_outranks_the_section_the_line_was_moved_to() {
 #[tokio::test]
 async fn a_mirror_line_whose_source_is_gone_does_not_become_an_inbox_task() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] important \u{23EB} {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
@@ -1611,7 +1630,7 @@ async fn subtasks_keep_their_parent_relation() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] parent {ID} {UID}\n    - [ ] child {ID} {UID2}\n"),
+        &format!("- [ ] parent {ID} {TOKEN}\n    - [ ] child {ID} {TOKEN2}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1624,7 +1643,7 @@ async fn subtasks_keep_their_parent_relation() {
     let note = read(&dir, "notes/home.md");
     assert!(
         note.contains(&format!(
-            "### Done\n- [x] child \u{2705} {} {ID} {UID2}",
+            "### Done\n- [x] child \u{2705} {} {ID} {TOKEN2}",
             today()
         )),
         "{note}"
@@ -1651,7 +1670,7 @@ async fn add_and_complete_round_trip() {
     assert!(todo.contains(&format!(
         "## \u{1F53C} Medium Priority\n- [ ] hello world \u{1F53C} {ID} "
     )));
-    assert!(todo.contains(task.uid.as_str()));
+    assert!(todo.contains(&format!("{ID} {}\n", task.uid.token())));
     assert!(body(&mock, "inbox", task.uid.as_str()).contains("SUMMARY:hello world"));
 
     engine.set_done(&task.uid, true).await.unwrap();
@@ -1678,10 +1697,17 @@ async fn commands_work_without_a_server_and_sync_later() {
         .unwrap();
     offline.set_done(&task.uid, true).await.unwrap();
     assert!(read(&dir, "TODO.md").contains("## Done\n- [x] captured offline"));
+    // No pass has reached the server: the vault is not switched to counted UIDs (§9.4).
+    assert!(task.uid.is_long());
+    assert!(!dir.path().join(".restask/devices").exists());
 
     let mock = MockCaldav::new();
     engine(&dir, &mock).reconcile().await.unwrap();
-    assert!(body(&mock, "inbox", task.uid.as_str()).contains("STATUS:COMPLETED"));
+    // The pass that reaches it switches the vault and renumbers the task (§11.7).
+    let captured = uid_of(&dir, "TODO.md", "captured offline");
+    assert!(!uid(&captured).is_long(), "{captured}");
+    assert!(body(&mock, "inbox", &captured).contains("STATUS:COMPLETED"));
+    assert_eq!(mock.resource_names("inbox"), vec![named(&captured)]);
 }
 
 #[tokio::test]
@@ -1766,7 +1792,7 @@ fn ical_day(offset: i64) -> String {
 #[tokio::test]
 async fn a_repeating_task_without_a_date_reaches_the_server_and_gets_no_date_in_the_vault() {
     let dir = temp_vault();
-    let line = format!("- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {ID} {UID}\n");
+    let line = format!("- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {ID} {TOKEN}\n");
     home_note(&dir, &line);
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1803,7 +1829,7 @@ async fn a_repeating_task_without_a_date_reaches_the_server_and_gets_no_date_in_
     home_note(
         &dir,
         &format!(
-            "- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {DUE} {} {ID} {UID}\n",
+            "- [ ] Collect feedback {REPEAT} every 2 weeks for 5 times {DUE} {} {ID} {TOKEN}\n",
             day(3)
         ),
     );
@@ -1821,7 +1847,7 @@ async fn a_repeat_rule_written_in_the_vault_reaches_the_server_and_back() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] water the plants {REPEAT} every week on mon and thu {ID} {UID}\n"),
+        &format!("- [ ] water the plants {REPEAT} every week on mon and thu {ID} {TOKEN}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1839,11 +1865,11 @@ async fn a_repeat_rule_written_in_the_vault_reaches_the_server_and_back() {
     });
     engine.reconcile().await.unwrap();
     assert!(read(&dir, "notes/home.md").contains(&format!(
-        "- [ ] water the plants {REPEAT} every month on the 15th {ID} {UID}\n"
+        "- [ ] water the plants {REPEAT} every month on the 15th {ID} {TOKEN}\n"
     )));
 
     // Removed in the vault: the rule leaves the server too.
-    home_note(&dir, &format!("- [ ] water the plants {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] water the plants {ID} {TOKEN}\n"));
     engine.reconcile().await.unwrap();
     assert!(!body(&mock, "home", UID).contains("RRULE"));
 }
@@ -1853,7 +1879,7 @@ async fn a_rule_set_in_another_client_shows_up_in_the_vault() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] water the plants \u{23EB} {ID} {UID}\n"),
+        &format!("- [ ] water the plants \u{23EB} {ID} {TOKEN}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1862,11 +1888,11 @@ async fn a_rule_set_in_another_client_shows_up_in_the_vault() {
     engine.reconcile().await.unwrap();
 
     assert!(read(&dir, "notes/home.md").contains(&format!(
-        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days {ID} {UID}\n"
+        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days {ID} {TOKEN}\n"
     )));
     // …and in the TODO.md view of the task.
     assert!(read(&dir, "TODO.md").contains(&format!(
-        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days [[home#Home|home]] {ID} {UID}"
+        "- [ ] water the plants \u{23EB} {REPEAT} every 2 days [[home#Home|home]] {ID} {TOKEN}"
     )));
     let again = engine.reconcile().await.unwrap();
     assert_eq!((again.pushes, again.markdown_mutations), (0, 0));
@@ -1878,7 +1904,7 @@ async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
     home_note(
         &dir,
         &format!(
-            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {UID}\n- [ ] other\n",
+            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {TOKEN}\n- [ ] other\n",
             day(0)
         ),
     );
@@ -1914,7 +1940,7 @@ async fn completing_a_recurring_task_in_the_vault_moves_the_series_on() {
     let note = read(&dir, "notes/home.md");
     assert!(
         note.contains(&format!(
-            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {UID}\n",
+            "- [ ] water the plants {REPEAT} every 2 days {DUE} {} {ID} {TOKEN}\n",
             day(2)
         )),
         "{note}"
@@ -1951,7 +1977,7 @@ async fn a_rule_the_vault_cannot_spell_stays_on_the_server_and_still_rolls() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] month-end report {DUE} 2026-09-30 {ID} {UID}\n"),
+        &format!("- [ ] month-end report {DUE} 2026-09-30 {ID} {TOKEN}\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -1980,7 +2006,7 @@ async fn the_last_occurrence_of_a_counted_rule_completes_the_task() {
     home_note(
         &dir,
         &format!(
-            "- [ ] two more times {REPEAT} every day for 2 times {DUE} {} {ID} {UID}\n",
+            "- [ ] two more times {REPEAT} every day for 2 times {DUE} {} {ID} {TOKEN}\n",
             day(0)
         ),
     );
@@ -2027,7 +2053,7 @@ async fn a_recurring_inbox_task_rolls_forward_inside_todo_md() {
         todo.contains(&format!(
             "## No Priority\n- [ ] take vitamins {REPEAT} every day {DUE} {} {ID} {}\n",
             day(1),
-            task.uid
+            task.uid.token()
         )),
         "{todo}"
     );
@@ -2071,15 +2097,17 @@ async fn a_recurring_line_first_seen_already_checked_rolls_before_its_first_push
 
 const CREATED: &str = "\u{2795}";
 
-/// The day a UID was minted, as the vault and the server write it.
-fn born(value: &str) -> (String, String) {
-    let day = uid(value).created_on().unwrap().format();
+/// The day a task is taken to be created on when neither its line nor the server says:
+/// the day of the pass — a counted UID tells none — as the vault and the server write it.
+fn born() -> (String, String) {
+    let day = today();
     let ical = format!("CREATED:{}T000000Z", day.replace('-', ""));
     (day, ical)
 }
 
 /// §6.4: a line is registered without a creation date. The server still learns when the
-/// task was created — the day its UID was minted — and that never comes back as a token.
+/// task was created — the day of the pass that pushed it first — and that never comes
+/// back as a token.
 #[tokio::test]
 async fn a_line_gets_no_creation_date_but_the_server_does() {
     let dir = temp_vault();
@@ -2091,7 +2119,7 @@ async fn a_line_gets_no_creation_date_but_the_server_does() {
     let note = read(&dir, "notes/home.md");
     assert!(!note.contains(CREATED), "{note}");
     let typed = uid_of(&dir, "notes/home.md", "typed today");
-    assert!(body(&mock, "home", &typed).contains(&born(&typed).1));
+    assert!(body(&mock, "home", &typed).contains(&born().1));
 
     let files = snapshot(&dir);
     let again = engine.reconcile().await.unwrap();
@@ -2134,17 +2162,17 @@ async fn a_new_line_that_asks_for_its_creation_date_gets_today() {
 }
 
 /// §6.4: on a task the server knows, a bare `➕` is answered with the server's creation
-/// date — also when it was made elsewhere and is not the day in the UID — and deleting
-/// the token takes nothing from the server.
+/// date — also when it was made elsewhere and is not the day restask pushed it — and
+/// deleting the token takes nothing from the server.
 #[tokio::test]
 async fn an_existing_task_that_asks_gets_the_servers_creation_date() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] old one {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] old one {ID} {TOKEN}\n"));
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
     // Another client knows better when the task was created.
-    let (_, minted) = born(UID);
+    let (_, minted) = born();
     edit_remote(&mock, "home", UID, Duration::minutes(5), |line| {
         if line.starts_with("CREATED:") {
             vec!["CREATED:20260901T081233Z".to_string()]
@@ -2156,9 +2184,9 @@ async fn an_existing_task_that_asks_gets_the_servers_creation_date() {
     engine.reconcile().await.unwrap();
     assert!(!read(&dir, "notes/home.md").contains(CREATED));
 
-    home_note(&dir, &format!("- [ ] old one {CREATED} {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] old one {CREATED} {ID} {TOKEN}\n"));
     engine.reconcile().await.unwrap();
-    let asked = format!("- [ ] old one {CREATED} 2026-09-01 {ID} {UID}\n");
+    let asked = format!("- [ ] old one {CREATED} 2026-09-01 {ID} {TOKEN}\n");
     assert!(read(&dir, "notes/home.md").ends_with(&asked));
 
     let files = snapshot(&dir);
@@ -2167,24 +2195,27 @@ async fn an_existing_task_that_asks_gets_the_servers_creation_date() {
     assert_eq!(snapshot(&dir), files);
 
     // The token goes, the server's date stays.
-    home_note(&dir, &format!("- [ ] old one {ID} {UID}\n"));
+    home_note(&dir, &format!("- [ ] old one {ID} {TOKEN}\n"));
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.pushes, 0);
     assert!(body(&mock, "home", UID).contains("CREATED:20260901T"));
     assert!(!read(&dir, "notes/home.md").contains(CREATED));
 }
 
-/// §6.4: the answer needs no server. A task that was never pushed gets the day its UID
-/// was minted; the bare token never reaches the server as text.
+/// §6.4: the answer needs no server. A task that was never pushed gets today; the bare
+/// token never reaches the server as text.
 #[tokio::test]
 async fn the_creation_date_is_answered_offline_and_in_todo_md() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] never pushed {CREATED} {ID} {UID}\n"));
+    home_note(
+        &dir,
+        &format!("- [ ] never pushed {CREATED} {ID} {TOKEN}\n"),
+    );
     let todo = read(&dir, "TODO.md");
     write_vault_file(
         &dir,
         "TODO.md",
-        &format!("{todo}- [ ] quick {CREATED} {ID} {UID2}\n"),
+        &format!("{todo}- [ ] quick {CREATED} {ID} {TOKEN2}\n"),
     );
     let offline = engine_with(&dir, Offline, true);
     assert!(offline.reconcile().await.is_err());
@@ -2192,16 +2223,16 @@ async fn the_creation_date_is_answered_offline_and_in_todo_md() {
     let note = read(&dir, "notes/home.md");
     assert!(
         note.ends_with(&format!(
-            "- [ ] never pushed {CREATED} {} {ID} {UID}\n",
-            born(UID).0
+            "- [ ] never pushed {CREATED} {} {ID} {TOKEN}\n",
+            born().0
         )),
         "{note}"
     );
     let todo = read(&dir, "TODO.md");
     assert!(
         todo.contains(&format!(
-            "- [ ] quick {CREATED} {} {ID} {UID2}\n",
-            born(UID2).0
+            "- [ ] quick {CREATED} {} {ID} {TOKEN2}\n",
+            born().0
         )),
         "{todo}"
     );
@@ -2209,7 +2240,7 @@ async fn the_creation_date_is_answered_offline_and_in_todo_md() {
     let mock = MockCaldav::new();
     engine(&dir, &mock).reconcile().await.unwrap();
     assert!(body(&mock, "home", UID).contains("SUMMARY:never pushed\r\n"));
-    assert!(body(&mock, "home", UID).contains(&born(UID).1));
+    assert!(body(&mock, "home", UID).contains(&born().1));
 }
 
 // ── tasks registered on another device ────────────────────────────────────────────────
@@ -2221,11 +2252,11 @@ async fn the_creation_date_is_answered_offline_and_in_todo_md() {
 #[tokio::test]
 async fn lines_registered_and_filed_by_the_plugin_are_taken_as_they_are() {
     let dir = temp_vault();
-    let note = format!("- [ ] buy milk {ID} {UID}\n");
+    let note = format!("- [ ] buy milk {ID} {TOKEN}\n");
     home_note(&dir, &note);
     let todo = sealed(&format!(
         "---\nrestask-list: inbox\n---\n# TODO\n\n## \u{1F53A} Highest Priority\n\
-         - [ ] call the bank \u{1F53A} {ID} {UID2}\n\n## Done\n"
+         - [ ] call the bank \u{1F53A} {ID} {TOKEN2}\n\n## Done\n"
     ));
     write_vault_file(&dir, "TODO.md", &todo);
     let written = (mtime(&dir, "notes/home.md"), mtime(&dir, "TODO.md"));
@@ -2259,24 +2290,24 @@ async fn a_completion_made_by_the_plugin_is_taken_as_it_is() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n- [ ] other\n\n## Done\n"),
+        &format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n- [ ] other\n\n## Done\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
     let mirror = format!(
-        "## \u{1F53A} Highest Priority\n- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {UID}\n\n"
+        "## \u{1F53A} Highest Priority\n- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {TOKEN}\n\n"
     );
     let todo = read(&dir, "TODO.md");
     assert!(todo.contains(&mirror), "{todo}");
 
     // What the plugin writes on the phone.
     let note = read(&dir, "notes/home.md")
-        .replace(&format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n"), "")
+        .replace(&format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n"), "")
         .replace(
             "## Done\n",
             &format!(
-                "## Done\n- [x] call the bank \u{1F53A} \u{2705} {} {ID} {UID}\n",
+                "## Done\n- [x] call the bank \u{1F53A} \u{2705} {} {ID} {TOKEN}\n",
                 today()
             ),
         );
@@ -2305,7 +2336,7 @@ async fn the_plugins_todo_arriving_before_its_note_changes_no_note_and_no_task()
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n\n## Done\n"),
+        &format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n\n## Done\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -2318,8 +2349,8 @@ async fn the_plugins_todo_arriving_before_its_note_changes_no_note_and_no_task()
     // The mirror line of the task completed on the phone is gone; the mirror line of a
     // task typed on the phone is there. Both notes are still on their way.
     let ahead = todo.replace(
-        &format!("- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {UID}\n"),
-        &format!("- [ ] typed on the phone \u{1F53A} [[home#Home|home]] {ID} {UID2}\n"),
+        &format!("- [ ] call the bank \u{1F53A} [[home#Home|home]] {ID} {TOKEN}\n"),
+        &format!("- [ ] typed on the phone \u{1F53A} [[home#Home|home]] {ID} {TOKEN2}\n"),
     );
     assert_ne!(ahead, todo);
     // The plugin seals what it leaves (§7.2); unsealed, the missing line would be the
@@ -2344,7 +2375,7 @@ async fn a_sealed_view_ahead_of_its_note_is_not_carried_into_the_note() {
     let dir = temp_vault();
     home_note(
         &dir,
-        &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n\n## Done\n"),
+        &format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n\n## Done\n"),
     );
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -2395,13 +2426,16 @@ async fn a_view_created_by_the_engine_has_no_comment_line() {
 #[tokio::test]
 async fn the_comment_lines_of_an_earlier_view_are_dropped_by_the_next_render() {
     let dir = temp_vault();
-    home_note(&dir, &format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n"));
+    home_note(
+        &dir,
+        &format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n"),
+    );
     write_vault_file(
         &dir,
         "TODO.md",
         &format!(
             "---\nrestask-list: inbox\n---\n{OLD_DISCLAIMER}\n<!-- restask-render: 0ed09b30e036d3f7 -->\n\n# TODO\n\n\
-             ## No Priority\n- [ ] buy milk {ID} {UID2}\n\n## Done\n"
+             ## No Priority\n- [ ] buy milk {ID} {TOKEN2}\n\n## Done\n"
         ),
     );
     let mock = MockCaldav::new();
@@ -2435,7 +2469,7 @@ async fn the_comment_lines_of_an_earlier_view_are_dropped_by_the_next_render() {
 #[tokio::test]
 async fn the_blank_line_above_the_title_of_an_earlier_view_is_dropped_by_the_next_render() {
     let dir = temp_vault();
-    let line = format!("- [ ] call the bank \u{1F53A} {ID} {UID}\n");
+    let line = format!("- [ ] call the bank \u{1F53A} {ID} {TOKEN}\n");
     home_note(&dir, &line);
     let mock = MockCaldav::new();
     let engine = engine(&dir, &mock);
@@ -2485,7 +2519,7 @@ async fn a_note_with_a_line_of_the_view_in_it_is_still_a_note() {
     assert_eq!(report.registered, 1);
     let note = read(&dir, "notes/home.md");
     assert!(note.contains(OLD_DISCLAIMER), "a note's own text is kept");
-    assert!(note.contains(&format!("- [ ] buy a camera \u{1F53A} {ID} restask-")));
+    assert!(!uid_of(&dir, "notes/home.md", "- [ ] buy a camera \u{1F53A} ").is_empty());
     assert!(
         !note.contains("## "),
         "no section of the view is made in a note"
@@ -2500,6 +2534,7 @@ async fn a_note_with_a_line_of_the_view_in_it_is_still_a_note() {
 #[tokio::test]
 async fn settling_does_the_local_work_without_a_server_and_the_pass_writes_no_vault_file() {
     let dir = temp_vault();
+    switch_vault(&dir);
     home_note(
         &dir,
         "- [ ] typed in an editor \u{1F53A}\n- [x] ticked by hand\n",
@@ -2567,6 +2602,7 @@ async fn settling_does_the_local_work_without_a_server_and_the_pass_writes_no_va
 #[tokio::test]
 async fn a_machine_that_is_not_the_sync_node_settles_and_sends_nothing() {
     let dir = temp_vault();
+    switch_vault(&dir);
     home_note(&dir, "- [ ] typed in an editor\n");
     let mock = MockCaldav::new();
     let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
@@ -2606,7 +2642,7 @@ async fn a_machine_that_is_not_the_sync_node_settles_and_sends_nothing() {
     );
     assert_eq!(mock.resource_names("inbox").len(), 1);
     assert_eq!(mock.resource_names("home").len(), 1);
-    assert!(read(&dir, "TODO.md").contains(task.uid.as_str()));
+    assert!(read(&dir, "TODO.md").contains(&format!("{ID} {}\n", task.uid.token())));
     assert_eq!(mtime(&dir, "notes/home.md"), note_at);
     assert_eq!(mtime(&dir, "TODO.md"), todo_at);
 }
@@ -2660,7 +2696,7 @@ async fn a_task_of_another_calendar_lives_in_todo_md() {
     assert_eq!(mock.resource_names("work"), vec![TASKS_ORG_NAME]);
     assert!(mock.resource_names("inbox").is_empty());
     let linked = body(&mock, "work", TASKS_ORG_NAME);
-    assert!(linked.contains(&format!("X-RESTASK-UID:{adopted}\r\n")));
+    assert!(linked.contains(&format!("X-RESTASK-UID:restask-{adopted}\r\n")));
     assert!(linked.contains("DESCRIPTION:with a note\r\n"), "{linked}");
 
     // Quiet.
@@ -2727,8 +2763,8 @@ async fn a_line_of_todo_md_lives_in_the_calendar_it_names() {
         uid_of(&dir, "TODO.md", "for work"),
         uid_of(&dir, "TODO.md", "for me"),
     );
-    assert_eq!(mock.resource_names("work"), vec![work.clone()]);
-    assert_eq!(mock.resource_names("inbox"), vec![mine.clone()]);
+    assert_eq!(mock.resource_names("work"), vec![named(&work)]);
+    assert_eq!(mock.resource_names("inbox"), vec![named(&mine)]);
     let todo = read(&dir, "TODO.md");
     // The calendar is written as its slug; the default one is not written at all.
     assert!(
@@ -2748,7 +2784,7 @@ async fn a_line_of_todo_md_lives_in_the_calendar_it_names() {
     let report = engine.reconcile().await.unwrap();
     assert_eq!((report.moves, report.registered), (1, 0));
     assert!(mock.resource_names("work").is_empty());
-    assert_eq!(mock.resource_names("family"), vec![work.clone()]);
+    assert_eq!(mock.resource_names("family"), vec![named(&work)]);
     let todo = read(&dir, "TODO.md");
     assert!(
         todo.contains(&format!("- [ ] for work {CALENDAR} family {ID} {work}\n")),
@@ -2766,7 +2802,7 @@ async fn a_line_of_todo_md_lives_in_the_calendar_it_names() {
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.moves, 1);
     assert!(mock.resource_names("family").is_empty());
-    let mut both = vec![work.clone(), mine.clone()];
+    let mut both = vec![named(&work), named(&mine)];
     both.sort();
     assert_eq!(mock.resource_names("inbox"), both);
     let todo = read(&dir, "TODO.md");
@@ -2896,6 +2932,7 @@ async fn a_calendar_with_a_note_of_its_own_keeps_its_tasks_in_that_note() {
 #[tokio::test]
 async fn the_calendar_of_a_line_is_settled_on_the_device_and_the_pass_writes_no_file() {
     let dir = vault_showing("\"work\"");
+    switch_vault(&dir);
     write_vault_file(
         &dir,
         "TODO.md",
@@ -2922,7 +2959,7 @@ async fn the_calendar_of_a_line_is_settled_on_the_device_and_the_pass_writes_no_
         (report.registered, report.normalized, report.pushes),
         (0, 0, 1)
     );
-    assert_eq!(mock.resource_names("work"), vec![registered]);
+    assert_eq!(mock.resource_names("work"), vec![named(&registered)]);
     assert_eq!(mtime(&dir, "TODO.md"), at);
 }
 
@@ -3012,7 +3049,7 @@ fn edit_logical(mock: &MockCaldav, list: &str, name: &str, edit: impl Fn(&str) -
             out.push_str("\r\n");
         }
     }
-    mock.seed_resource(list, name, &out);
+    mock.seed_resource(list, &named(name), &out);
 }
 
 /// Two more passes write nothing anywhere.
@@ -3198,7 +3235,7 @@ async fn two_names_of_one_calendar_do_not_push_and_delete_its_tasks_in_turns() {
         "Homelab/Networking.md",
         "homelab",
         &format!(
-            "- [ ] Update the firewall rules {ID} {UID}\n- [ ] Check the DNS records {ID} {UID2}\n"
+            "- [ ] Update the firewall rules {ID} {TOKEN}\n- [ ] Check the DNS records {ID} {TOKEN2}\n"
         ),
     );
     let mock = MockCaldav::new();
@@ -3224,7 +3261,7 @@ async fn two_names_of_one_calendar_do_not_push_and_delete_its_tasks_in_turns() {
         assert_eq!(mock.resource_names("homelab").len(), 2);
     }
     let note = read(&dir, "Homelab/Networking.md");
-    assert!(note.contains(UID) && note.contains(UID2), "{note}");
+    assert!(note.contains(TOKEN) && note.contains(TOKEN2), "{note}");
 }
 
 #[tokio::test]
@@ -3252,7 +3289,8 @@ async fn a_calendar_made_in_another_client_is_found_by_its_name() {
     // No empty twin at the list's own path, and the task is where its client made it.
     assert_eq!(mock.collection_names(), vec![PHONE_PATH, "inbox"]);
     assert_eq!(mock.resource_names(PHONE_PATH), vec![TASKS_ORG_NAME]);
-    assert!(body(&mock, PHONE_PATH, TASKS_ORG_NAME).contains(&format!("X-RESTASK-UID:{adopted}")));
+    assert!(body(&mock, PHONE_PATH, TASKS_ORG_NAME)
+        .contains(&format!("X-RESTASK-UID:restask-{adopted}")));
 
     // Quiet.
     let (counters, files) = (mock.counters(), snapshot(&dir));
@@ -3439,10 +3477,14 @@ async fn a_calendar_restask_created_itself_is_not_one_that_appeared() {
 
 // ── §7.6: the view a root note holds ─────────────────────────────────────────────────
 
-const UID3: &str = "restask-01jz0000000000000000000003";
-const UID4: &str = "restask-01jz0000000000000000000004";
-const UID5: &str = "restask-01jz0000000000000000000005";
-const UID6: &str = "restask-01jz0000000000000000000006";
+const UID3: &str = "restask-zz3";
+const UID4: &str = "restask-zz4";
+const UID5: &str = "restask-zz5";
+const UID6: &str = "restask-zz6";
+const TOKEN3: &str = "zz3";
+const TOKEN4: &str = "zz4";
+const TOKEN5: &str = "zz5";
+const TOKEN6: &str = "zz6";
 const ROOT: &str = "Homelab/Home Lab.md";
 const NET: &str = "Homelab/Networking.md";
 const HIGHEST: &str = "\u{1F53A}";
@@ -3468,32 +3510,34 @@ fn homelab(dir: &TempDir) {
         dir,
         ROOT,
         &format!(
-            "---\nrestask-list-root: homelab\n---\n# Notes\nprose\n# TODO\n- [ ] buy a rack {ID} {UID}\n- [ ] label the cables {LOW} {ID} {UID2}\n\n## Done\n"
+            "---\nrestask-list-root: homelab\n---\n# Notes\nprose\n# TODO\n- [ ] buy a rack {ID} {TOKEN}\n- [ ] label the cables {LOW} {ID} {TOKEN2}\n\n## Done\n"
         ),
     );
     write_vault_file(
         dir,
         NET,
         &format!(
-            "# Networking\n\n# TODO\n- [ ] update the firewall {HIGHEST} {ID} {UID3}\n- [ ] rotate the keys {ID} {UID4}\n"
+            "# Networking\n\n# TODO\n- [ ] update the firewall {HIGHEST} {ID} {TOKEN3}\n- [ ] rotate the keys {ID} {TOKEN4}\n"
         ),
     );
     write_vault_file(
         dir,
         "Homelab/Storage/Disks.md",
-        &format!("- [ ] replace the disk {HIGHEST} {ID} {UID5}\n"),
+        &format!("- [ ] replace the disk {HIGHEST} {ID} {TOKEN5}\n"),
     );
     write_vault_file(
         dir,
         "Projects.md",
-        &format!("---\nrestask-list: projects\n---\n# TODO\n- [ ] review {HIGHEST} {ID} {UID6}\n"),
+        &format!(
+            "---\nrestask-list: projects\n---\n# TODO\n- [ ] review {HIGHEST} {ID} {TOKEN6}\n"
+        ),
     );
 }
 
 /// The view of [`homelab`]'s root note once rendered.
 fn homelab_view() -> String {
     format!(
-        "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {UID2}\n\n## No Priority\n- [ ] buy a rack {ID} {UID}\n\n## Done\n"
+        "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {TOKEN3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {TOKEN2}\n\n## No Priority\n- [ ] buy a rack {ID} {TOKEN}\n\n## Done\n"
     )
 }
 
@@ -3525,7 +3569,7 @@ async fn a_root_note_shows_the_prioritized_tasks_of_its_folder() {
     assert_eq!(
         read(&dir, "TODO.md"),
         sealed(&format!(
-            "---\nrestask-list: inbox\n---\n# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] review {HIGHEST} [[Projects#TODO|Projects]] {ID} {UID6}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} [[Home Lab#TODO|Home Lab]] {ID} {UID2}\n\n## Done\n"
+            "---\nrestask-list: inbox\n---\n# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {TOKEN3}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n- [ ] review {HIGHEST} [[Projects#TODO|Projects]] {ID} {TOKEN6}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} [[Home Lab#TODO|Home Lab]] {ID} {TOKEN2}\n\n## Done\n"
         ))
     );
 
@@ -3552,9 +3596,10 @@ async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
     let engine = engine(&dir, &mock);
     engine.reconcile().await.unwrap();
 
-    let firewall =
-        format!("- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n");
-    let disk = format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n");
+    let firewall = format!(
+        "- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {TOKEN3}\n"
+    );
+    let disk = format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n");
     let note = read(&dir, ROOT);
     assert!(note.contains(&firewall) && note.contains(&disk), "{note}");
     let edited = note
@@ -3577,14 +3622,14 @@ async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
     let net = read(&dir, NET);
     assert!(
         net.contains(&format!(
-            "- [x] update the firewall {HIGHEST} \u{2705} {} {ID} {UID3}",
+            "- [x] update the firewall {HIGHEST} \u{2705} {} {ID} {TOKEN3}",
             today()
         )),
         "{net}"
     );
     assert_eq!(
         read(&dir, "Homelab/Storage/Disks.md"),
-        format!("- [ ] swap the disk {LOW} {ID} {UID5}\n")
+        format!("- [ ] swap the disk {LOW} {ID} {TOKEN5}\n")
     );
     let ordered = uid_of(&dir, ROOT, "order the cables");
     assert_eq!(
@@ -3592,7 +3637,7 @@ async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
         root_note(
             "# Notes\nprose\n",
             &format!(
-                "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] order the cables {HIGHEST} {ID} {ordered}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {UID2}\n- [ ] swap the disk {LOW} [[Disks|Disks]] {ID} {UID5}\n\n## No Priority\n- [ ] buy a rack {ID} {UID}\n\n## Done\n"
+                "# TODO\n\n## {HIGHEST} Highest Priority\n- [ ] order the cables {HIGHEST} {ID} {ordered}\n\n## {LOW} Low Priority\n- [ ] label the cables {LOW} {ID} {TOKEN2}\n- [ ] swap the disk {LOW} [[Disks|Disks]] {ID} {TOKEN5}\n\n## No Priority\n- [ ] buy a rack {ID} {TOKEN}\n\n## Done\n"
             ),
             ""
         )
@@ -3612,8 +3657,8 @@ async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
     // An own line moved under another section's heading takes that section's priority;
     // one ticked there is filed under the done heading.
     let note = read(&dir, ROOT);
-    let rack = format!("- [ ] buy a rack {ID} {UID}\n");
-    let label = format!("- [ ] label the cables {LOW} {ID} {UID2}\n");
+    let rack = format!("- [ ] buy a rack {ID} {TOKEN}\n");
+    let label = format!("- [ ] label the cables {LOW} {ID} {TOKEN2}\n");
     let moved = note
         .replace(&rack, "")
         .replace(&label, &format!("{}{rack}", label.replace("[ ]", "[x]")));
@@ -3621,12 +3666,12 @@ async fn an_edit_in_the_view_of_a_root_note_reaches_the_task() {
     engine.reconcile().await.unwrap();
     let note = read(&dir, ROOT);
     assert!(
-        note.contains(&format!("- [ ] buy a rack {LOW} {ID} {UID}\n")),
+        note.contains(&format!("- [ ] buy a rack {LOW} {ID} {TOKEN}\n")),
         "{note}"
     );
     assert!(
         note.ends_with(&format!(
-            "## Done\n- [x] label the cables {LOW} \u{2705} {} {ID} {UID2}\n",
+            "## Done\n- [x] label the cables {LOW} \u{2705} {} {ID} {TOKEN2}\n",
             today()
         )),
         "{note}"
@@ -3652,8 +3697,9 @@ async fn deleting_a_mirror_line_in_a_root_note_deletes_the_task_and_absence_does
     engine.reconcile().await.unwrap();
     let note = read(&dir, ROOT);
     let net = read(&dir, NET);
-    let firewall =
-        format!("- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}\n");
+    let firewall = format!(
+        "- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {TOKEN3}\n"
+    );
     let gone = note.replace(&firewall, "");
     assert_ne!(gone, note);
 
@@ -3680,7 +3726,7 @@ async fn deleting_a_mirror_line_in_a_root_note_deletes_the_task_and_absence_does
     assert_eq!(report.failed, 0);
     assert_eq!(
         read(&dir, NET),
-        format!("# Networking\n\n# TODO\n- [ ] rotate the keys {ID} {UID4}\n")
+        format!("# Networking\n\n# TODO\n- [ ] rotate the keys {ID} {TOKEN4}\n")
     );
     assert!(
         mock.resource("homelab", UID3).is_none(),
@@ -3729,7 +3775,7 @@ async fn the_lines_of_a_view_that_lost_its_heading_are_not_tasks() {
         );
         assert_eq!(read(&dir, ROOT), unheaded, "the note is the user's");
         assert_eq!(mock.resource_names("homelab"), names);
-        assert!(read(&dir, NET).contains(&format!("{ID} {UID3}")));
+        assert!(read(&dir, NET).contains(&format!("{ID} {TOKEN3}")));
 
         write_vault_file(&dir, ROOT, &rendered);
         engine.reconcile().await.unwrap();
@@ -3761,13 +3807,13 @@ async fn the_lines_of_a_view_that_lost_its_heading_are_not_tasks() {
 async fn a_root_note_without_a_todo_heading_holds_no_view() {
     let dir = temp_vault();
     let note = format!(
-        "---\nrestask-list-root: homelab\n---\n# To Do\n- [ ] parent {HIGHEST} {ID} {UID}\n    - [ ] child {ID} {UID2}\nprose\n"
+        "---\nrestask-list-root: homelab\n---\n# To Do\n- [ ] parent {HIGHEST} {ID} {TOKEN}\n    - [ ] child {ID} {TOKEN2}\nprose\n"
     );
     write_vault_file(&dir, ROOT, &note);
     write_vault_file(
         &dir,
         NET,
-        &format!("- [ ] update the firewall {HIGHEST} {ID} {UID3}\n"),
+        &format!("- [ ] update the firewall {HIGHEST} {ID} {TOKEN3}\n"),
     );
     let mock = MockCaldav::new();
     engine(&dir, &mock).reconcile().await.unwrap();
@@ -3782,6 +3828,7 @@ async fn a_root_note_without_a_todo_heading_holds_no_view() {
 #[tokio::test]
 async fn settling_renders_the_views_of_root_notes_without_a_server() {
     let dir = temp_vault();
+    switch_vault(&dir);
     homelab(&dir);
     write_vault_file(
         &dir,
@@ -3796,14 +3843,14 @@ async fn settling_renders_the_views_of_root_notes_without_a_server() {
     let below = read(&dir, "Homelab/Storage/Storage.md");
     assert!(
         below.ends_with(&format!(
-            "---\n## Todo\n\n### {HIGHEST} Highest Priority\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] buy disks {HIGHEST} {ID} {bought}\n\n### Done\n"
+            "---\n## Todo\n\n### {HIGHEST} Highest Priority\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n- [ ] buy disks {HIGHEST} {ID} {bought}\n\n### Done\n"
         )),
         "{below}"
     );
     let above = read(&dir, ROOT);
     assert!(
         above.contains(&format!(
-            "- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n- [ ] buy disks {HIGHEST} [[Storage#Todo|Storage]] {ID} {bought}\n"
+            "- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n- [ ] buy disks {HIGHEST} [[Storage#Todo|Storage]] {ID} {bought}\n"
         )),
         "{above}"
     );
@@ -3835,7 +3882,7 @@ async fn settling_renders_the_views_of_root_notes_without_a_server() {
     // The note below the lower root is that root's.
     assert_eq!(
         mock.resource_names("storage"),
-        vec![UID5.to_string(), bought]
+        vec![named(&bought), UID5.to_string()]
     );
 }
 
@@ -3862,7 +3909,7 @@ async fn server_changes_show_in_the_view_of_a_root_note() {
     let note = read(&dir, ROOT);
     assert!(
         note.contains(&format!(
-            "## {HIGHEST} Highest Priority\n- [ ] order a UPS {HIGHEST} {ID} {ups}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}\n\n"
+            "## {HIGHEST} Highest Priority\n- [ ] order a UPS {HIGHEST} {ID} {ups}\n- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}\n\n"
         )),
         "{note}"
     );
@@ -3885,7 +3932,7 @@ async fn a_task_ticked_above_the_view_of_a_root_note_is_kept_under_its_done_head
     let dir = temp_vault();
     let note = |boxed: &str| {
         format!(
-            "---\nrestask-list-root: homelab\n---\n# Notes\n- [{boxed}] rack the switch {HIGHEST} {ID} {UID}\n    - [ ] find the screws {ID} {UID2}\n# TODO\n\n## Done\n"
+            "---\nrestask-list-root: homelab\n---\n# Notes\n- [{boxed}] rack the switch {HIGHEST} {ID} {TOKEN}\n    - [ ] find the screws {ID} {TOKEN2}\n# TODO\n\n## Done\n"
         )
     };
     write_vault_file(&dir, ROOT, &note(" "));
@@ -3896,7 +3943,7 @@ async fn a_task_ticked_above_the_view_of_a_root_note_is_kept_under_its_done_head
     assert_eq!(
         read(&dir, ROOT),
         root_note(
-            &format!("# Notes\n- [ ] rack the switch {HIGHEST} {ID} {UID}\n    - [ ] find the screws {ID} {UID2}\n"),
+            &format!("# Notes\n- [ ] rack the switch {HIGHEST} {ID} {TOKEN}\n    - [ ] find the screws {ID} {TOKEN2}\n"),
             "# TODO\n\n## Done\n",
             ""
         )
@@ -3911,13 +3958,13 @@ async fn a_task_ticked_above_the_view_of_a_root_note_is_kept_under_its_done_head
     let report = engine.reconcile().await.unwrap();
     assert_eq!(report.failed, 0);
     let done = format!(
-        "- [x] rack the switch {HIGHEST} \u{2705} {} {ID} {UID}\n",
+        "- [x] rack the switch {HIGHEST} \u{2705} {} {ID} {TOKEN}\n",
         today()
     );
     assert_eq!(
         read(&dir, ROOT),
         root_note(
-            &format!("# Notes\n    - [ ] find the screws {ID} {UID2}\n"),
+            &format!("# Notes\n    - [ ] find the screws {ID} {TOKEN2}\n"),
             &format!("# TODO\n\n## Done\n{done}"),
             ""
         )
@@ -3956,7 +4003,7 @@ async fn a_mirror_line_given_another_uid_is_not_a_deleted_task() {
     let reassign = |text: String| {
         text.replace(
             &format!(
-                "- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {UID3}"
+                "- [ ] update the firewall {HIGHEST} [[Networking#TODO|Networking]] {ID} {TOKEN3}"
             ),
             &format!(
                 "- [ ] update the firewall [[Networking#TODO|Networking]] {HIGHEST} {ID} {}",
@@ -3964,7 +4011,7 @@ async fn a_mirror_line_given_another_uid_is_not_a_deleted_task() {
             ),
         )
         .replace(
-            &format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {UID5}"),
+            &format!("- [ ] replace the disk {HIGHEST} [[Disks|Disks]] {ID} {TOKEN5}"),
             &format!(
                 "- [ ] replace the disk [[Disks|Disks]] {HIGHEST} {ID} {}",
                 fresh[1]
@@ -3988,8 +4035,521 @@ async fn a_mirror_line_given_another_uid_is_not_a_deleted_task() {
     for view in [ROOT, "TODO.md"] {
         let text = read(&dir, view);
         assert!(
-            text.contains(&format!("{ID} {UID3}")) && text.contains(&format!("{ID} {UID5}")),
+            text.contains(&format!("{ID} {TOKEN3}")) && text.contains(&format!("{ID} {TOKEN5}")),
             "{text}"
         );
     }
+}
+
+// ── counted UIDs: tags of the devices, and the vault of before them (§3.1, §11.7) ─────
+
+const LONG1: &str = "restask-01jz0000000000000000000001";
+const LONG2: &str = "restask-01jz0000000000000000000002";
+const LONG3: &str = "restask-01jz0000000000000000000003";
+
+/// Leaves the state and the server as an engine of before the counters left them, for
+/// the notes that are in the vault: every task settled under the long UID its line
+/// carries — a resource named after it, a base snapshot, an index entry — and TODO.md
+/// rendered and remembered.
+fn settle_as_before_the_counters(dir: &TempDir, mock: &MockCaldav) {
+    let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+    let state = dir.path().join(".restask");
+    let scan = restask::vault::scan(
+        dir.path(),
+        &cfg,
+        clock().as_ref(),
+        &Index::default(),
+        restask::vault::ScanMode::ReadOnly,
+    )
+    .unwrap();
+    let now = Utc::now();
+    let mut index = Index::default();
+    for task in scan.local.values() {
+        let mut task = task.clone();
+        task.created = task.uid.created_on();
+        let list = task.list.as_str();
+        mock.seed_collection(list, list);
+        mock.seed_resource(
+            list,
+            task.uid.as_str(),
+            &restask::vtodo::to_vcalendar(&task, now),
+        );
+        restask::store::cache_write(&state, &task, now).unwrap();
+        index.upsert(restask::store::IndexEntry {
+            thumbprint: task.thumbprint(),
+            uid: task.uid.clone(),
+            list: task.list.clone(),
+            source_path: task.source.path.clone(),
+            caldav_etag: Some(mock.resource(list, task.uid.as_str()).unwrap().etag),
+            seen_at: now,
+            defer_count: 0,
+        });
+    }
+    index.save(&state).unwrap();
+    let rendered = restask::markdown::render(&scan.local, &cfg);
+    write_vault_file(dir, "TODO.md", &rendered);
+    std::fs::write(state.join("todo.rendered.md"), &rendered).unwrap();
+}
+
+/// A vault of before the counters: a parent and its child in a note, a task of TODO.md's
+/// own, all settled with the server.
+fn vault_of_before() -> (TempDir, MockCaldav) {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] parent \u{1F53A} {ID} {LONG1}\n    - [ ] child {ID} {LONG2}\n"),
+    );
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!("{todo}- [ ] captured {ID} {LONG3}\n"),
+    );
+    let mock = MockCaldav::new();
+    settle_as_before_the_counters(&dir, &mock);
+    (dir, mock)
+}
+
+/// The tag of the device that gave the line containing `text` its UID.
+fn tag_of(dir: &TempDir, path: &str, text: &str) -> String {
+    let token = uid_of(dir, path, text);
+    token
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .to_string()
+}
+
+/// §11.7: the sync node gives every task of the vault a counted UID, once. The lines get
+/// short; on the server nothing is created and nothing deleted — each resource keeps
+/// its name and its `UID` and is told which task it is; and what vault and server had
+/// agreed on is still what they agree on.
+#[tokio::test]
+async fn a_vault_of_before_the_counters_is_renumbered_and_the_server_keeps_its_resources() {
+    let (dir, mock) = vault_of_before();
+    assert!(read(&dir, "TODO.md").contains(&format!(
+        "- [ ] parent \u{1F53A} [[home#Home|home]] {ID} {LONG1}\n"
+    )));
+    let (puts, deletes, _) = mock.counters();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+
+    // The lines, numbered in the order the tasks were created.
+    let tag = tag_of(&dir, "notes/home.md", "parent");
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.ends_with(&format!(
+            "- [ ] parent \u{1F53A} {ID} {tag}1\n    - [ ] child {ID} {tag}2\n"
+        )),
+        "{note}"
+    );
+    let todo = read(&dir, "TODO.md");
+    assert!(
+        todo.contains(&format!(
+            "- [ ] parent \u{1F53A} [[home#Home|home]] {ID} {tag}1\n"
+        )) && todo.contains(&format!("- [ ] captured {ID} {tag}3\n")),
+        "{todo}"
+    );
+    assert_eq!(todo, resealed(&todo));
+    for file in ["notes/home.md", "TODO.md", ".restask/todo.rendered.md"] {
+        assert!(!read(&dir, file).contains("restask-01jz"), "{file}");
+    }
+
+    // The server: the same three resources, written once each to carry the link.
+    assert_eq!(
+        (report.pushes, report.deletes, report.inserts, report.failed),
+        (3, 0, 0, 0)
+    );
+    assert_eq!(mock.counters().0 - puts, 3);
+    assert_eq!(mock.counters().1, deletes);
+    assert_eq!(mock.resource_names("home"), vec![LONG1, LONG2]);
+    assert_eq!(mock.resource_names("inbox"), vec![LONG3]);
+    let parent = body(&mock, "home", LONG1);
+    assert!(parent.contains(&format!("UID:{LONG1}\r\n")), "{parent}");
+    assert!(parent.contains(&format!("X-RESTASK-UID:restask-{tag}1\r\n")));
+    assert!(parent.contains(&format!("X-RESTASK-OF;VALUE=TEXT:{LONG1}\r\n")));
+    // The child still names its parent the way the server knows it.
+    let child = body(&mock, "home", LONG2);
+    assert!(
+        child.contains(&format!("RELATED-TO;RELTYPE=PARENT:{LONG1}\r\n")),
+        "{child}"
+    );
+    assert!(child.contains(&format!("X-RESTASK-UID:restask-{tag}2\r\n")));
+
+    // The state moved with the lines.
+    let state = dir.path().join(".restask");
+    let index = Index::load(&state).unwrap();
+    let known: Vec<String> = index
+        .entries
+        .keys()
+        .map(|uid| uid.token().to_string())
+        .collect();
+    assert_eq!(
+        known,
+        vec![format!("{tag}1"), format!("{tag}2"), format!("{tag}3")]
+    );
+    assert!(index
+        .entries
+        .values()
+        .all(|entry| entry.caldav_etag.is_some()));
+    assert!(!state.join(format!("tasks/{LONG1}.ics")).exists());
+    assert!(state.join(format!("tasks/restask-{tag}1.ics")).exists());
+    assert!(Tombstones::load(&state).unwrap().uids().next().is_none());
+
+    // Done once: the passes that follow write nothing anywhere.
+    assert_quiet(&dir, &engine, &mock).await;
+
+    // What they had agreed on is still the base: a change another client makes is a
+    // change, not a conflict with a file that was just rewritten.
+    edit_remote(&mock, "home", LONG1, Duration::minutes(5), |line| {
+        if line.starts_with("PRIORITY") {
+            vec!["PRIORITY:5".to_string()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    engine.reconcile().await.unwrap();
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!("- [ ] parent \u{1F53C} {ID} {tag}1\n")),
+        "{note}"
+    );
+
+    // A change in the vault reaches the resource under its old name …
+    home_note(
+        &dir,
+        &format!("- [ ] parent, reworded \u{1F53C} {ID} {tag}1\n    - [ ] child {ID} {tag}2\n"),
+    );
+    engine.reconcile().await.unwrap();
+    assert!(body(&mock, "home", LONG1).contains("SUMMARY:parent\\, reworded\r\n"));
+    // … and a line that goes takes it along.
+    home_note(
+        &dir,
+        &format!("- [ ] parent, reworded \u{1F53C} {ID} {tag}1\n"),
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(report.deletes, 1);
+    assert_eq!(mock.resource_names("home"), vec![LONG1]);
+    assert!(Tombstones::load(&state)
+        .unwrap()
+        .contains(&uid(&format!("{tag}2"))));
+}
+
+/// §11.7: what the user changed in a view right before its lines were renumbered is
+/// carried to the note like any other edit there.
+#[tokio::test]
+async fn an_edit_made_in_the_view_is_carried_by_the_pass_that_renumbers_it() {
+    let (dir, mock) = vault_of_before();
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &todo.replace("- [ ] parent", "- [x] parent"),
+    );
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+
+    let tag = tag_of(&dir, "notes/home.md", "parent");
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!(
+            "Done\n- [x] parent \u{1F53A} \u{2705} {} {ID} {tag}1\n",
+            today()
+        )),
+        "{note}"
+    );
+    assert!(note.contains(&format!("child {ID} {tag}2\n")), "{note}");
+    assert!(body(&mock, "home", LONG1).contains("STATUS:COMPLETED"));
+    assert_eq!(mock.resource_names("home"), vec![LONG1, LONG2]);
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+/// §11.7: a task another client created, adopted before the counters under a long UID
+/// derived from its `UID`: its line is renumbered like any other and its resource —
+/// still that client's — gets the new link.
+#[tokio::test]
+async fn a_task_adopted_before_the_counters_is_renumbered_where_it_is() {
+    let dir = temp_vault();
+    let derived = TaskUid::derived(
+        TASKS_ORG_NAME,
+        Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 21, 8, 12, 33).unwrap()),
+    );
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!("{todo}- [ ] Made in Tasks.org \u{1F53A} {ID} {derived}\n"),
+    );
+    let mock = MockCaldav::new();
+    mock.seed_collection("inbox", "Inbox");
+    mock.seed_resource(
+        "inbox",
+        TASKS_ORG_NAME,
+        &TASKS_ORG_BODY.replace(
+            "END:VTODO",
+            &format!("X-RESTASK-SOURCE;VALUE=TEXT:TODO.md\r\nX-RESTASK-UID:{derived}\r\nEND:VTODO"),
+        ),
+    );
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+
+    assert_eq!(
+        (
+            report.adoptions,
+            report.inserts,
+            report.deletes,
+            report.pushes
+        ),
+        (0, 0, 0, 1)
+    );
+    let adopted = uid_of(&dir, "TODO.md", "Made in Tasks.org");
+    assert!(!uid(&adopted).is_long(), "{adopted}");
+    assert_eq!(
+        read(&dir, "TODO.md").matches("Made in Tasks.org").count(),
+        1
+    );
+    assert_eq!(mock.resource_names("inbox"), vec![TASKS_ORG_NAME]);
+    let linked = body(&mock, "inbox", TASKS_ORG_NAME);
+    assert!(linked.contains("UID:5417861935824551742\r\n"), "{linked}");
+    assert!(
+        linked.contains(&format!("X-RESTASK-UID:restask-{adopted}\r\n")),
+        "{linked}"
+    );
+    assert!(linked.contains("X-RESTASK-OF;VALUE=TEXT:5417861935824551742\r\n"));
+    assert!(linked.contains("DESCRIPTION:with a note\r\n"));
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+/// §11.7: the names are recorded before a line is touched, so a pass that died half way
+/// is finished under the UIDs it had chosen.
+#[tokio::test]
+async fn a_renumbering_that_died_is_finished_under_the_same_uids() {
+    let (dir, mock) = vault_of_before();
+    // The pass recorded one name, rewrote the note half, and died.
+    std::fs::write(
+        dir.path().join(".restask/wires.json"),
+        format!("{{\n  \"{LONG1}\": \"restask-q7\"\n}}\n"),
+    )
+    .unwrap();
+    home_note(
+        &dir,
+        &format!("- [ ] parent \u{1F53A} {ID} q7\n    - [ ] child {ID} {LONG2}\n"),
+    );
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+
+    assert_eq!((report.deletes, report.inserts, report.failed), (0, 0, 0));
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!("- [ ] parent \u{1F53A} {ID} q7\n")),
+        "{note}"
+    );
+    assert!(!note.contains("restask-01jz"), "{note}");
+    assert!(read(&dir, "TODO.md").contains(&format!("[[home#Home|home]] {ID} q7\n")));
+    assert_eq!(mock.resource_names("home"), vec![LONG1, LONG2]);
+    assert!(body(&mock, "home", LONG1).contains("X-RESTASK-UID:restask-q7\r\n"));
+    let index = Index::load(&dir.path().join(".restask")).unwrap();
+    assert!(index.get(&uid("q7")).is_some() && index.get(&uid(LONG1)).is_none());
+    assert_quiet(&dir, &engine, &mock).await;
+}
+
+/// §1.1, §11.7: renumbering is the sync node's. A machine that only edits leaves the
+/// long UIDs where they are — and registers what is typed on it under its own tag.
+#[tokio::test]
+async fn a_machine_that_is_not_the_sync_node_renumbers_nothing() {
+    let (dir, mock) = vault_of_before();
+    home_note(
+        &dir,
+        &format!(
+            "- [ ] parent \u{1F53A} {ID} {LONG1}\n    - [ ] child {ID} {LONG2}\n- [ ] typed here\n"
+        ),
+    );
+    let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+    let editing = MachineConfig {
+        node: Some(restask::config::NodeSection::default()),
+        ..MachineConfig::default()
+    };
+    let counters = mock.counters();
+    Engine::new(dir.path(), cfg, editing, mock.clone(), clock())
+        .settle()
+        .await
+        .unwrap();
+
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.contains(&format!("- [ ] parent \u{1F53A} {ID} {LONG1}\n")),
+        "{note}"
+    );
+    assert!(note.contains(&format!("child {ID} {LONG2}\n")), "{note}");
+    // The vault's sync node has not switched it (§9.4): what is typed here gets a long
+    // UID too — the node may be of a version that reads no other — and no claim is made.
+    let typed = uid_of(&dir, "notes/home.md", "typed here");
+    assert!(uid(&typed).is_long(), "{typed}");
+    assert!(!dir.path().join(".restask/devices").exists());
+    assert!(!dir.path().join(".restask/wires.json").exists());
+    assert_eq!(mock.counters(), counters, "no request");
+}
+
+/// §9.4: a vault is switched to counted UIDs by the pass that reaches the server — its
+/// sync node's — and by no other. Until then every machine mints long UIDs, which a sync
+/// node of any version reads; from then on every machine mints counted ones.
+#[tokio::test]
+async fn a_vault_is_switched_by_the_pass_that_reaches_the_server() {
+    let dir = temp_vault();
+    home_note(&dir, "- [ ] typed while the server was away\n");
+    let editing = || {
+        let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+        let machine = MachineConfig {
+            node: Some(restask::config::NodeSection::default()),
+            ..MachineConfig::default()
+        };
+        Engine::new(dir.path(), cfg, machine, Offline, clock())
+    };
+    let devices = dir.path().join(".restask/devices");
+
+    // The node cannot reach the server: its pass does the local work, and switches nothing.
+    assert!(engine_with(&dir, Offline, true).reconcile().await.is_err());
+    let first = uid_of(&dir, "notes/home.md", "typed while the server was away");
+    assert!(uid(&first).is_long(), "{first}");
+    assert!(!devices.exists());
+    // Neither does a machine that only edits.
+    home_note(
+        &dir,
+        &format!("- [ ] typed while the server was away {ID} {first}\n- [ ] typed on the laptop\n"),
+    );
+    let laptop = editing();
+    laptop.settle().await.unwrap();
+    assert!(uid(&uid_of(&dir, "notes/home.md", "typed on the laptop")).is_long());
+    assert!(!devices.exists());
+
+    // The node's pass with the server's answer: the vault is switched, its tasks renumbered.
+    let mock = MockCaldav::new();
+    let node = engine(&dir, &mock);
+    let report = node.reconcile().await.unwrap();
+    assert_eq!((report.pushes, report.failed), (2, 0));
+    let tag = tag_of(&dir, "notes/home.md", "typed while the server was away");
+    let note = read(&dir, "notes/home.md");
+    assert!(
+        note.ends_with(&format!(
+            "- [ ] typed while the server was away {ID} {tag}1\n- [ ] typed on the laptop {ID} {tag}2\n"
+        )),
+        "{note}"
+    );
+    assert_eq!(std::fs::read_dir(&devices).unwrap().count(), 1);
+    assert!(devices.join(&tag).is_file());
+    // Tasks the server has never seen under a long UID are created under the counted one.
+    assert_eq!(
+        mock.resource_names("home"),
+        vec![format!("restask-{tag}1"), format!("restask-{tag}2")]
+    );
+    assert_quiet(&dir, &node, &mock).await;
+
+    // From now on the laptop mints counted UIDs, under a tag of its own.
+    home_note(
+        &dir,
+        &format!(
+            "{}- [ ] typed on the laptop later\n",
+            note.split("# Home\n\n").nth(1).unwrap()
+        ),
+    );
+    laptop.settle().await.unwrap();
+    let later = uid_of(&dir, "notes/home.md", "typed on the laptop later");
+    let laptop_tag = tag_of(&dir, "notes/home.md", "typed on the laptop later");
+    assert_ne!(laptop_tag, tag);
+    assert_eq!(later, format!("{laptop_tag}1"));
+    assert_eq!(std::fs::read_dir(&devices).unwrap().count(), 2);
+}
+
+/// §3.1, §9.4: every machine mints under a tag of its own, so the lines two of them
+/// register without having seen each other are never one task.
+#[tokio::test]
+async fn two_machines_register_lines_under_tags_of_their_own() {
+    let dir = temp_vault();
+    home_note(&dir, "- [ ] typed on the node\n");
+    let mock = MockCaldav::new();
+    let node = engine(&dir, &mock);
+    node.reconcile().await.unwrap();
+    let on_node = uid_of(&dir, "notes/home.md", "typed on the node");
+
+    let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+    let editing = MachineConfig {
+        node: Some(restask::config::NodeSection::default()),
+        ..MachineConfig::default()
+    };
+    let laptop = Engine::new(dir.path(), cfg, editing, mock.clone(), clock());
+    home_note(
+        &dir,
+        &format!("- [ ] typed on the node {ID} {on_node}\n- [ ] typed on the laptop\n"),
+    );
+    laptop.settle().await.unwrap();
+    let on_laptop = uid_of(&dir, "notes/home.md", "typed on the laptop");
+
+    let (node_tag, laptop_tag) = (
+        tag_of(&dir, "notes/home.md", "typed on the node"),
+        tag_of(&dir, "notes/home.md", "typed on the laptop"),
+    );
+    assert_ne!(node_tag, laptop_tag);
+    assert_eq!(
+        (on_node, on_laptop),
+        (format!("{node_tag}1"), format!("{laptop_tag}1"))
+    );
+    // Each claim is in the vault, where the other machine sees it.
+    for tag in [&node_tag, &laptop_tag] {
+        assert!(dir.path().join(".restask/devices").join(tag).is_file());
+    }
+    // The node takes the laptop's line as it is.
+    let report = node.reconcile().await.unwrap();
+    assert_eq!(
+        (report.registered, report.normalized, report.pushes),
+        (0, 0, 1)
+    );
+}
+
+/// §3.1: a number is used once. A line that was deleted before anyone else saw it does
+/// not give its UID to the next one — in this run of the machine or in the next.
+#[tokio::test]
+async fn a_uid_is_not_handed_out_again_after_its_line_is_gone() {
+    let dir = temp_vault();
+    switch_vault(&dir);
+    let home = tempfile::tempdir().unwrap();
+    let cfg = || VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+    let machine = || MachineConfig {
+        node: Some(restask::config::NodeSection::default()),
+        device_file: Some(home.path().join("device")),
+        ..MachineConfig::default()
+    };
+    home_note(&dir, "- [ ] first\n");
+    Engine::new(dir.path(), cfg(), machine(), Offline, clock())
+        .settle()
+        .await
+        .unwrap();
+    let first = uid_of(&dir, "notes/home.md", "first");
+    let tag = tag_of(&dir, "notes/home.md", "first");
+    assert_eq!(first, format!("{tag}1"));
+
+    // The line goes, another is typed; the machine was restarted in between.
+    home_note(&dir, "- [ ] second\n");
+    Engine::new(dir.path(), cfg(), machine(), Offline, clock())
+        .settle()
+        .await
+        .unwrap();
+    assert_eq!(uid_of(&dir, "notes/home.md", "second"), format!("{tag}2"));
+}
+
+/// §3.1: a line that carries the UID of another device — the plugin registered it on a
+/// phone — is that task, and the numbers of this machine go their own way.
+#[tokio::test]
+async fn a_line_registered_on_another_device_keeps_its_uid() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] from the phone {ID} zz7\n- [ ] typed in an editor\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!((report.registered, report.pushes), (1, 2));
+    assert_eq!(uid_of(&dir, "notes/home.md", "from the phone"), "zz7");
+    let typed = uid_of(&dir, "notes/home.md", "typed in an editor");
+    assert_eq!(uid(&typed).minted_by().map(|(_, number)| number), Some(1));
+    assert!(mock.resource("home", "restask-zz7").is_some());
+    assert_quiet(&dir, &engine, &mock).await;
 }

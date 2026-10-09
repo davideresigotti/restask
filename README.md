@@ -39,7 +39,7 @@ The symbols for priority, dates and other metadata are inspired by [Tasks](https
 | 📁 | Calendar the task belongs to (type `calendar` in the suggestions). Without it, the task goes to the default calendar | `📁 work` |
 | ➕ | Creation date. Optional: type a bare `➕` (`created` in Obsidian) and restask fills in the date | `➕ 2026-09-17` |
 | ✅ | Completion date, added when you check the task off | `✅ 2026-09-19` |
-| 🆔 | The task's unique ID. Added automatically, so leave it alone (the plugin and the Neovim integration hide it) | `🆔 restask-01jz…` |
+| 🆔 | The task's unique ID. Added automatically, so leave it alone (the plugin and the Neovim integration hide it) | `🆔 a42` |
 
 # Task Structure & Workflow
 

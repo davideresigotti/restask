@@ -36,6 +36,27 @@ for _, line in ipairs({
 	eq(guard.token(line), nil, line)
 end
 
+-- §3.1: a counted UID — a device tag and a number, as a whole word — is hidden the same.
+eq(shown("- [ ] Buy milk 🔺 📅 2026-10-05 🆔 a42"), "- [ ] Buy milk 🔺 📅 2026-10-05", "counted token at the end")
+eq(shown("\t- [x] done ✅ 2026-10-01 🆔 kq7 tail"), "\t- [x] done ✅ 2026-10-01 tail", "counted token, text behind")
+eq(shown("- [ ] x 🆔 abcd123456789012345"), "- [ ] x", "four letters, fifteen digits")
+eq(shown("- [ ] x 🆔 a42b 🆔 a42"), "- [ ] x 🆔 a42b", "what is no token is passed over")
+for _, line in ipairs({
+	"- [ ] x 🆔 a42b",
+	"- [ ] x 🆔 a42_1",
+	"- [ ] x 🆔 a042",
+	"- [ ] x 🆔 a0",
+	"- [ ] x 🆔 abcde1",
+	"- [ ] x 🆔 A42",
+	"- [ ] x 🆔 42",
+	"- [ ] x 🆔 restask-a42",
+	"- [ ] x 🆔a42",
+	"- [ ] x 🆔 a1234567890123456",
+	"prose 🆔 a42",
+}) do
+	eq(guard.token(line), nil, line)
+end
+
 -- Edits: `old` → `new` is what the editor did, `want` what the buffer should hold
 -- (with the cursor); nil means the edit stands. Edits that keep the number of lines
 -- never give a token up.

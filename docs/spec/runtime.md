@@ -281,7 +281,7 @@ set up, or to finish a setup whose node step failed: `prepare_node`, `PROPFIND`,
 | `restask daemon [--once]` | §13.1; the sync node only | required |
 | `restask sync` | one pass; prints the report; the sync node only | required |
 | `restask add "<text>" [--priority P] [--due D] [--repeat "every …"]` | new inbox task, then a pass — on an editing machine, then the local work (`settle`) | optional |
-| `restask done \| undone (--uid ID \| --file F --line N)` | complete / reopen in the source file, then a pass — on an editing machine, then the local work | optional |
+| `restask done \| undone (--uid ID \| --file F --line N)` (`ID` as the line spells it, `a42`, or in full) | complete / reopen in the source file, then a pass — on an editing machine, then the local work | optional |
 | `restask settle [--file F]` | the local work of a pass and nothing else: phase 1 of §11.1 and the render (`Engine::settle`). What editor integrations run on save (§16) | never contacted |
 | `restask status [--json]` | active per list / priority, done today, pending sync, last sync | none |
 | `restask lists` | routed lists: slug, active count, home note (TODO.md for the calendars it shows or one of its lines names, §7.5), collection URL | none |

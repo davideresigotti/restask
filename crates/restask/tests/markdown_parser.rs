@@ -524,3 +524,77 @@ fn a_calendar_emoji_without_a_name_is_text() {
     assert_eq!(t.draft.list.unwrap().as_str(), "work");
     assert_eq!(t.draft.text, "a , then more");
 }
+
+// ---- counted UIDs (§3.1): the token a line carries is the tag and the number ----
+
+#[test]
+fn a_counted_uid_token_is_read_as_the_uid_it_spells() {
+    let t = parse("- [ ] Buy milk 🔺 🆔 a42");
+    assert_eq!(t.draft.uid, Some(TaskUid::parse("restask-a42").unwrap()));
+    assert_eq!(t.draft.text, "Buy milk");
+    assert_eq!(t.draft.priority, Some(Priority::Highest));
+    // Up to four letters, any number without a leading zero; tabs as blanks.
+    for (line, uid) in [
+        ("- [ ] x 🆔 z1", "restask-z1"),
+        (
+            "- [ ] x 🆔\tabcd123456789012345",
+            "restask-abcd123456789012345",
+        ),
+        ("- [ ] x 🆔 a42 trailing words", "restask-a42"),
+    ] {
+        assert_eq!(
+            parse(line).draft.uid,
+            Some(TaskUid::parse(uid).unwrap()),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        parse("- [ ] x 🆔 a42 trailing words").draft.text,
+        "x trailing words"
+    );
+}
+
+#[test]
+fn a_token_is_a_whole_word_or_no_uid_at_all() {
+    // Not a tag and a number, or the number runs into something else: the line has no
+    // UID, and the text keeps what was typed.
+    for line in [
+        "- [ ] x 🆔 a42b",
+        "- [ ] x 🆔 a42_1",
+        "- [ ] x 🆔 a042",
+        "- [ ] x 🆔 a0",
+        "- [ ] x 🆔 abcde1",
+        "- [ ] x 🆔 A42",
+        "- [ ] x 🆔 42",
+        "- [ ] x 🆔 restask-a42",
+        "- [ ] x 🆔a42",
+    ] {
+        let t = parse(line);
+        assert_eq!(t.draft.uid, None, "{line}");
+        assert_eq!(t.draft.text, line.strip_prefix("- [ ] ").unwrap(), "{line}");
+    }
+    // A long UID is still read in full, and only in full.
+    assert_eq!(
+        parse(&format!("- [ ] x 🆔 {UID}")).draft.uid,
+        Some(TaskUid::parse(UID).unwrap())
+    );
+}
+
+#[test]
+fn uid_tokens_are_found_by_the_whole_token() {
+    use restask::markdown::parser::uid_tokens;
+    let text = "- [ ] one 🆔 a4\n- [ ] two 🆔 a42\nprose with a4 in it\n";
+    let a4 = TaskUid::parse("restask-a4").unwrap();
+    let a42 = TaskUid::parse("restask-a42").unwrap();
+    let found = uid_tokens(text, &a4);
+    assert_eq!(
+        found.len(),
+        1,
+        "`a4` is not found in `a42`, nor in the prose"
+    );
+    assert_eq!(&text[found[0].clone()], "🆔 a4");
+    assert_eq!(uid_tokens(text, &a42).len(), 1);
+    assert!(uid_tokens(text, &TaskUid::parse("restask-a421").unwrap()).is_empty());
+    let long = TaskUid::parse(UID).unwrap();
+    assert_eq!(uid_tokens(&format!("- [ ] x 🆔 {UID}\n"), &long).len(), 1);
+}

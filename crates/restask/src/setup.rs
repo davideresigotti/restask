@@ -990,6 +990,8 @@ fn machine_config(args: &SetupArgs) -> MachineConfig {
         url: Some(args.url.clone()),
         username: Some(args.username.clone()),
     };
+    // The identity this machine mints UIDs under lies beside the config (§9.4).
+    let device_file = Some(crate::store::device_file(&args.config_path));
     match &args.daemon {
         DaemonHost::Here => MachineConfig {
             vault,
@@ -1001,16 +1003,19 @@ fn machine_config(args: &SetupArgs) -> MachineConfig {
                 ..CaldavConfig::default()
             },
             node: None,
+            device_file,
         },
         DaemonHost::Node(target) => MachineConfig {
             vault,
             caldav: CaldavConfig::default(),
             node: Some(node(Some(target))),
+            device_file,
         },
         DaemonHost::Elsewhere => MachineConfig {
             vault,
             caldav: CaldavConfig::default(),
             node: Some(node(None)),
+            device_file,
         },
     }
 }

@@ -25,6 +25,11 @@ describe("§15.3 completing", () => {
 		expect(out.line).toBe(3);
 	});
 
+	it("puts the stamp in front of a counted UID (§3.1) as in front of a long one", () => {
+		const out = toggle("- [ ] A ➕ 2026-09-01 🆔 a42\n- [ ] B 🆔 a4\n\n## Done\n", 1);
+		expect(out.doc).toBe(`- [ ] A ➕ 2026-09-01 🆔 a42\n\n## Done\n- [x] B ✅ ${TODAY} 🆔 a4\n`);
+	});
+
 	it("creates a level-3 heading at the end when there is none", () => {
 		const out = toggle("# Notes\n\n- [ ] only task\n", 2);
 		expect(out.doc).toBe(`# Notes\n\n### Done\n- [x] only task ✅ ${TODAY}\n`);

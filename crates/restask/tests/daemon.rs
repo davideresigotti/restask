@@ -69,7 +69,7 @@ async fn run_once_performs_a_full_reconcile() {
 fn mock_name(dir: &tempfile::TempDir) -> String {
     let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
     let uid = note.split("\u{1F194}").nth(1).unwrap().trim().to_string();
-    TaskUid::parse(&uid).unwrap().as_str().to_string()
+    TaskUid::from_token(&uid).unwrap().as_str().to_string()
 }
 
 #[tokio::test]

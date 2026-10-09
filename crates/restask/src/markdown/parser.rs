@@ -31,9 +31,11 @@ const COMPLETED_PATTERN: &str = r"✅[ \t]+(\d{4}-\d{2}-\d{2})";
 /// Created token (§6.1): `➕` plus a date-only value.
 const CREATED_PATTERN: &str = r"➕[ \t]+(\d{4}-\d{2}-\d{2})";
 
-/// UID token (§6.1): `🆔` plus `restask-` (or the legacy `taskres-`) and 26 lowercase
+/// UID token (§6.1): `🆔` plus a counted UID — a device tag and a number, as a whole
+/// word (`a42`) — or a long one: `restask-` (or the legacy `taskres-`) and 26 lowercase
 /// alphanumerics.
-const UID_PATTERN: &str = r"🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})";
+const UID_PATTERN: &str =
+    r"🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26}|[a-z]{1,4}[1-9][0-9]{0,14}(?-u:\b))";
 
 /// Calendar token (§6.1): `📁` plus a calendar's name as one word of letters and digits,
 /// with single hyphens inside — the shape of a list slug, in either case.
@@ -79,7 +81,7 @@ fn patterns() -> Option<&'static Patterns> {
 /// Metadata and text extracted from one task-line body (§6.1 token table).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskDraft {
-    /// `🆔` token, when present with a valid Crockford ULID body.
+    /// `🆔` token, when present with a valid UID.
     pub uid: Option<TaskUid>,
     /// Body with all matched token spans removed, whitespace runs collapsed, then trimmed.
     pub text: String,
@@ -149,7 +151,7 @@ pub struct TaskLine {
 /// recognized anywhere in the body, in any order (§6.1 order-insensitive parse); when the
 /// same token appears more than once the first occurrence wins and every matched span is
 /// removed from [`TaskDraft::text`]. A token whose value is shaped correctly but
-/// semantically invalid (impossible date, non-ULID body) leaves its field [`None`] — the
+/// semantically invalid (impossible date, no UID) leaves its field [`None`] — the
 /// invalid value survives verbatim only in the caller's original line.
 pub fn parse_line(line: &str) -> Option<TaskLine> {
     let patterns = patterns()?;
@@ -196,7 +198,7 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
 
     let (uid_spans, uid) = scan_token(&patterns.uid, body);
     spans.extend(uid_spans);
-    let uid = uid.and_then(|v| TaskUid::parse(&v).ok());
+    let uid = uid.and_then(|v| TaskUid::from_token(&v).ok());
 
     let (list_spans, list) = scan_token(&patterns.list, body);
     spans.extend(list_spans);
@@ -226,6 +228,22 @@ pub fn parse_line(line: &str) -> Option<TaskLine> {
             list,
         },
     })
+}
+
+/// Byte ranges of the UID tokens in `text` — a line, or a whole file — that spell
+/// `uid`: `🆔` and the UID behind it. A token is the whole word, so `a4` is not found
+/// in `a42`.
+pub fn uid_tokens(text: &str, uid: &TaskUid) -> Vec<Range<usize>> {
+    let Some(patterns) = patterns() else {
+        return Vec::new();
+    };
+    patterns
+        .uid
+        .captures_iter(text)
+        .filter_map(|caps| Some((caps.get(0)?, caps.get(1)?)))
+        .filter(|(_, value)| value.as_str() == uid.token())
+        .map(|(whole, _)| whole.range())
+        .collect()
 }
 
 /// Recurrence token (§6.1): `🔁`, whitespace, then a rule in the vault spelling

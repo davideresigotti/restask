@@ -51,13 +51,17 @@ Thunderbird.
 | Vault config | `restask.toml` (vault root, synced) |
 | Machine config | `$XDG_CONFIG_HOME/restask/config.toml` (never synced); one per vault — a further vault's is `vaults/<name>/config.toml` there (§14.2) |
 | Environment prefix | `RESTASK_*` |
-| Task UID | `restask-<ULID>` |
-| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID`, `X-RESTASK-TEXT` |
+| Task UID | `restask-<device tag><number>` (`restask-a42`); a line shows `🆔 a42` |
+| Custom VTODO properties | `X-RESTASK-SOURCE`, `X-RESTASK-SCHEDULED`, `X-RESTASK-UID`, `X-RESTASK-OF`, `X-RESTASK-TEXT` |
 | Systemd unit / container | `restask.service` / `restask`; a further vault's are `restask-<name>.service` / `restask-<vault folder>` |
 
 The project was called *Taskres* in its first weeks. That name survives only as read-side
-compatibility: UIDs minted as `taskres-<ULID>` stay valid verbatim (UIDs are eternal) and
-`X-TASKRES-*` properties are still parsed. Nothing writes the old names.
+compatibility: UIDs minted as `taskres-<ULID>` are still read and `X-TASKRES-*`
+properties are still parsed. Nothing writes the old names.
+
+Until 2026-10 a UID was `restask-<ULID>`, 34 characters on every task line. Such *long*
+UIDs are still read everywhere; the sync node gives each task of the vault a counted
+one, once, and the task's resource keeps the long UID as its `UID` (§11.7).
 
 ## Layers
 
@@ -73,7 +77,7 @@ compatibility: UIDs minted as `taskres-<ULID>` stay valid verbatim (UIDs are ete
 ┌───────────────────────────── ADAPTERS (all I/O) ───────────────────────────────────────┐
 │ fsio        atomic, change-only file writes                                            │
 │ vault       walk + scan + repair of routed notes                                       │
-│ store       .restask/: index · base snapshots · tombstones                             │
+│ store       .restask/: index · base snapshots · tombstones · wire names · devices      │
 │ caldav      protocol (pure XML) · port (trait) · client (reqwest) · offline            │
 │ sync::engine  one reconciliation pass: scan → plan → apply → record                    │
 │ daemon      watcher + poll → debounced single reconciler                               │
@@ -161,11 +165,15 @@ re-planned from fresh snapshots in the next pass.
    tombstone.
 2. **Unknown is not empty.** A collection that was not listed, a note that could not be
    read, a collection that lost everything at once — none of these prove a deletion.
-3. **UIDs are eternal.** Assigned once, never regenerated, preserved across edits and list
-   moves. A copied line gets its own UID; a foreign task is adopted under a UID derived
-   from its own, so adopting it twice yields the same task. That holds for the server
-   too: a task another client created stays that client's resource — its name, its
-   `UID` — and is linked to its line, never replaced by a copy.
+3. **A task keeps its UID, and a UID is one task's.** Assigned once, preserved across
+   edits and list moves, and never given to another task: every device mints under a
+   tag of its own (§3.1, §9.4) and uses each number once. A copied line gets its own
+   UID. A resource keeps its `UID` too: a task another client created stays that
+   client's resource — its name, its `UID` — and is linked to its line, never replaced
+   by a copy; the name it goes by is recorded before its line is written (§9.5), so
+   adopting it twice yields the same task. The one time a line's UID changes is the
+   renumbering of the long UIDs of before the counters (§11.7) — the sync node's, once
+   per task, with nothing created or deleted on the server.
 4. **Local-only by default.** A note takes part only when routed by frontmatter
    (`restask-list`, `restask-list-root`). Of an unrouted note only the frontmatter block
    is ever read; it is never parsed, modified or synced.

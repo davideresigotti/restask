@@ -150,7 +150,8 @@ pub enum Command {
 /// Task selector for `done`/`undone` (§13.3): `--uid`, or `--file` together with `--line`.
 #[derive(Debug, clap::Args)]
 pub struct Selector {
-    /// Eternal task UID (exclusive with `--file`/`--line`).
+    /// The task's UID, as its line spells it (`a42`) or in full (exclusive with
+    /// `--file`/`--line`).
     #[arg(
         long,
         required_unless_present_any = ["file", "line"],
@@ -1067,7 +1068,9 @@ fn resolve_selector(
     selector: &Selector,
 ) -> Result<TaskUid, RestaskError> {
     if let Some(raw) = &selector.uid {
-        return TaskUid::parse(raw).map_err(|error| RestaskError::Validation {
+        // As a line spells it (`a42`), or in full.
+        let parsed = TaskUid::from_token(raw).or_else(|_| TaskUid::parse(raw));
+        return parsed.map_err(|error| RestaskError::Validation {
             field: "uid",
             reason: error.0,
         });
@@ -1253,16 +1256,20 @@ fn print_lists(
 }
 
 /// Loads the machine config (§14.2) with §14.3 env overrides; a missing file yields the
-/// default config (fresh machine).
+/// default config (fresh machine). Either way the machine keeps the identity it mints
+/// UIDs under beside that file (§9.4).
 fn load_machine(path: &Path) -> Result<MachineConfig, RestaskError> {
+    let device_file = Some(crate::store::device_file(path));
     match MachineConfig::load(path) {
         Ok(mut machine) => {
             machine.apply_env();
+            machine.device_file = device_file;
             Ok(machine)
         }
         Err(ConfigError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             let mut machine = MachineConfig::default();
             machine.apply_env();
+            machine.device_file = device_file;
             Ok(machine)
         }
         Err(error) => Err(RestaskError::Config {

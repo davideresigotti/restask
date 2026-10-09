@@ -157,7 +157,7 @@ pub fn is_mirror_shaped(raw: &str) -> bool {
     };
     let Some(before) = raw
         .trim_end()
-        .strip_suffix(uid.as_str())
+        .strip_suffix(uid.token())
         .map(str::trim_end)
         .and_then(|rest| rest.strip_suffix("🆔"))
         .map(str::trim_end)
@@ -223,7 +223,7 @@ fn view_text(
     done.sort_by(|a, b| {
         completed_on(b)
             .cmp(&completed_on(a))
-            .then_with(|| b.uid.as_str().cmp(a.uid.as_str()))
+            .then_with(|| b.uid.cmp(&a.uid))
     });
 
     let hashes = section.hashes();

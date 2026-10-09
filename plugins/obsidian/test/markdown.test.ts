@@ -5,10 +5,14 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+	countedUid,
+	hasUid,
 	linkParents,
 	recurrenceLength,
 	parse,
 	parseLine,
+	uidOrder,
+	uidsIn,
 	PRIORITY_EMOJI,
 	PRIORITIES,
 	type TaskDraft,
@@ -470,5 +474,60 @@ describe("§6.1 the calendar token", () => {
 		const t = mustParse("- [ ] a 📁 work, then more");
 		expect(t.draft.list).toBe("work");
 		expect(t.draft.text).toBe("a , then more");
+	});
+});
+
+describe("§3.1 counted UIDs: the token is the device tag and the number", () => {
+	// The engine's cases, line for line (`markdown_parser.rs`).
+	it("reads a counted token as the UID it spells", () => {
+		const t = parseLine("- [ ] Buy milk 🔺 🆔 a42");
+		expect(t?.draft.uid).toBe("a42");
+		expect(t?.draft.text).toBe("Buy milk");
+		expect(t?.draft.priority).toBe("highest");
+		expect(parseLine("- [ ] x 🆔 z1")?.draft.uid).toBe("z1");
+		expect(parseLine("- [ ] x 🆔\tabcd123456789012345")?.draft.uid).toBe("abcd123456789012345");
+		const tail = parseLine("- [ ] x 🆔 a42 trailing words");
+		expect(tail?.draft.uid).toBe("a42");
+		expect(tail?.draft.text).toBe("x trailing words");
+	});
+
+	it("takes a token as a whole word or as no UID at all", () => {
+		for (const line of [
+			"- [ ] x 🆔 a42b",
+			"- [ ] x 🆔 a42_1",
+			"- [ ] x 🆔 a042",
+			"- [ ] x 🆔 a0",
+			"- [ ] x 🆔 abcde1",
+			"- [ ] x 🆔 A42",
+			"- [ ] x 🆔 42",
+			"- [ ] x 🆔 restask-a42",
+			"- [ ] x 🆔a42",
+		]) {
+			const t = parseLine(line);
+			expect(t?.draft.uid, line).toBeUndefined();
+			expect(t?.draft.text, line).toBe(line.slice("- [ ] ".length));
+		}
+		expect(parseLine(`- [ ] x 🆔 ${UID}`)?.draft.uid).toBe(UID);
+	});
+
+	it("finds a UID in a text by the whole token", () => {
+		const text = "- [ ] one 🆔 a4\n- [ ] two 🆔 a42\nprose with a4 in it\n";
+		expect(uidsIn(text)).toEqual(["a4", "a42"]);
+		expect(hasUid(text, "a4")).toBe(true);
+		expect(hasUid(text, "a42")).toBe(true);
+		expect(hasUid(text, "a421")).toBe(false);
+		// `a4` is not in a note because `a42` is — nor because the prose says so.
+		expect(hasUid("- [ ] two 🆔 a42\nprose with a4 in it\n", "a4")).toBe(false);
+		expect(hasUid(`- [ ] x 🆔 ${UID}\n`, UID)).toBe(true);
+	});
+
+	it("orders UIDs as the engine does: long ones first, counted ones by number, then tag", () => {
+		const early = "restask-01jz0000000000000000000000";
+		const late = "restask-01jzzzzzzzzzzzzzzzzzzzzzzz";
+		const uids = ["a10", "b2", late, "a2", "a9", early];
+		expect([...uids].sort(uidOrder)).toEqual([early, late, "a2", "b2", "a9", "a10"]);
+		expect(uidOrder("a9", "a9")).toBe(0);
+		expect(countedUid("kq17")).toEqual({ tag: "kq", number: 17 });
+		expect(countedUid(early)).toBeUndefined();
 	});
 });

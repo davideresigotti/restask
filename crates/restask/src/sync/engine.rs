@@ -7,28 +7,31 @@
 //!
 //! 1. **Local** — scan and repair the vault, carry TODO.md edits to their source notes.
 //!    Needs no server; always runs.
-//! 2. **Remote** — snapshot the server, plan, apply vault edits, then server writes.
+//! 2. **Remote** — snapshot the server; give the tasks that still have a long UID a
+//!    counted one (§11.7); plan, apply vault edits, then server writes.
 //! 3. **Record** — re-render TODO.md, then persist the state. The vault is written before
 //!    the state that describes it, so the state never claims a line the vault lacks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Duration, Utc};
 
 use crate::caldav::{list_name, resolve_list, Bound, CaldavPort, RemoteResource};
 use crate::config::{MachineConfig, VaultConfig};
 use crate::domain::{
-    Clock, ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
+    Clock, Ids, ListSlug, LocalDate, Priority, Recurrence, SourceRef, Status, Task, TaskUid, When,
 };
 use crate::fsio;
 use crate::markdown::mutator::{self, Mutation};
 use crate::markdown::{root_view, todo_view};
 use crate::store::cache as base_store;
 use crate::store::calendars::Calendars;
+use crate::store::device::{switched, Device};
 use crate::store::index::{Index, IndexEntry};
 use crate::store::tombstones::Tombstones;
+use crate::store::wires::Wires;
 use crate::sync::planner::{self, DeleteOp, Plan, PutOp, Snapshots, DEFER_LIMIT};
 use crate::vault::{self, Scan, ScanMode, STATE_DIR};
 use crate::{CaldavErrorKind, RestaskError};
@@ -82,8 +85,21 @@ pub struct Engine<C: CaldavPort> {
     /// `false` on a machine that leaves the syncing to the vault's sync node (§1.1): a
     /// command that changed the vault here settles it and does not start a pass.
     syncs_here: bool,
+    /// Where this machine keeps the identity it mints UIDs under (§9.4); `None` keeps
+    /// it in `held`, for as long as the engine lives.
+    device_file: Option<PathBuf>,
+    /// The identity of an engine without a `device_file`.
+    held: Mutex<Option<Device>>,
     caldav: C,
     clock: Arc<dyn Clock>,
+}
+
+/// What one pass mints UIDs with (§3.1, §9.4): in a vault that was switched to counted
+/// UIDs, this device's identity there and the counter that goes on from the last number
+/// it used; in any other vault long UIDs, and no identity.
+struct Minting {
+    device: Option<Device>,
+    ids: Ids,
 }
 
 /// Name of the advisory lock file under `.restask/`.
@@ -124,6 +140,8 @@ impl<C: CaldavPort> Engine<C> {
             cfg,
             allow_create_lists: machine.caldav.allow_create_lists,
             syncs_here: machine.node.is_none(),
+            device_file: machine.device_file,
+            held: Mutex::new(None),
             caldav,
             clock,
         }
@@ -180,11 +198,13 @@ impl<C: CaldavPort> Engine<C> {
         let mut report = ReconcileReport::default();
         let mut index = Index::load(&self.state_dir)?;
         let mut tombstones = Tombstones::load(&self.state_dir)?;
+        let mut wires = Wires::load(&self.state_dir)?;
         // Left over from versions that queued server writes; the planner re-derives them.
         let _ = std::fs::remove_file(self.state_dir.join("outbox.json"));
 
         // 1 — local.
-        let scan = self.scan_local(&index, &mut report)?;
+        let mut minting = self.minting(&index, &tombstones, &wires)?;
+        let mut scan = self.scan_local(&index, &mut report, &minting.ids)?;
         tracing::info!(
             files = scan.files_scanned,
             tasks = scan.local.len(),
@@ -194,8 +214,18 @@ impl<C: CaldavPort> Engine<C> {
         // 2 — remote.
         let mut progress = Progress::default();
         let outcome = self
-            .sync_remote(&scan, &index, &tombstones, now, &mut progress, &mut report)
+            .sync_remote(
+                &mut scan,
+                &mut index,
+                &tombstones,
+                &mut wires,
+                &mut minting,
+                now,
+                &mut progress,
+                &mut report,
+            )
             .await;
+        self.minted(&mut minting)?;
 
         // 3 — record: the view first, then the state.
         let scan = if progress.vault_changed {
@@ -238,7 +268,13 @@ impl<C: CaldavPort> Engine<C> {
     fn settle_locked(&self) -> Result<ReconcileReport, RestaskError> {
         let mut report = ReconcileReport::default();
         let index = Index::load(&self.state_dir)?;
-        let scan = self.scan_local(&index, &mut report)?;
+        let mut minting = self.minting(
+            &index,
+            &Tombstones::load(&self.state_dir)?,
+            &Wires::load(&self.state_dir)?,
+        )?;
+        let scan = self.scan_local(&index, &mut report, &minting.ids)?;
+        self.minted(&mut minting)?;
         self.render(&scan.local)?;
         self.render_views(&scan.local, &scan.views, &scan.unreadable)?;
         Ok(report)
@@ -257,10 +293,15 @@ impl<C: CaldavPort> Engine<C> {
         let _lock = self.lock().await?;
         let now = self.clock.now_utc();
         let index = Index::load(&self.state_dir)?;
+        let mut minting = self.minting(
+            &index,
+            &Tombstones::load(&self.state_dir)?,
+            &Wires::load(&self.state_dir)?,
+        )?;
         // The view is rendered from this scan: what the user edited in it comes first.
-        let scan = self.scan_local(&index, &mut ReconcileReport::default())?;
+        let scan = self.scan_local(&index, &mut ReconcileReport::default(), &minting.ids)?;
         let task = Task {
-            uid: TaskUid::generate(),
+            uid: minting.ids.mint(),
             list: vault::inbox_list(&self.cfg)?,
             text: text.split_whitespace().collect::<Vec<_>>().join(" "),
             status: Status::Active,
@@ -279,12 +320,13 @@ impl<C: CaldavPort> Engine<C> {
             source_mtime: now,
             last_modified: now,
         };
+        self.minted(&mut minting)?;
         let mut tasks = scan.local;
         tasks.insert(task.uid.clone(), task.clone());
         self.render(&tasks)?;
         self.render_views(&tasks, &scan.views, &scan.unreadable)?;
         self.sync_after_local_change().await?;
-        Ok(task)
+        self.as_now(task)
     }
 
     /// Completes or reopens a task in its source file, then syncs (§13.3 `restask
@@ -293,13 +335,19 @@ impl<C: CaldavPort> Engine<C> {
     pub async fn set_done(&self, uid: &TaskUid, done: bool) -> Result<Task, RestaskError> {
         let _lock = self.lock().await?;
         let index = Index::load(&self.state_dir)?;
+        let mut minting = self.minting(
+            &index,
+            &Tombstones::load(&self.state_dir)?,
+            &Wires::load(&self.state_dir)?,
+        )?;
         let scan = vault::scan(
             &self.vault,
             &self.cfg,
             self.clock.as_ref(),
             &index,
-            ScanMode::Repair,
+            ScanMode::Repair(&minting.ids),
         )?;
+        self.minted(&mut minting)?;
         let task = scan
             .local
             .get(uid)
@@ -334,10 +382,225 @@ impl<C: CaldavPort> Engine<C> {
             self.apply_file(&task.source.path, &ops)?;
         }
         self.sync_after_local_change().await?;
-        Ok(task)
+        self.as_now(task)
     }
 
     // ── phase 1: local ────────────────────────────────────────────────────────────────
+
+    /// `task` under the UID it has now: the pass that followed a command may have been
+    /// the one that renumbered it (§11.7).
+    fn as_now(&self, mut task: Task) -> Result<Task, RestaskError> {
+        if task.uid.is_long() {
+            if let Some(counted) = Wires::load(&self.state_dir)?.get(task.uid.as_str()) {
+                task.uid = counted.clone();
+            }
+        }
+        Ok(task)
+    }
+
+    /// What this pass mints UIDs with (§9.4): counted UIDs in a vault that was switched
+    /// to them — some device holds a claim there —, long ones in any other. A vault is
+    /// switched by its sync node ([`Engine::switch`]); until then nothing about devices
+    /// is written, and a sync node of an earlier version reads every UID made here.
+    fn minting(
+        &self,
+        index: &Index,
+        tombstones: &Tombstones,
+        wires: &Wires,
+    ) -> Result<Minting, RestaskError> {
+        if switched(&self.state_dir)? {
+            self.counted(index, tombstones, wires)
+        } else {
+            Ok(Minting {
+                device: None,
+                ids: Ids::Long,
+            })
+        }
+    }
+
+    /// Counted UIDs for this pass: the device's identity in the vault — claimed when it
+    /// has none (§9.4) — and its counter, past every UID the state knows.
+    fn counted(
+        &self,
+        index: &Index,
+        tombstones: &Tombstones,
+        wires: &Wires,
+    ) -> Result<Minting, RestaskError> {
+        let known = || {
+            index
+                .entries
+                .keys()
+                .chain(tombstones.uids())
+                .chain(wires.uids())
+        };
+        let taken: BTreeSet<String> = known()
+            .filter_map(|uid| uid.minted_by())
+            .map(|(tag, _)| tag.to_string())
+            .collect();
+        std::fs::create_dir_all(&self.state_dir)?;
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let device = Device::open(
+            &self.state_dir,
+            self.device_file.as_deref(),
+            held.take(),
+            &taken,
+        )?;
+        *held = Some(device.clone());
+        let ids = device.counter();
+        known().for_each(|uid| ids.observe(uid));
+        Ok(Minting {
+            device: Some(device),
+            ids: Ids::Counted(ids),
+        })
+    }
+
+    /// Switches the vault to counted UIDs (§9.4), when it is not yet: this machine
+    /// claims a tag — the vault's first claim, which tells every other device that its
+    /// sync node reads counted UIDs. Called by the pass that has the server's answer in
+    /// hand: only the machine that really syncs the vault makes that promise.
+    fn switch(
+        &self,
+        minting: &mut Minting,
+        index: &Index,
+        tombstones: &Tombstones,
+        wires: &Wires,
+    ) -> Result<(), RestaskError> {
+        if minting.device.is_none() {
+            *minting = self.counted(index, tombstones, wires)?;
+            tracing::info!("vault_switched_to_counted_uids");
+        }
+        Ok(())
+    }
+
+    /// Remembers the numbers the pass has used, so the device never uses them again.
+    fn minted(&self, minting: &mut Minting) -> Result<(), RestaskError> {
+        let (Some(device), Some(ids)) = (&mut minting.device, minting.ids.counter()) else {
+            return Ok(());
+        };
+        if device.used(ids, self.device_file.as_deref())? {
+            let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+            *held = Some(device.clone());
+        }
+        Ok(())
+    }
+
+    /// Gives every task whose line still carries a long UID a counted one (§11.7): the
+    /// sync node's, once per task. The names first (`wires.json`), so that a pass that
+    /// dies here is taken up under the same UIDs; then the lines — in the notes, in the
+    /// views, and in what the engine remembers of its renders, so that an edit the user
+    /// made in a view is still told from the render; then the state that was kept under
+    /// the long UID. Nothing is asked of the server: a resource keeps the long UID as
+    /// its `UID` and is linked to its task by the plan that follows, like a task another
+    /// client created. Returns the scan of the vault as it is afterwards.
+    fn renumber(
+        &self,
+        scan: Scan,
+        index: &mut Index,
+        wires: &mut Wires,
+        ids: &Ids,
+    ) -> Result<Scan, RestaskError> {
+        let Some(counter) = ids.counter() else {
+            return Ok(scan);
+        };
+        scan.local.keys().for_each(|uid| counter.observe(uid));
+        let renumbered = planner::renumbering(scan.local.keys(), wires, counter);
+        let scan = if renumbered.is_empty() {
+            scan
+        } else {
+            let mut learnt = false;
+            for (long, counted) in &renumbered {
+                learnt |= wires.insert(long.as_str().to_string(), counted.clone());
+            }
+            if learnt {
+                wires.save(&self.state_dir)?;
+            }
+            // A note the scan read is rewritten or the pass ends here: a plan made
+            // while a line still carries the UID its task no longer has would take the
+            // line and the task for two.
+            let notes = scan
+                .notes
+                .keys()
+                .chain(std::iter::once(&self.cfg.inbox_file));
+            for path in notes {
+                let file = self.vault.join(path);
+                let contents = match std::fs::read_to_string(&file) {
+                    Ok(contents) => contents,
+                    // No inbox file yet: the render makes it.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                let out = mutator::renumber(&contents, &renumbered, &self.cfg);
+                if out != contents {
+                    fsio::write_atomic(&file, &out)?;
+                }
+            }
+            // What the engine remembers of its renders, as far as it is there.
+            let mut remembered = vec![self.state_dir.join(RENDERED_FILE)];
+            if let Ok(entries) = std::fs::read_dir(self.state_dir.join(VIEWS_DIR)) {
+                for entry in entries {
+                    remembered.push(entry?.path());
+                }
+            }
+            for file in remembered {
+                let Ok(contents) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                let out = mutator::renumber(&contents, &renumbered, &self.cfg);
+                if out != contents {
+                    fsio::write_atomic(&file, &out)?;
+                }
+            }
+            tracing::info!(count = renumbered.len(), "tasks_renumbered");
+            scan.renumbered(&renumbered, &self.cfg)
+        };
+
+        // The state follows the lines. Read off the names, not off this pass: a pass
+        // that died between the two is finished here.
+        let moved: Vec<(TaskUid, TaskUid)> = wires
+            .iter()
+            .filter_map(|(name, counted)| Some((TaskUid::parse(name).ok()?, counted)))
+            .filter(|(long, counted)| {
+                long.is_long() && index.get(long).is_some() && scan.local.contains_key(counted)
+            })
+            .map(|(long, counted)| (long, counted.clone()))
+            .collect();
+        if moved.is_empty() {
+            return Ok(scan);
+        }
+        let current = |uid: TaskUid| match wires.get(uid.as_str()) {
+            Some(counted) if uid.is_long() => counted.clone(),
+            _ => uid,
+        };
+        for (long, counted) in &moved {
+            let Some(entry) = index.get(long).cloned() else {
+                continue;
+            };
+            let mut thumbprint = entry.thumbprint;
+            // Snapshots only hold date and floating values: the zone is irrelevant.
+            if let Some(mut base) = base_store::cache_read(&self.state_dir, long, &Utc) {
+                // The snapshot carries no list; the thumbprint covers it.
+                base.list = entry.list.clone();
+                let vouched = entry.thumbprint == base.thumbprint();
+                base.uid = counted.clone();
+                base.parent = base.parent.map(current);
+                if vouched {
+                    thumbprint = base.thumbprint();
+                }
+                base_store::cache_write(&self.state_dir, &base, base.last_modified)?;
+            }
+            index.upsert(IndexEntry {
+                uid: counted.clone(),
+                thumbprint,
+                ..entry
+            });
+            index.remove(long);
+        }
+        index.save(&self.state_dir)?;
+        for (long, _) in &moved {
+            base_store::cache_remove(&self.state_dir, long)?;
+        }
+        Ok(scan)
+    }
 
     /// Scans and repairs the vault, then carries edits made on mirror lines — of TODO.md
     /// and of the views root notes hold (§7.6) — to their source notes and gives lines
@@ -347,6 +610,7 @@ impl<C: CaldavPort> Engine<C> {
         &self,
         index: &Index,
         report: &mut ReconcileReport,
+        ids: &Ids,
     ) -> Result<Scan, RestaskError> {
         let scan = |report: &mut ReconcileReport| -> Result<Scan, RestaskError> {
             let scan = vault::scan(
@@ -354,7 +618,7 @@ impl<C: CaldavPort> Engine<C> {
                 &self.cfg,
                 self.clock.as_ref(),
                 index,
-                ScanMode::Repair,
+                ScanMode::Repair(ids),
             )?;
             report.registered += scan.registered;
             report.normalized += scan.normalized;
@@ -415,13 +679,22 @@ impl<C: CaldavPort> Engine<C> {
 
     // ── phase 2: remote ───────────────────────────────────────────────────────────────
 
-    /// Snapshots the server, plans, and executes: vault edits first (the vault is the
-    /// source of truth), then server writes. Progress survives an early error.
+    /// Snapshots the server, plans, and executes: the wire names the plan learnt, then
+    /// vault edits (the vault is the source of truth), then server writes. Progress
+    /// survives an early error.
+    ///
+    /// With the server's answer in hand this machine is the one that syncs the vault:
+    /// before it plans, it switches the vault to counted UIDs if no device has yet
+    /// (§9.4) and gives the tasks that still carry a long UID a counted one (§11.7) —
+    /// `scan` and `index` are the vault and the state as they are after that.
+    #[allow(clippy::too_many_arguments)]
     async fn sync_remote(
         &self,
-        scan: &Scan,
-        index: &Index,
+        scan: &mut Scan,
+        index: &mut Index,
         tombstones: &Tombstones,
+        wires: &mut Wires,
+        minting: &mut Minting,
         now: DateTime<Utc>,
         progress: &mut Progress,
         report: &mut ReconcileReport,
@@ -431,6 +704,11 @@ impl<C: CaldavPort> Engine<C> {
         let (remote, created, bound) = self
             .remote_snapshot(scan, index, &inbox_list, &todo_lists)
             .await?;
+        if self.syncs_here {
+            self.switch(minting, index, tombstones, wires)?;
+            *scan = self.renumber(std::mem::take(scan), index, wires, &minting.ids)?;
+        }
+        let ids = minting.ids.counter();
         let snapshots = Snapshots {
             local: scan.local.clone(),
             base: self.load_base(index)?,
@@ -446,8 +724,23 @@ impl<C: CaldavPort> Engine<C> {
             todo_lists,
             obsidian_vault: self.cfg.obsidian_vault.clone(),
             flat: scan.flat.clone(),
+            wires: wires.clone(),
+            ids: ids.cloned(),
+            today: Some(self.clock.today_local()),
         };
         let plan = progress.plan.insert(planner::plan(&snapshots));
+        if let Some(ids) = ids.filter(|_| plan.minted > 0) {
+            ids.observe(&TaskUid::minted(ids.tag(), plan.minted));
+        }
+        // Before any line is written: a line whose name is not recorded would be a
+        // second task to the pass that finds it (§9.5).
+        let mut learnt = false;
+        for (name, uid) in &plan.wires {
+            learnt |= wires.insert(name.clone(), uid.clone());
+        }
+        if learnt {
+            wires.save(&self.state_dir)?;
+        }
 
         report.deferred = plan.deferred.len();
         report.adoptions = plan.adopted.len();

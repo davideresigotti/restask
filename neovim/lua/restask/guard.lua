@@ -30,16 +30,24 @@ function M.token(line)
 	while at do
 		local uid = line:match("^[ \t]+()", at + #EMOJI)
 		if uid then
+			local start = at - 1
+			if start > body and (line:byte(start) == 32 or line:byte(start) == 9) then
+				start = start - 1
+			end
+			-- A counted UID (§3.1): a device tag and a number, as a whole word.
+			local tag, number = line:match("^([a-z][a-z]?[a-z]?[a-z]?)([1-9][0-9]*)", uid)
+			if tag and #number <= 15 then
+				local stop = uid + #tag + #number - 1
+				if not line:sub(stop + 1, stop + 1):find("[0-9A-Za-z_]") then
+					return { body = body, start = start, emoji = at - 1, stop = stop }
+				end
+			end
 			local prefix = line:sub(uid, uid + 7)
 			local id = line:sub(uid + 8, uid + 33)
 			if (prefix == "restask-" or prefix == "taskres-") and #id == 26 and not id:find("[^0-9a-z]") then
 				-- Crockford base32 has no i, l, o, u: such a token is not a UID (§3.1).
 				if id:find("[ilou]") then
 					return nil
-				end
-				local start = at - 1
-				if start > body and (line:byte(start) == 32 or line:byte(start) == 9) then
-					start = start - 1
 				end
 				return { body = body, start = start, emoji = at - 1, stop = uid + 33 }
 			end

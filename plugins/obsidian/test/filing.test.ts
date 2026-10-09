@@ -4,10 +4,14 @@
 import { describe, expect, it } from "vitest";
 import {
 	canonicalLine,
+	claimedTags,
 	completedByUid,
 	declaresRoot,
+	deviceOf,
 	digest,
 	disclaimed,
+	freeTags,
+	highestNumber,
 	isMirrorShaped,
 	isSealed,
 	mirrorDropped,
@@ -26,8 +30,10 @@ import {
 	statusRepaired,
 	taskIndex,
 	toggledLines,
+	uidCounter,
 	uidGenerator,
 	viewOf,
+	type Device,
 } from "../src/filing";
 import { parseLine } from "../src/markdown";
 
@@ -58,19 +64,47 @@ function patch(before: string[], after: string[]): string[] {
 }
 
 describe("§3.1 UIDs made on the device", () => {
-	it("are valid task UIDs the grammar reads back", () => {
-		const next = uidGenerator(
-			() => Date.UTC(2026, 9, 2),
-			(count) => new Uint8Array(count).fill(7),
+	const long = uidGenerator(
+		() => Date.UTC(2026, 9, 2),
+		(count) => new Uint8Array(count).fill(7),
+	);
+
+	it("are the device's tag and its next number, and the grammar reads them back", () => {
+		let device: Device | undefined = { tag: "b", secret: "s", last: 3 };
+		const next = uidCounter(
+			() => device,
+			(used) => {
+				device = used;
+			},
+			long,
 		);
 		const made = next();
-		expect(made).toMatch(/^restask-[0-9a-hjkmnp-tv-z]{26}$/);
-		expect(parseLine(`- [ ] a 🆔 ${made}`)?.draft.uid).toBe(made);
-		// 2026-10-02T00:00:00Z in milliseconds, base32, then 16 times the digit 7.
-		expect(made).toBe("restask-01m3wyj8007777777777777777");
+		expect(made).toBe("b4");
+		expect(parseLine(`- [ ] a 🆔 ${made}`)?.draft.uid).toBe("b4");
+		// Every number is remembered as it is handed out, so none is handed out twice.
+		expect(device).toEqual({ tag: "b", secret: "s", last: 4 });
+		expect([next(), next()]).toEqual(["b5", "b6"]);
+		// The device took another tag (§9.4): the count starts with it.
+		device = { tag: "kq", secret: "s", last: 0 };
+		expect(next()).toBe("kq1");
 	});
 
-	it("uses five bits of each random byte", () => {
+	it("are long ones while the device has no tag: the vault's sync node reads those whatever its version", () => {
+		const next = uidCounter(
+			() => undefined,
+			() => {
+				throw new Error("no number was handed out");
+			},
+			long,
+		);
+		const made = next();
+		// 2026-10-02T00:00:00Z in milliseconds, base32, then 16 times the digit 7.
+		expect(made).toBe("restask-01m3wyj8007777777777777777");
+		expect(parseLine(`- [ ] a 🆔 ${made}`)?.draft.uid).toBe(made);
+		expect(registeredLine("- [ ] buy milk", TODAY, next)).toMatch(/^- \[ \] buy milk 🆔 restask-01m3wyj80077777777777777[0-9a-z]{2}$/);
+	});
+
+	it("long ones use five bits of each random byte", () => {
 		const next = uidGenerator(
 			() => 0,
 			() => Uint8Array.from([0, 31, 32, 63, 255, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
@@ -78,7 +112,7 @@ describe("§3.1 UIDs made on the device", () => {
 		expect(next()).toBe("restask-00000000000z0zz123456789ab");
 	});
 
-	it("keep the order they were made in, also within one millisecond and across a clock step back", () => {
+	it("long ones keep the order they were made in, also within one millisecond and across a clock step back", () => {
 		let now = 1000;
 		const next = uidGenerator(
 			() => now,
@@ -91,6 +125,62 @@ describe("§3.1 UIDs made on the device", () => {
 		now = 2000;
 		const fourth = next();
 		expect([first, second, third, fourth]).toEqual([...new Set([first, second, third, fourth])].sort());
+	});
+});
+
+describe("§9.4 the tag of a device", () => {
+	it("is drawn from the shortest tags no claim holds", () => {
+		expect(freeTags(new Set())).toHaveLength(26);
+		expect(freeTags(new Set(["a", "c"]))).toEqual(expect.arrayContaining(["b", "d", "z"]));
+		expect(freeTags(new Set(["a", "c"]))).not.toContain("a");
+		const letters = Array.from("abcdefghijklmnopqrstuvwxyz");
+		expect(freeTags(new Set(letters.filter((letter) => letter !== "q")))).toEqual(["q"]);
+		// Every letter taken: two letters.
+		const two = freeTags(new Set(letters));
+		expect(two).toHaveLength(676);
+		expect([two[0], two[675]]).toEqual(["aa", "zz"]);
+	});
+
+	it("reads the claims off the files of .restask/devices", () => {
+		expect([...claimedTags(["a", "kq", "b.sync-conflict-20261009-101500-ABCDEFG", ".a.restask-tmp", "README", "abcde"])].sort()).toEqual(["a", "b", "kq"]);
+	});
+
+	it("counts on from the highest number the state knows under it", () => {
+		expect(highestNumber("a", ["restask-a7", "restask-a12", "restask-b99", "restask-aa50", "restask-01jzq4tsvg2c9xkw7n5m8rhdpa", "a3"])).toBe(12);
+		expect(highestNumber("c", ["restask-a7"])).toBe(0);
+	});
+
+	it("reads its stored identity back, or none", () => {
+		const device = { tag: "a", secret: "0f", last: 12 };
+		expect(deviceOf(JSON.stringify(device))).toEqual(device);
+		expect(deviceOf(device)).toEqual(device);
+		for (const bad of [null, undefined, "", "{", "[]", { tag: "A", secret: "s", last: 0 }, { tag: "a", secret: "", last: 0 }, { tag: "a", secret: "s", last: -1 }, { tag: "a", secret: "s", last: 1.5 }, { tag: "abcde", secret: "s", last: 0 }]) {
+			expect(deviceOf(bad)).toBeUndefined();
+		}
+	});
+});
+
+describe("§15.6 lines with counted UIDs (§3.1)", () => {
+	let last = 0;
+	const next = (): string => `a${++last}`;
+
+	it("registers a line with the short token, as the engine writes it", () => {
+		last = 41;
+		expect(registeredLine("- [ ] buy milk 🔺", TODAY, next)).toBe("- [ ] buy milk 🔺 🆔 a42");
+	});
+
+	it("gives a copied line its own UID and leaves the line whose UID only begins like it", () => {
+		last = 42;
+		const lines = ["- [ ] first 🆔 a4", "- [ ] other 🆔 a42", "- [ ] first, copied 🆔 a4"];
+		expect(settled(lines, 2, NOTE, TODAY, next)?.lines).toEqual(["- [ ] first 🆔 a4", "- [ ] other 🆔 a42", "- [ ] first, copied 🆔 a43"]);
+	});
+
+	it("finds a task by its whole UID", () => {
+		const note = ["---", "restask-list: Home", "---", "- [ ] other 🔺 🆔 a42", "- [ ] the task 🔺 🆔 a4"];
+		expect(taskIndex(note, "a4", "Done")).toBe(4);
+		expect(mirrorLine(note, "a4", "Home", "Done")).toBe("- [ ] the task 🔺 [[Home|Home]] 🆔 a4");
+		expect(isMirrorShaped("- [ ] the task 🔺 [[Home|Home]] 🆔 a4")).toBe(true);
+		expect(mirrorSource("- [ ] the task 🔺 [[Home|Home]] 🆔 a4")).toBe("Home");
 	});
 });
 
@@ -241,6 +331,14 @@ describe("§15.6 filing a line in the TODO.md view", () => {
 
 		const first = view("## No Priority", `- [x] mine ✅ ${TODAY} ${B}`, "", "## Done", older, "");
 		expect(refiled(first, 6)).toEqual(view("## Done", `- [x] mine ✅ ${TODAY} ${B}`, older, ""));
+	});
+
+	it("orders counted UIDs (§3.1) by number, not as text: 10 is later than 9", () => {
+		const nine = `- [x] ninth ✅ ${TODAY} 🆔 a9`;
+		const before = view("## No Priority", `- [x] tenth ✅ ${TODAY} 🆔 a10`, "", "## Done", nine, "");
+		expect(refiled(before, 6)).toEqual(view("## Done", `- [x] tenth ✅ ${TODAY} 🆔 a10`, nine, ""));
+		const eight = view("## No Priority", `- [x] eighth ✅ ${TODAY} 🆔 a8`, "", "## Done", nine, "");
+		expect(refiled(eight, 6)).toEqual(view("## Done", nine, `- [x] eighth ✅ ${TODAY} 🆔 a8`, ""));
 	});
 
 	it("treats a mirror-shaped line as the view's own when told no note has the task", () => {

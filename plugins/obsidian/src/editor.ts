@@ -52,7 +52,7 @@ import {
 	type Splice,
 	type View,
 } from "./filing";
-import { bodyStart, checkOffset, parseLine } from "./markdown";
+import { bodyStart, checkOffset, hasUid, parseLine, uidsIn } from "./markdown";
 
 /** Marks the plugin's own registering and filing of a task (§15.6). */
 const filing = Annotation.define<boolean>();
@@ -717,8 +717,6 @@ interface Gone {
 	line: string;
 }
 
-const UID_TOKEN = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
-
 /**
  * The editor extension of §15.6. It remembers the lines the user edits and settles the
  * task on such a line once the cursor has left it or the editor lost the focus — at
@@ -784,7 +782,7 @@ export function taskFiling(host: FilingHost): Extension {
 				if (this.dropped.size === 0) return;
 				const text = state.doc.toString();
 				for (const uid of [...this.dropped]) {
-					if (!text.includes(uid)) continue;
+					if (!hasUid(text, uid)) continue;
 					this.dropped.delete(uid);
 					host.mirrorReturned(state, uid);
 				}
@@ -813,9 +811,9 @@ export function taskFiling(host: FilingHost): Extension {
 					// Tasks whose line is gone: their UID was in the lines the change covered and is nowhere now.
 					if (fromA === toA) return;
 					for (let line = old; this.gone.length < MAX_TOUCHED; line = before.line(line.number + 1)) {
-						for (const match of line.text.matchAll(UID_TOKEN)) {
+						for (const uid of uidsIn(line.text)) {
 							text = text ?? doc.toString();
-							if (!text.includes(match[1])) this.gone.push({ uid: match[1], line: line.text });
+							if (!hasUid(text, uid)) this.gone.push({ uid, line: line.text });
 						}
 						if (line.to >= toA || line.number === before.lines) break;
 					}
@@ -868,7 +866,7 @@ export function taskFiling(host: FilingHost): Extension {
 				this.gone = [];
 				if (note === undefined) return;
 				for (const task of gone) {
-					if (state.doc.toString().includes(task.uid)) continue;
+					if (hasUid(state.doc.toString(), task.uid)) continue;
 					// In a note the line was the task — but for a mirror line in the view of a root note (§7.6).
 					if (!note.inboxView && !(note.root === true && isMirrorShaped(task.line))) {
 						host.noteTaskSettled(state, task.uid);

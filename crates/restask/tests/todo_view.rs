@@ -788,3 +788,70 @@ fn a_priority_section_heading_names_its_priority_and_nothing_else_does() {
         assert_eq!(section_priority(heading), None, "{heading}");
     }
 }
+
+// ---- counted UIDs (§3.1) ----
+
+#[test]
+fn counted_uids_render_short_and_sort_by_number() {
+    let mut tasks = BTreeMap::new();
+    for (uid, text) in [
+        ("restask-a10", "tenth"),
+        ("restask-a9", "ninth"),
+        ("restask-b2", "second, another device"),
+        ("restask-a2", "second"),
+    ] {
+        let task = task(uid, text);
+        tasks.insert(task.uid.clone(), task);
+    }
+    let mut done = task("restask-a11", "done later");
+    done.status = Status::Completed {
+        on: date("2026-09-20"),
+    };
+    tasks.insert(done.uid.clone(), done);
+    let mut done = task("restask-a3", "done earlier");
+    done.status = Status::Completed {
+        on: date("2026-09-20"),
+    };
+    tasks.insert(done.uid.clone(), done);
+    let rendered = render(&tasks, &VaultConfig::default());
+    // `No Priority` in creation order — 9 before 10, not as text — and `Done` on one
+    // day the other way round.
+    assert!(
+        rendered.ends_with(
+            "## No Priority\n\
+             - [ ] second 🆔 a2\n\
+             - [ ] second, another device 🆔 b2\n\
+             - [ ] ninth 🆔 a9\n\
+             - [ ] tenth 🆔 a10\n\
+             \n## Done\n\
+             - [x] done later ✅ 2026-09-20 🆔 a11\n\
+             - [x] done earlier ✅ 2026-09-20 🆔 a3\n"
+        ),
+        "{rendered}"
+    );
+}
+
+/// §7.1: a deleted mirror line deletes its task only when the UID is nowhere in the view
+/// any more — and `a4` is not in the view because `a42` is.
+#[test]
+fn a_deleted_mirror_line_is_told_from_a_uid_that_begins_like_it() {
+    let mut tasks = BTreeMap::new();
+    for (uid, text, line) in [
+        ("restask-a4", "Review the plan", 4),
+        ("restask-a42", "Book the room", 5),
+    ] {
+        let mut task = vault_task(uid, text, "Projects/Alpha.md", line);
+        task.priority = Some(Priority::High);
+        task.source_heading = Some("Tasks".to_string());
+        tasks.insert(task.uid.clone(), task);
+    }
+    let rendered = render(&tasks, &VaultConfig::default());
+    assert!(rendered.contains("- [ ] Review the plan ⏫ [[Alpha#Tasks|Alpha]] 🆔 a4\n"));
+    let current = without_line(&rendered, "Review the plan");
+    assert_eq!(
+        edits_for(&current, &rendered, &tasks),
+        vec![Mutation::Delete {
+            uid: TaskUid::parse("restask-a4").unwrap()
+        }]
+    );
+}

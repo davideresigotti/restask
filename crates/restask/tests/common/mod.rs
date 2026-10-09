@@ -12,7 +12,7 @@ use chrono::{DateTime, FixedOffset, Offset as _, TimeZone, Utc};
 use tempfile::TempDir;
 
 use restask::caldav::{CaldavPort, CollectionInfo, RemoteResource};
-use restask::domain::{Clock, ListSlug, LocalDate, Task, TaskUid};
+use restask::domain::{Clock, DeviceTag, ListSlug, LocalDate, Task, TaskUid};
 use restask::vtodo::{from_vcalendar, to_vcalendar_as, WireNames};
 use restask::{CaldavErrorKind, RestaskError};
 
@@ -33,6 +33,14 @@ impl Clock for FixedClock {
     fn local_offset(&self) -> FixedOffset {
         self.1
     }
+}
+
+/// A UID no other call in this test binary returned, minted by a device (`zz`) that no
+/// engine under test is.
+pub fn fresh_uid() -> TaskUid {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    TaskUid::minted(&DeviceTag::parse("zz").unwrap(), number)
 }
 
 /// One stored resource in the mock server.
@@ -383,6 +391,15 @@ pub fn sealed(view: &str) -> String {
         &view[..at],
         &view[at..]
     )
+}
+
+/// Leaves the vault as its sync node has switched it to counted UIDs (§9.4): the claim
+/// of the node — the device `zz`, which no engine under test is — is in the state
+/// directory, so every machine that works on the vault mints counted UIDs too.
+pub fn switch_vault(vault: &TempDir) {
+    let devices = vault.path().join(".restask/devices");
+    std::fs::create_dir_all(&devices).unwrap();
+    std::fs::write(devices.join("zz"), "the-sync-node\n").unwrap();
 }
 
 /// Writes (or overwrites) a file inside the temporary vault.

@@ -9,26 +9,63 @@ Pure — no I/O. Public types derive `Debug, Clone, PartialEq` and serde where p
 ### 3.1 `uid.rs`
 
 ```rust
-pub struct TaskUid(String);   // "restask-" + 26-char lowercase Crockford base32 (ULID)
+pub struct DeviceTag(String); // one to four letters a–z: the name a device mints under
+pub struct Counter { .. }     // a device's tag and the last number it used
+pub enum Ids { Counted(Counter), Long }  // where a device takes fresh UIDs from (§9.4)
+pub struct TaskUid(String);   // "restask-" + <tag><number>          — counted: restask-a42
+                              // "restask-" + 26-char Crockford base32 — long (a ULID)
+
+impl Counter {
+    pub fn new(tag: DeviceTag, last: u64) -> Self;
+    pub fn observe(&self, uid: &TaskUid);              // a UID that exists is never minted
+    pub fn mint(&self) -> TaskUid;                     // the next number
+}
 
 impl TaskUid {
-    pub fn generate() -> Self;                         // monotonic within a process
-    pub fn derived(foreign_uid: &str, created_at: Option<DateTime<Utc>>) -> Self;
+    pub fn minted(tag: &DeviceTag, number: u64) -> Self;
+    pub fn generate() -> Self;                         // a fresh long UID (Ids::Long)
+    pub fn minted_by(&self) -> Option<(&str, u64)>;    // tag and number; None for a long UID
+    pub fn is_long(&self) -> bool;
+    pub fn token(&self) -> &str;                       // what a line says behind 🆔
+    pub fn parse(raw: &str) -> Result<Self, UidError>; // in full; trims, lowercases, validates
+    pub fn from_token(raw: &str) -> Result<Self, UidError>; // as a line spells it
+    pub fn as_str(&self) -> &str;                      // in full
+    pub fn derived(foreign_uid: &str, created_at: Option<DateTime<Utc>>) -> Self; // long
     pub fn adopts(&self, foreign_uid: &str) -> bool;   // some derived(foreign_uid, _)
-    pub fn parse(raw: &str) -> Result<Self, UidError>; // trims, lowercases, validates
-    pub fn as_str(&self) -> &str;
+    pub fn created_on(&self) -> Option<LocalDate>;     // the day in a long UID
 }
 ```
 
-- A UID is filename-safe: it names the base snapshot `.restask/tasks/<uid>.ics` and the
-  server resource `<uid>.ics`.
-- `parse` also accepts the legacy prefix `taskres-`; such a UID is kept verbatim forever.
-  `generate` and `derived` only produce `restask-`.
-- `derived` is the adoption UID (§11 R5): a pure function of a foreign task's `UID` and
-  `CREATED`. The ULID timestamp is `created_at` (epoch when unknown), so adopted tasks
-  sort by creation; the 80 random bits are a hash of the foreign UID. `adopts` compares
-  those bits: it tells whether a UID can be the adoption UID of a given foreign `UID`,
-  whatever the creation instant.
+- **A UID is the tag of the device that minted it and that device's next number**:
+  `restask-a42` is the 42nd UID of device `a`. The tag is one to four letters `a`–`z`,
+  the number has no leading zero and at most 15 digits. Every device of a vault has a
+  tag of its own (§9.4), so two devices never mint the same UID, online or not — which
+  a counter shared by all of them could not promise.
+- **A line shows the short form**: `🆔 a42` (`token`, §6.1), so that the token costs a
+  line a handful of columns. Everywhere else the UID is written in full (`as_str`): it
+  names the base snapshot `.restask/tasks/restask-a42.ics`, it is the `UID` and the
+  resource name `restask-a42.ics` of a task restask creates on the server, and it is
+  what `X-RESTASK-UID` and `RELATED-TO` say. `parse` reads the full form only: in a
+  `VTODO`, `a42` without the prefix is whatever another client called its task.
+- **A number is used once.** A device counts on from the highest number it has used
+  (which it remembers, §9.4) and from the highest it sees under its tag on a line or in
+  the state (`Counter::observe`): a UID is never handed out twice, also when its line
+  was deleted before anyone else saw it.
+- **Order** (`Ord`, what the renders sort by, §7): creation order as far as a UID tells
+  it — the long UIDs first, as text (their timestamp leads); then the counted ones by
+  number, then by tag. Numbers of different devices say nothing about each other; the
+  order is still the same on every device.
+- **Long UIDs** are what restask minted before the counters: a ULID behind `restask-`,
+  or behind `taskres-` (before the project was renamed). They are read wherever they
+  are — on a line, in the state, on the server — and a line spells them in full. A
+  device mints one (`generate`) only in a vault its sync node has not switched to
+  counted UIDs (§9.4). The sync node gives every task of the vault that still has one
+  a counted UID (§11.7), and the long UID stays the `UID` of the task's resource. A long
+  UID tells the day it was minted (`created_on`).
+- `derived` is how a foreign task was named before the counters (§11 R5): a pure
+  function of the foreign `UID` and `CREATED` — a long UID whose 80 random bits are a
+  hash of the foreign UID. `adopts` compares those bits: it is what makes a link to a
+  long UID believable (§8.2). A planner without a counter still derives.
 
 ### 3.2 `priority.rs`
 
@@ -161,7 +198,7 @@ Markdown dates are **device-local**. VTODO instants (`CREATED`, `COMPLETED`,
 | Markdown | VTODO | Rule |
 |---|---|---|
 | `➕ 2026-09-19` | `CREATED:20260919T000000Z` | date-only → midnight UTC |
-| (no `➕`) | `CREATED` of the server copy, kept as it is; on the first push the day the UID was minted (UTC date of its ULID timestamp, `TaskUid::created_on`) | the line does not have to show the date (§6.4); the merge keeps the server's value when the vault has none (§11.3), so the two do not disagree |
+| (no `➕`) | `CREATED` of the server copy, kept as it is; on the first push the local day of that pass — for a long UID the day it was minted (UTC date of its ULID timestamp, `TaskUid::created_on`) | the line does not have to show the date (§6.4); the merge keeps the server's value when the vault has none (§11.3), so the two do not disagree |
 | `✅ 2026-09-19` | `COMPLETED:20260919T000000Z` | date-only → midnight UTC |
 | `📅 2026-09-19` | `DUE;VALUE=DATE:20260919` | all-day |
 | `📅 2026-09-19 17:00` | `DUE:20260919T170000` | **floating** local time — no `Z`, no `TZID` |

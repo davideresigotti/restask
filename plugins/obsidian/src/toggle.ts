@@ -42,7 +42,7 @@ export function withCompletedToken(raw: string, today: string): string {
 	const anchors = [
 		/➕[ \t]+\d{4}-\d{2}-\d{2}/u,
 		/📁[ \t]+[0-9A-Za-z]+(?:-[0-9A-Za-z]+)*(?=[ \t]*(?:🆔|$))/u,
-		/🆔[ \t]+(?:restask|taskres)-/u,
+		/🆔[ \t]+(?:(?:restask|taskres)-|[a-z]{1,4}[1-9])/u,
 	];
 	const anchor = anchors.map((token) => raw.search(token)).find((at) => at >= 0) ?? -1;
 	if (anchor >= 0) {

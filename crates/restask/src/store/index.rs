@@ -42,7 +42,7 @@ pub struct IndexEntry {
 /// UID → entry map (§9.1). A missing file loads as empty; saves are atomic.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Index {
-    /// All known entries, ordered by UID (lexicographic = chronological for ULIDs).
+    /// All known entries, ordered by UID (§3.1: creation order, as far as a UID tells it).
     pub entries: BTreeMap<TaskUid, IndexEntry>,
 }
 

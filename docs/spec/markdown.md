@@ -27,11 +27,18 @@ Metadata tokens may appear anywhere in `body`, in any order:
 | Created | `➕[ \t]+(\d{4}-\d{2}-\d{2})` | `created` |
 | Created, asked for | a `➕` as a standalone word with no date behind it | `wants_created` |
 | Calendar | `📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)` — a calendar's name as one word, lowercased to its slug | `list` |
-| UID | `🆔[ \t]+((?:restask\|taskres)-[0-9a-z]{26})` | `uid` |
+| UID | `🆔[ \t]+((?:restask\|taskres)-[0-9a-z]{26}\|[a-z]{1,4}[1-9][0-9]{0,14}\b)` | `uid` |
 
 `text` = body with every matched token removed, whitespace runs collapsed, trimmed.
 `checked` = `[x]`/`[X]`. A token whose value is well-shaped but invalid (impossible date,
-non-ULID body) leaves its field empty; the first occurrence of a repeated token wins.
+no ULID behind `restask-`) leaves its field empty; the first occurrence of a repeated
+token wins.
+
+The UID token spells a counted UID (§3.1) without its prefix — `🆔 a42` is the task
+`restask-a42` — and a long one in full. A counted token is a whole word (`\b`: not
+followed by a letter, a digit or `_`): `🆔 a42b` is text, and so is `🆔 restask-a42`.
+A task line is found by its whole token, never by a part of one: `a4` is not on the
+line that carries `a42`.
 
 A `🔁` not followed by a rule is ordinary text. A rule is written back in its canonical
 spelling whenever its line is rewritten.
@@ -110,7 +117,11 @@ Every pass scans the routed notes and, in repair mode, rewrites the ones that ne
 (one atomic write per file; a file that changed on disk since it was read is left for the
 next pass):
 
-- **Register** — a task line without a UID gets a fresh `🆔`, and nothing else.
+- **Register** — a task line without a UID gets a fresh `🆔`, and nothing else. The UID
+  is the next of the device that registers the line (§3.1): of the daemon's machine,
+  of the editing machine `restask settle` runs on, of the phone the plugin runs on.
+  Every UID a line of the vault carries is seen before one is minted. In a vault its
+  sync node has not switched to counted UIDs (§9.4) the UID is a long one.
 - **A checkbox without text is not a task yet.** A line of the §6.1 shape whose `text`
   is empty and that has no UID — `- [ ] `, also with metadata tokens only — is the line
   an editor opens for a task still to be written (§15.7, or a list continuation). It is
@@ -122,8 +133,8 @@ next pass):
   request is answered in the same pass, before the task is rendered or pushed:
   on a line that is being registered with **today**; on a registered task with the
   server's `CREATED` as the base snapshot recorded it at the last sync (§9), else — the
-  server has never had the task, or the snapshot is not vouched for — with the day its
-  UID was minted (`TaskUid::created_on`), else with today (`Scan::created_requests`,
+  server has never had the task, or the snapshot is not vouched for — with the day a
+  long UID was minted (`TaskUid::created_on`), else with today (`Scan::created_requests`,
   `SetCreated`). No server round trip is needed. A date written by hand is taken as it
   is; a `➕ <date>` that is on a line stays, and counts as the task's creation date
   (§11.3). Deleting it changes nothing on the server. Lines that restask writes itself —
@@ -169,18 +180,18 @@ restask-render: 9c1f0e2a7b3d4f56
 # TODO
 
 ## 🔺 Highest Priority
-- [ ] Renew the certificate 🔺 [[Home Lab#Tasks|Home Lab]] 🆔 restask-01jz…
-- [ ] Update restask README 🔺 📁 work 🆔 restask-01jz…
+- [ ] Renew the certificate 🔺 [[Home Lab#Tasks|Home Lab]] 🆔 a1
+- [ ] Update restask README 🔺 📁 work 🆔 a2
 
 ## 🔽 Low Priority
-- [ ] Sort the cables 🔽 🆔 restask-01jz…
+- [ ] Sort the cables 🔽 🆔 a3
 
 ## No Priority
-- [ ] Buy milk ➕ 2026-09-22 🆔 restask-01jz…
-- [ ] Call the bank 🆔 restask-01jz…
+- [ ] Buy milk ➕ 2026-09-22 🆔 a4
+- [ ] Call the bank 🆔 a5
 
 ## Done
-- [x] Take out trash ✅ 2026-09-19 🆔 restask-01jz…
+- [x] Take out trash ✅ 2026-09-19 🆔 a6
 ```
 
 The view is the file at `vault.inbox_file`, and it is known by that path alone — to the
@@ -198,7 +209,7 @@ Render rules (`render(tasks, cfg)` — same input, byte-identical output):
 - `## <emoji> <Name> Priority`, Highest → Lowest: active tasks with that priority — inbox
   lines and mirror lines together — by (source path, line).
 - `## No Priority`, below the priority sections: active inbox tasks without a priority,
-  by UID (creation order). A view rendered before this section had them in `## Inbox`
+  by UID (§3.1: creation order, `a9` before `a10`). A view rendered before this section had them in `## Inbox`
   at the top; the next render moves them.
 - **Unprioritized note tasks are not shown**: they stay in their note only.
 - `## Done`: completed *inbox* tasks, newest first (date desc, then UID desc). Completed
@@ -395,17 +406,17 @@ anything — this part of the note is the user's
 # TODO
 
 ## 🔺 Highest Priority
-- [ ] Update the firewall rules 🔺 [[Networking#TODO|Networking]] 🆔 restask-01jz…
-- [ ] Replace the failing disk 🔺 🛫 2026-10-08 📅 2026-10-09 [[Storage#TODO|Storage]] 🆔 restask-01jz…
+- [ ] Update the firewall rules 🔺 [[Networking#TODO|Networking]] 🆔 a7
+- [ ] Replace the failing disk 🔺 🛫 2026-10-08 📅 2026-10-09 [[Storage#TODO|Storage]] 🆔 a8
 
 ## 🔽 Low Priority
-- [ ] Label the cables 🔽 🆔 restask-01jz…
+- [ ] Label the cables 🔽 🆔 a9
 
 ## No Priority
-- [ ] Buy a rack 🆔 restask-01jz…
+- [ ] Buy a rack 🆔 a10
 
 ## Done
-- [x] Order the switch ✅ 2026-10-03 🆔 restask-01jz…
+- [x] Order the switch ✅ 2026-10-03 🆔 a11
 ```
 
 **The section** (`root_view::section`). From the first heading whose text is `TODO` — in

@@ -160,7 +160,8 @@ in the commit message.
 
 **TypeScript** (plugin): `strict: true`; zero runtime dependencies; Obsidian API only in
 `src/main.ts` and `src/settings.ts`; everything else pure and tested under Vitest. The
-plugin writes Markdown and nothing else — no state files, no network. It may read what
+plugin writes Markdown and nothing else — no network, and no state file but its
+device's claim (`.restask/devices/<tag>`, spec §9.4). It may read what
 the engine's local phase reads (`restask.toml`, the routed notes, `.restask/`), when
 parity needs it.
 

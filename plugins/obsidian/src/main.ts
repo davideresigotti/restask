@@ -30,9 +30,13 @@ import type { EditorState, Extension } from "@codemirror/state";
 import { stripUid } from "./conceal";
 import { taskFiling, taskStart, uidConcealment, viewLock, type Carried, type DroppedMirror, type FilingHost } from "./editor";
 import {
+	claimedTags,
 	completedByUid,
 	declaresRoot,
+	deviceOf,
 	disclaimed,
+	freeTags,
+	highestNumber,
 	homeLine,
 	inView,
 	isSealed,
@@ -49,11 +53,13 @@ import {
 	settled,
 	taskIndex,
 	toggledLines,
+	uidCounter,
 	uidGenerator,
 	viewOf,
+	type Device,
 	type NoteKind,
 } from "./filing";
-import { checkOffset, parseLine } from "./markdown";
+import { checkOffset, hasUid, parseLine } from "./markdown";
 import { suggestionsFor, triggerAt, type Suggestion } from "./modal";
 import { DEFAULT_SETTINGS, RestaskSettingTab, type RestaskSettings } from "./settings";
 import { toggleDone } from "./toggle";
@@ -153,15 +159,37 @@ function hideUids(el: HTMLElement): void {
 	}
 }
 
+/** The key this device keeps its identity under in the vault's local storage (§9.4). */
+const DEVICE_KEY = "restask-device";
+
+/** The vault's state directory (§9), and the claims of its devices in it (§9.4). */
+const STATE_DIR = ".restask";
+const DEVICES_DIR = `${STATE_DIR}/devices`;
+
 /** The restask plugin (§15.4). */
 export default class RestaskPlugin extends Plugin {
 	settings: RestaskSettings = DEFAULT_SETTINGS;
 	/** Registered once; its contents follow the `hideTaskIds` setting. */
 	private readonly editorExtensions: Extension[] = [];
-	/** Fresh task UIDs (§3.1); one generator, so UIDs made together keep their order. */
-	private readonly newUid = uidGenerator(
-		() => Date.now(),
-		(count) => crypto.getRandomValues(new Uint8Array(count)),
+	/**
+	 * What this device mints UIDs under in this vault (§9.4): undefined until its claim
+	 * is known to hold — and in a vault its sync node has not switched to counted UIDs.
+	 */
+	private device: Device | undefined;
+	/**
+	 * Fresh task UIDs (§3.1): the device's tag and its next number, each remembered as
+	 * it is handed out — and a long UID while the device has no tag to use.
+	 */
+	private readonly newUid = uidCounter(
+		() => this.device,
+		(device) => {
+			this.device = device;
+			this.storeDevice(device);
+		},
+		uidGenerator(
+			() => Date.now(),
+			(count) => crypto.getRandomValues(new Uint8Array(count)),
+		),
 	);
 	/**
 	 * Vault path of the TODO.md view (`inbox_file` in `restask.toml`, §14.1); undefined in
@@ -177,10 +205,13 @@ export default class RestaskPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		await this.loadInboxPath();
-		// `restask.toml` may arrive, or change, through the file sync while the app is open.
+		await this.claimDevice();
+		// `restask.toml` may arrive, or change, through the file sync while the app is open —
+		// and so may the claim of a device that took this one's tag.
 		this.registerEvent(
 			this.app.workspace.on("file-open", (file) => {
 				void this.loadInboxPath().then(() => this.openAtHome(file));
+				void this.claimDevice();
 			}),
 		);
 		this.addSettingTab(new RestaskSettingTab(this.app, this));
@@ -346,6 +377,105 @@ export default class RestaskPlugin extends Plugin {
 		return written;
 	}
 
+	/** The identity this device stored for this vault (§9.4): in local storage, which no file sync carries. */
+	private storedDevice(): Device | undefined {
+		// `loadLocalStorage` is the vault's own (Obsidian 1.8.7); before it, the browser's, under the vault's name.
+		const stored: unknown =
+			typeof this.app.loadLocalStorage === "function"
+				? this.app.loadLocalStorage(DEVICE_KEY)
+				: window.localStorage.getItem(`${DEVICE_KEY}:${this.app.vault.getName()}`);
+		return deviceOf(stored);
+	}
+
+	private storeDevice(device: Device): void {
+		const stored = JSON.stringify(device);
+		if (typeof this.app.saveLocalStorage === "function") this.app.saveLocalStorage(DEVICE_KEY, stored);
+		else window.localStorage.setItem(`${DEVICE_KEY}:${this.app.vault.getName()}`, stored);
+	}
+
+	/**
+	 * Makes sure this device has a tag of its own to mint UIDs under (§9.4), in a vault
+	 * that its sync node has switched to counted UIDs — some device holds a claim under
+	 * `.restask/devices/`; in any other vault nothing is claimed, and the UIDs made here
+	 * are long ones, which a sync node of any version reads. The claim
+	 * `.restask/devices/<tag>` holds this device's secret. A device without a tag — or
+	 * whose claim another device holds: both took the tag before they saw each other,
+	 * and the file sync kept the other's — draws one among the shortest that no claim
+	 * and no UID of the vault's state uses, and claims it. The claim is the one file the
+	 * plugin writes that is not a note.
+	 */
+	private async claimDevice(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		try {
+			const claims = (await adapter.exists(DEVICES_DIR)) ? (await adapter.list(DEVICES_DIR)).files : [];
+			const taken = claimedTags(claims.map((path) => path.slice(path.lastIndexOf("/") + 1)));
+			// A device that registers nothing (the `settleTasks` setting) needs no tag.
+			if (taken.size === 0 || !this.settlesHere()) {
+				this.device = undefined;
+				return;
+			}
+			const known = this.device ?? this.storedDevice();
+			let secret = known?.secret;
+			if (known !== undefined) {
+				const claim = `${DEVICES_DIR}/${known.tag}`;
+				const held = (await adapter.exists(claim)) ? (await adapter.read(claim)).trim() : undefined;
+				if (held === undefined || held === known.secret) {
+					if (held === undefined) await this.writeClaim(known);
+					// A number handed out while this ran is not taken back.
+					if (this.device?.tag !== known.tag) this.device = { ...known, last: Math.max(known.last, await this.highestKnown(known.tag)) };
+					return;
+				}
+			}
+			this.device = undefined;
+			secret = secret ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+			for (const uid of await this.knownUids()) {
+				const tag = /^restask-([a-z]{1,4})[1-9]/.exec(uid)?.[1];
+				if (tag !== undefined) taken.add(tag);
+			}
+			const free = freeTags(taken);
+			if (free.length === 0) return;
+			const draw = crypto.getRandomValues(new Uint32Array(1))[0] % free.length;
+			const device: Device = { tag: free[draw], secret, last: 0 };
+			// The identity first: a claim nobody remembers making would keep its tag for good.
+			this.storeDevice(device);
+			await this.writeClaim(device);
+			this.device = device;
+		} catch (error) {
+			// Without a claim that is known to hold, the UIDs made here are long ones.
+			this.device = undefined;
+			console.error("restask: no device tag", error);
+		}
+	}
+
+	private async writeClaim(device: Device): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		for (const dir of [STATE_DIR, DEVICES_DIR]) {
+			if (!(await adapter.exists(dir))) await adapter.mkdir(dir);
+		}
+		await adapter.write(`${DEVICES_DIR}/${device.tag}`, `${device.secret}\n`);
+	}
+
+	/** The UIDs the vault's state knows (§9): the index and the tombstones, as far as they are there and readable. */
+	private async knownUids(): Promise<string[]> {
+		const adapter = this.app.vault.adapter;
+		const keys = async (path: string, inner?: string): Promise<string[]> => {
+			try {
+				if (!(await adapter.exists(path))) return [];
+				const parsed: unknown = JSON.parse(await adapter.read(path));
+				const record = inner === undefined ? parsed : (parsed as Record<string, unknown> | null)?.[inner];
+				return typeof record === "object" && record !== null ? Object.keys(record) : [];
+			} catch {
+				return [];
+			}
+		};
+		return [...(await keys(`${STATE_DIR}/index.json`, "entries")), ...(await keys(`${STATE_DIR}/tombstones.json`))];
+	}
+
+	/** The highest number the vault's state knows under `tag`: a device whose local storage was reset counts on from there. */
+	private async highestKnown(tag: string): Promise<number> {
+		return highestNumber(tag, await this.knownUids());
+	}
+
 	/** Reads where the vault keeps its TODO.md view: `inbox_file` of `restask.toml`, `TODO.md` when the config names none. */
 	private async loadInboxPath(): Promise<void> {
 		try {
@@ -374,7 +504,7 @@ export default class RestaskPlugin extends Plugin {
 		const attempt = async (note: TFile): Promise<{ note: TFile; text: string; lines: string[] } | undefined> => {
 			tried.add(note.path);
 			const text = await this.app.vault.read(note);
-			if (!text.includes(uid) || text.includes("\r")) return undefined;
+			if (!hasUid(text, uid) || text.includes("\r")) return undefined;
 			const lines = text.split("\n");
 			if (this.noteKind(note, lines)?.inboxView !== false) return undefined;
 			// A mirror line in the view of a root note is not the task (§7.6).

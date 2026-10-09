@@ -91,7 +91,7 @@ pass; pushing stays the daemon's.
 │   │   ├── sync/        merge  planner (pure) · engine (I/O)        (§11)
 │   │   ├── fsio.rs      atomic writes
 │   │   ├── vault.rs     walk, scan, repair                          (§5, §6.4)
-│   │   ├── store/       index  cache (base snapshots)  tombstones   (§9)
+│   │   ├── store/       index  cache (base snapshots)  tombstones  wires  device  (§9)
 │   │   ├── caldav/      protocol  port  client  offline             (§10)
 │   │   ├── daemon.rs                                                (§13.1)
 │   │   └── cli.rs  setup.rs  tui.rs  config.rs                      (§13–14)

@@ -95,7 +95,10 @@ const COMPLETED_RE = /✅[ \t]+(\d{4}-\d{2}-\d{2})/gu;
 const CREATED_RE = /➕[ \t]+(\d{4}-\d{2}-\d{2})/gu;
 // A `➕` on its own, no date behind it: the request for the creation date.
 export const BARE_CREATED_RE = /(^|[ \t])➕(?=$|[ \t])(?![ \t]+\d{4}-\d{2}-\d{2})/gu;
-const UID_RE = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26})/gu;
+// A counted UID (§3.1) — a device tag and a number, as a whole word (`a42`) — or a long
+// one in full. The engine's `UID_PATTERN`.
+const UID_RE = /🆔[ \t]+((?:restask|taskres)-[0-9a-z]{26}|[a-z]{1,4}[1-9][0-9]{0,14}(?![0-9A-Za-z_]))/gu;
+const COUNTED_UID_RE = /^([a-z]{1,4})([1-9][0-9]{0,14})$/;
 // A calendar's name: one word of letters and digits with single hyphens inside.
 const LIST_RE = /📁[ \t]+([0-9A-Za-z]+(?:-[0-9A-Za-z]+)*)/gu;
 
@@ -274,15 +277,51 @@ export function checkOffset(line: string): number | undefined {
 	return line.indexOf("[", m.groups["indent"].length) + 1;
 }
 
+/** `true` when `value`, as `UID_RE` matched it, is a UID (§3.1): a counted one, or a long one whose body is a ULID. */
+function validUid(value: string): boolean {
+	return COUNTED_UID_RE.test(value) || ULID_BODY_RE.test(value.slice(UID_PREFIX_LENGTH));
+}
+
 /**
  * The token that gives `body` its UID (§6.1): the first `🆔` match, and only when its
- * value is a valid ULID — the same token `parseLine` reads the `uid` field from.
+ * value is a valid UID — the same token `parseLine` reads the `uid` field from.
  */
 export function uidSpan(body: string): Span | undefined {
 	UID_RE.lastIndex = 0;
 	const m = UID_RE.exec(body);
-	if (m === null || !ULID_BODY_RE.test(m[1].slice(UID_PREFIX_LENGTH))) return undefined;
+	if (m === null || !validUid(m[1])) return undefined;
 	return { start: m.index, end: m.index + m[0].length };
+}
+
+/** The UIDs `text` — a line, or a whole note — spells behind a `🆔`, in order. */
+export function uidsIn(text: string): string[] {
+	return [...text.matchAll(UID_RE)].map((m) => m[1]).filter(validUid);
+}
+
+/**
+ * `true` when a `🆔` token of `text` spells `uid`. A token is the whole word: `a4` is
+ * not in a note because `a42` is (the engine's `uid_tokens`).
+ */
+export function hasUid(text: string, uid: string): boolean {
+	return text.includes(uid) && uidsIn(text).includes(uid);
+}
+
+/** The device tag and the number of a counted UID (§3.1); undefined for a long one. */
+export function countedUid(uid: string): { tag: string; number: number } | undefined {
+	const m = COUNTED_UID_RE.exec(uid);
+	return m === null ? undefined : { tag: m[1], number: Number(m[2]) };
+}
+
+/**
+ * The order of two UIDs (§3.1, the engine's `Ord`): creation order as far as a UID tells
+ * it — the long ones first, as text; then the counted ones by number, then by tag.
+ * Negative when `a` comes first.
+ */
+export function uidOrder(a: string, b: string): number {
+	const text = (x: string, y: string): number => (x < y ? -1 : x > y ? 1 : 0);
+	const [ca, cb] = [countedUid(a), countedUid(b)];
+	if (ca === undefined || cb === undefined) return ca === cb ? text(a, b) : ca === undefined ? -1 : 1;
+	return ca.number - cb.number || text(ca.tag, cb.tag);
 }
 
 /** Parses one line against the §6.1 grammar; non-task lines (including `1. [ ]`, `-[ ]`) → undefined. */
@@ -309,8 +348,7 @@ export function parseLine(line: string): TaskLine | undefined {
 	const createdValue = created.value !== undefined && validDate(created.value) ? created.value : undefined;
 	const completedValue =
 		completed.value !== undefined && validDate(completed.value) ? completed.value : undefined;
-	const uidValue =
-		uid.value !== undefined && ULID_BODY_RE.test(uid.value.slice(UID_PREFIX_LENGTH)) ? uid.value : undefined;
+	const uidValue = uid.value !== undefined && validUid(uid.value) ? uid.value : undefined;
 
 	let anomalies = 0;
 	if (due.value !== undefined && dueValue === undefined) anomalies++;
