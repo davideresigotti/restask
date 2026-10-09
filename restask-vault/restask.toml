@@ -1,0 +1,15 @@
+done_heading = "Done"
+inbox_file = "TODO.md"
+inbox_list = "inbox"
+todo_lists = [
+    "home-lab",
+    "projects",
+]
+obsidian_vault = "restask-vault"
+track = ["**/*.md"]
+ignore = [
+    ".restask/**",
+    ".obsidian/**",
+    ".trash/**",
+    ".git/**",
+]
