@@ -32,8 +32,9 @@ the maintainer's machine config). **Never contact it** from tests or while devel
 `#[ignore]`d `tests/e2e_server.rs`, which the owner runs by hand and which touches the
 `restask-dev` collection only. Never read `~/.config/restask/radicale.passwd`.
 
-**Testing uses the `dev` calendar and `restask-vault/`, and nothing else** (owner,
-2026-10-02, after a trial deleted two tasks of the owner's `inbox` calendar — T75).
+**Testing uses `restask-vault/` and the calendars of its own account, and nothing else**
+(owner, 2026-10-02, after a trial deleted two tasks of the owner's own `inbox` calendar
+— T75).
 There are two kinds of test, and no third:
 
 - *Automated tests* (`cargo test`, Vitest, the Lua tests) are hermetic: temporary
@@ -41,17 +42,20 @@ There are two kinds of test, and no third:
   may use `restask-vault/` as ready-made input, but only a copy of it in a temporary
   directory (see "Fixtures and the sandbox").
 - *A trial of the real thing* — the installed or built `restask` binary, the plugin in
-  Obsidian, Neovim, the daemon — happens in `restask-vault/`, whose tasks live in the
-  calendar `dev` through the sync node's daemon. No other vault, no other calendar.
+  Obsidian, Neovim, the daemon — happens in `restask-vault/`. Its tasks live in the
+  calendars its `restask.toml` and its notes name (`inbox`, `projects`, `homelab`), in
+  a CalDAV account made for the sandbox that holds nothing else, through the sync
+  node's daemon. No other vault, no other account. `inbox` is the right name there:
+  it is the sandbox account's inbox, not the owner's.
 
 What follows from it, each point a thing that went wrong once:
 
 - Never run the real binary's `setup`, `daemon`, `sync`, `add`, `done` or `undone` on
   a vault other than `restask-vault/` — no throwaway vault, no scratch copy, no
   `--vault` / `RESTASK_VAULT` pointing anywhere else. The machine config of this
-  computer names the live server; a vault whose `restask.toml` says `inbox_list =
-  "inbox"`, or whose notes route to lists of their own, is synced with the owner's
-  real calendars by any pass that finds that config.
+  computer names the live server; any other vault — a throwaway one, a scratch copy of
+  the sandbox with its `inbox_list = "inbox"` — is synced with the owner's real
+  calendars of those names by any pass that finds that config.
 - Never run `restask setup` at all, in any form (`--join`, `--non-interactive`, through
   a script, inside a stand-in for a container): it installs and starts the systemd
   unit of this machine, and a unit carries none of the environment (`RESTASK_CONFIG`,
@@ -68,9 +72,10 @@ What follows from it, each point a thing that went wrong once:
 
 There is one daemon per vault (`docs/spec/overview.md` §1.1), and for the sandbox it does
 not run on the development machine. It runs on the sync node — the compose stack
-`/opt/docker/restask` on the ssh host `docker`, the machine Radicale is on — and serves
-that machine's copy of `restask-vault` (Syncthing folder `obsidian-dev`, calendar `dev`).
-`contrib/update.sh docker` (§5.4) is how a change gets there. A second daemon — or a
+`restask-vault` on the ssh host `docker` — and serves that machine's copy of
+`restask-vault`, which the file sync keeps equal to this one. The owner's own vault has
+a stack of its own on that host (`restask`). `contrib/update.sh docker` (§5.4) is how a
+change gets to both. A second daemon — or a
 one-shot `restask sync` — on this machine is not redundant but harmful: it races the
 file sync and leaves conflict copies of notes (§1.1 *Why not two*).
 
@@ -209,12 +214,17 @@ Every bug fix ships with a regression test at the level where the bug showed
    It does four things, each skipped when there is nothing to update (App. E): it
    reinstalls the `restask` binary of this machine (the CLI Neovim calls), restarts this
    machine's daemon *if* its unit is enabled (it is not: the daemon runs on the sync
-   node only, §1.1), copies the built plugin bundle into the sandbox vault, and ships
-   the sources of the working tree to the sync node — the compose stack
-   `/opt/docker/restask` on the ssh host `docker` — where the image is rebuilt and the
-   daemon restarted.
+   node only, §1.1), copies the built plugin bundle into the vaults this machine's
+   configs name, and ships the sources of the working tree to the sync node — every
+   compose stack those configs record on the ssh host `docker`: the sandbox's
+   (`restask-vault`) and the one of the owner's own vault (`restask`) — where each
+   image is rebuilt and each daemon restarted. That is on purpose: the `restask`
+   binary of this machine is shared by both vaults, and a change to what restask
+   writes must reach every runner of a vault together (`CHANGELOG.md`), so a change
+   that is not fit for the owner's vault is not deployed to the sandbox alone either —
+   it is not deployed.
 
-   Read the output: the script ends with the daemon's log, and the first pass must be
+   Read the output: the script ends with each daemon's log, and the first pass must be
    free of errors. A daemon that does not come up fails the script and is a red gate:
    fix it before you stop. Obsidian picks the new bundle up when the plugin or the app
    is reloaded; say so when you report. Say in the session log what was updated, or why
@@ -231,8 +241,8 @@ Every bug fix ships with a regression test at the level where the bug showed
 
 **Fixtures and the sandbox.** `crates/restask/tests/fixtures/` and
 `plugins/obsidian/test/fixtures/` are immutable test inputs. `restask-vault/` is the
-sandbox (the sync node's daemon is syncing it, through the file sync, with the calendar
-`dev`): the one place a trial of the real thing is made (§2). An automated test may
+sandbox (the sync node's daemon is syncing it, through the file sync, with the
+calendars of the sandbox's account): the one place a trial of the real thing is made (§2). An automated test may
 read it as input, but works on a copy in a temporary directory and never writes to the
 folder itself (the file sync would carry the write to the sync node). Never commit
 changes to it, never clean it up. What an agent writes there is
