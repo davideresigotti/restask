@@ -132,6 +132,7 @@ async fn the_daemon_reconciles_on_start_and_on_vault_events() {
             debounce_ms: 20,
             poll_secs: 3_600,
             watch_ms: 0,
+            settle_ms: 0,
             once: false,
         },
         rx,
@@ -160,6 +161,87 @@ async fn the_daemon_reconciles_on_start_and_on_vault_events() {
     worker.await.unwrap().unwrap();
 }
 
+/// Seen on the sync node (2026-10-09): a line typed in Obsidian was saved, carried
+/// over and registered by the daemon while its author was still typing it — four
+/// writes into TODO.md in forty seconds, each one a conflict copy on the computer, and
+/// a task pushed, deleted and pushed again under a new UID.
+#[tokio::test]
+async fn a_note_that_was_just_written_is_left_to_its_device_for_a_while() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            watch_ms: 0,
+            settle_ms: 800,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    wait_until(|| mock.resource_names("home").len() == 1).await;
+
+    // A line without its UID, as an editor saves it in the middle of an edit.
+    let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
+    let typed = format!("{note}- [ ] walk the dog\n");
+    write_vault_file(&dir, "notes/home.md", &typed);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap(),
+        typed,
+        "the daemon has not written into it"
+    );
+    assert_eq!(mock.resource_names("home").len(), 1);
+
+    // Nobody settled it: the daemon does, later.
+    wait_until(|| mock.resource_names("home").len() == 2).await;
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
+/// The wait is for local work only: a note its device has settled is synced at once.
+#[tokio::test]
+async fn a_settled_note_is_synced_without_waiting() {
+    let dir = seeded_vault();
+    let mock = MockCaldav::new();
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let worker = tokio::spawn(run_with(
+        dir.path().to_path_buf(),
+        machine(),
+        DaemonConfig {
+            debounce_ms: 20,
+            poll_secs: 3_600,
+            watch_ms: 0,
+            // Far longer than `wait_until` waits.
+            settle_ms: 60_000,
+            once: false,
+        },
+        rx,
+        mock.clone(),
+        clock(),
+    ));
+    wait_until(|| mock.resource_names("home").len() == 1).await;
+    // The startup pass wrote the note; that write is a change like any other.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let note = std::fs::read_to_string(dir.path().join("notes/home.md")).unwrap();
+    write_vault_file(
+        &dir,
+        "notes/home.md",
+        &format!("{note}- [ ] walk the dog \u{1F194} zz7\n"),
+    );
+    wait_until(|| mock.resource_names("home").len() == 2).await;
+
+    tx.send(true).unwrap();
+    worker.await.unwrap().unwrap();
+}
+
 /// §7.5, §13.1: which calendars TODO.md shows is said in `restask.toml`, a file of the
 /// vault. Changed on another device, it reaches the daemon through the file sync and
 /// takes effect there without a restart.
@@ -180,6 +262,7 @@ async fn a_changed_vault_config_takes_effect_while_the_daemon_runs() {
             debounce_ms: 20,
             poll_secs: 3_600,
             watch_ms: 0,
+            settle_ms: 0,
             once: false,
         },
         rx,
@@ -223,6 +306,7 @@ async fn a_calendar_made_on_the_server_while_the_daemon_runs_shows_up_in_todo_md
             debounce_ms: 20,
             poll_secs: 3_600,
             watch_ms: 50,
+            settle_ms: 0,
             once: false,
         },
         rx,
@@ -272,6 +356,7 @@ async fn changes_made_on_the_server_reach_the_vault_without_waiting_for_the_poll
             debounce_ms: 20,
             poll_secs: 3_600,
             watch_ms: 20,
+            settle_ms: 0,
             once: false,
         },
         rx,

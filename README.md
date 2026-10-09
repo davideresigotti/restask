@@ -83,7 +83,7 @@ restask is **local-first**: everything happens on your device's files, and the n
 |---|---|
 | Obsidian (PC, phone) | The plugin, when you leave the line |
 | Neovim | `restask settle`, when you save |
-| Any other editor | The daemon, at its next pass |
+| Any other editor | The daemon, about 10 seconds after you save |
 
 - **Syncthing** carries the notes between devices.
 - **The daemon** (one, on your always-on server) makes the vault and Radicale agree, checking the server every two seconds.

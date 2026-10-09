@@ -116,7 +116,7 @@ no network, no server and no daemon — neither on that device nor reachable fro
 |---|---|---|
 | Obsidian, desktop and mobile | the plugin — a port of the engine's rules (§15.6) | when the edit of a line is finished (the cursor leaves it); a checkbox at once |
 | Neovim | the engine itself, through the CLI (`restask settle`) — no rules in Lua (§16) | when the buffer is written; a toggle at once |
-| Any other editor; a file that arrives through the file sync | the daemon's local phase (§11.1) | at its next pass |
+| Any other editor; a file that arrives through the file sync | the daemon's local phase (§11.1) | at its next pass, once the note has been left alone for 10 s (§13.1) |
 
 The last row is the fallback for the first two, on a computer as on a phone: an edit
 that no integration settled is settled by the sync node, by the same local phase, and

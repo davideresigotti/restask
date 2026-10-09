@@ -41,7 +41,7 @@ Event names used as messages: `scan_complete`, `task_registered`, `task_complete
 
 ```
 notify watcher (vault, recursive) ───┐
-server watch (caldav.watch_secs, 2) ─┼─▶ "dirty" + debounce (300 ms) ─▶ one Engine::reconcile
+server watch (caldav.watch_secs, 2) ─┼─▶ "dirty" + debounce (300 ms) ─▶ [settled?] ─▶ one Engine::reconcile
 poll timer (caldav.poll_secs, 300) ──┘
 ```
 
@@ -52,6 +52,24 @@ poll timer (caldav.poll_secs, 300) ──┘
   Events on hidden paths (§5.1: `.restask/`, a file sync's version archive), on ignored
   paths, on temp files, on setup backups and on conflict copies do not — so the engine's own state writes never re-trigger it, and its
   note writes cause at most one follow-up pass, which is a no-op.
+- **A note that was just written is left to its device.** Before a pass, when a note
+  changed less than 10 s ago (`DaemonConfig::settle_ms`, counted from the file event
+  here, not from the file's mtime), the daemon asks whether the vault has local work
+  waiting (`Engine::unsettled`: a read-only scan — a line to register or repair, an
+  edit on a mirror line to carry, a view that a render would change). If it has, the
+  pass waits until the 10 s are over, and is asked again then: every further write to
+  the note starts them anew, up to a minute in all (`vault_settling`, logged once).
+  The reason is the user who is still on the line. An editor saves a line in the middle
+  of it; the file sync carries it over; a pass at once registers it and files it in
+  TODO.md — under an editor that goes on writing the file. The file sync then meets
+  two versions (a conflict copy per save), and a line saved once more without the UID
+  it was given is a second task: the first is deleted on the server, the second pushed
+  (seen on the sync node, 2026-10-09: four writes into TODO.md and two tasks for one
+  line in forty seconds). The device does that work itself when the edit is finished
+  (invariant 12); the daemon's local phase is the fallback for an edit no integration
+  settled, and a fallback can be late. It costs a settled vault nothing: a note that
+  arrives with its local work done is synced at once, and so is every change that
+  comes from the server. One-shot passes (`restask sync`, `--once`, setup) never wait.
 - **Server watch.** The server sends no events, so the daemon asks: every
   `caldav.watch_secs` one `PROPFIND` (the collection listing of §10.2) returns the change
   tag (`getctag`) of every task collection, and an answer that differs from the previous

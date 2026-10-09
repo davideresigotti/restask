@@ -32,9 +32,26 @@ pub struct DaemonConfig {
     /// milliseconds ([`server_tags`]); a changed answer starts a pass. `0` never asks:
     /// server-side changes then wait for the poll.
     pub watch_ms: u64,
+    /// How long a note that still needs local work is left alone after it was last
+    /// written, in milliseconds (§13.1): the device it is being edited on gets that
+    /// long to do the work itself. `0` never waits.
+    pub settle_ms: u64,
     /// Perform a single reconcile and exit (`restask daemon --once`).
     pub once: bool,
 }
+
+/// What woke the reconciler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// A note of the vault was written, here or by the file sync.
+    Vault,
+    /// Another client wrote to the server.
+    Server,
+}
+
+/// How many times [`DaemonConfig::settle_ms`] a pass is held back at most: a vault that
+/// some program rewrites all the time is still synced.
+const SETTLE_LIMIT: u32 = 6;
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -42,6 +59,7 @@ impl Default for DaemonConfig {
             debounce_ms: 300,
             poll_secs: 300,
             watch_ms: 2_000,
+            settle_ms: 10_000,
             once: false,
         }
     }
@@ -104,7 +122,7 @@ pub async fn run_with<C: CaldavPort>(
         return Ok(());
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Wake>();
     let _watcher = spawn_watcher(&vault, matchers, tx.clone())?;
     let server_watch = if dc.watch_ms > 0 {
         // The first look is taken before the first pass: whatever another client writes
@@ -126,7 +144,11 @@ pub async fn run_with<C: CaldavPort>(
     let mut poll = tokio::time::interval(Duration::from_secs(dc.poll_secs.max(1)));
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let debounce = Duration::from_millis(dc.debounce_ms);
+    let settle = Duration::from_millis(dc.settle_ms);
     let mut pending = Debounce::default();
+    // When a note was last seen to change, and since when a pass is being held back.
+    let mut changed: Option<Instant> = None;
+    let mut held: Option<Instant> = None;
 
     loop {
         if *shutdown.borrow() {
@@ -137,6 +159,15 @@ pub async fn run_with<C: CaldavPort>(
             // it. A failed pass (e.g. the server is down) must not kill the daemon; the
             // next event or poll tick retries.
             refresh_config(&vault, &mut engine);
+            // A note written a moment ago that still needs local work — a line without
+            // its UID, a view that is not filed — is most likely being edited: the
+            // device it is edited on does that work when the edit is finished (§1.1).
+            // A pass now would write into the file under the editor, and the file sync
+            // would meet two versions of it.
+            if let Some(until) = settling(&engine, changed, settle, &mut held).await {
+                pending.touch(until);
+                continue;
+            }
             follow_calendars(&mut engine).await;
             match engine.reconcile().await {
                 Ok(report) => tracing::debug!(?report, "reconciled"),
@@ -152,7 +183,13 @@ pub async fn run_with<C: CaldavPort>(
         }
         tokio::select! {
             event = rx.recv() => match event {
-                Some(()) => pending.touch(Instant::now() + debounce),
+                Some(wake) => {
+                    let now = Instant::now();
+                    if wake == Wake::Vault {
+                        changed = Some(now);
+                    }
+                    pending.touch(now + debounce);
+                }
                 None => break,
             },
             // The first tick is immediate: the daemon reconciles on start.
@@ -192,7 +229,7 @@ fn spawn_server_watch<C: CaldavPort>(
     server: C,
     every: Duration,
     mut seen: Option<Vec<(String, String)>>,
-    tx: mpsc::UnboundedSender<()>,
+    tx: mpsc::UnboundedSender<Wake>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval_at(Instant::now() + every, every);
@@ -210,11 +247,46 @@ fn spawn_server_watch<C: CaldavPort>(
             }
             seen = Some(tags);
             tracing::info!("server_changed");
-            if tx.send(()).is_err() {
+            if tx.send(Wake::Server).is_err() {
                 return;
             }
         }
     })
+}
+
+/// Until when the pass that is due waits (§13.1), `None` when it runs now: a note
+/// changed less than `settle` ago (`changed`) and the vault still has local work
+/// waiting ([`Engine::unsettled`]). `held` is since when passes have been waiting; after
+/// [`SETTLE_LIMIT`] times `settle` the pass runs whatever the vault looks like. A vault
+/// that cannot be looked at is the pass's to report.
+async fn settling<C: CaldavPort>(
+    engine: &Engine<C>,
+    changed: Option<Instant>,
+    settle: Duration,
+    held: &mut Option<Instant>,
+) -> Option<Instant> {
+    let now = Instant::now();
+    let until = changed.map(|at| at + settle).filter(|until| *until > now);
+    let limit = held.map(|since| since + settle * SETTLE_LIMIT);
+    let wait = match until {
+        Some(until) if limit.is_none_or(|limit| limit > now) => {
+            engine.unsettled().await.unwrap_or(false).then_some(until)
+        }
+        _ => None,
+    };
+    match wait {
+        Some(until) => {
+            if held.is_none() {
+                tracing::info!("vault_settling");
+                *held = Some(now);
+            }
+            Some(limit.map_or(until, |limit| until.min(limit)))
+        }
+        None => {
+            *held = None;
+            None
+        }
+    }
 }
 
 /// Sleeps until `deadline`, or forever when there is none.
@@ -262,7 +334,7 @@ impl Debounce {
 fn spawn_watcher(
     vault: &Path,
     matchers: VaultMatchers,
-    tx: mpsc::UnboundedSender<()>,
+    tx: mpsc::UnboundedSender<Wake>,
 ) -> Result<notify::RecommendedWatcher, RestaskError> {
     // Event paths are absolute and canonical; compare against the canonical vault root.
     let root = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
@@ -283,7 +355,7 @@ fn spawn_watcher(
                     })
             });
             if relevant {
-                let _ = tx.send(());
+                let _ = tx.send(Wake::Vault);
             }
         })
         .map_err(|error| RestaskError::Validation {

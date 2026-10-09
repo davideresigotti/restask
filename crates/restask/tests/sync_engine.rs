@@ -2626,6 +2626,46 @@ async fn a_note_with_a_line_of_the_view_in_it_is_still_a_note() {
 /// phase and the render, with no server and no sync state. What it leaves is what the
 /// daemon's pass would leave — so that pass, when the files reach it, writes no vault
 /// file — and an edit made in the view is carried to its note on the spot.
+/// §13.1: what the daemon asks before it writes into a note that changed a moment ago.
+#[tokio::test]
+async fn a_vault_is_unsettled_exactly_while_local_work_is_waiting() {
+    let dir = temp_vault();
+    switch_vault(&dir);
+    home_note(&dir, "- [ ] typed in an editor \u{1F53A}\n");
+    let offline = engine_with(&dir, Offline, true);
+    assert!(offline.unsettled().await.unwrap(), "a line to register");
+    let files = snapshot(&dir);
+    assert!(offline.unsettled().await.unwrap());
+    assert_eq!(snapshot(&dir), files, "asking writes nothing");
+
+    offline.settle().await.unwrap();
+    assert!(!offline.unsettled().await.unwrap(), "settled on the device");
+
+    // Server work is not local work: a task another client made waits for nobody.
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    mock.seed_resource(
+        "home",
+        "phone",
+        "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:phone\r\nSUMMARY:from the phone\r\nEND:VTODO\r\nEND:VCALENDAR\r\n",
+    );
+    assert!(!engine.unsettled().await.unwrap());
+
+    // A box ticked by hand, a line typed into the view: local work again.
+    let note = read(&dir, "notes/home.md").replace("- [ ] typed", "- [x] typed");
+    write_vault_file(&dir, "notes/home.md", &note);
+    assert!(engine.unsettled().await.unwrap(), "a box ticked by hand");
+    engine.settle().await.unwrap();
+    assert!(!engine.unsettled().await.unwrap());
+    let todo = read(&dir, "TODO.md").replace("# TODO\n", "# TODO\n- [ ] jotted down\n");
+    write_vault_file(&dir, "TODO.md", &todo);
+    assert!(
+        engine.unsettled().await.unwrap(),
+        "a line typed into TODO.md"
+    );
+}
+
 #[tokio::test]
 async fn settling_does_the_local_work_without_a_server_and_the_pass_writes_no_vault_file() {
     let dir = temp_vault();

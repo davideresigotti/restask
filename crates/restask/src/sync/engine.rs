@@ -626,6 +626,22 @@ impl<C: CaldavPort> Engine<C> {
             Ok(scan)
         };
         let first = scan(report)?;
+        let edits = self.local_edits(&first, index);
+        if edits.is_empty() {
+            return Ok(first);
+        }
+        for (path, ops) in &edits {
+            let applied = self.apply_file(path, ops)?;
+            tracing::info!(path = %path, count = applied, "edit applied to its task");
+        }
+        report.normalized += edits.len();
+        scan(report)
+    }
+
+    /// The edits the local phase carries from one file to another (§7.3, §7.6, §6.4),
+    /// per target file: what was changed on a mirror line of TODO.md or of a root
+    /// note's view, to the task's own line; and the creation date a line asks for.
+    fn local_edits(&self, first: &Scan, index: &Index) -> BTreeMap<String, Vec<Mutation>> {
         let mut edits = match (
             std::fs::read_to_string(self.vault.join(&self.cfg.inbox_file)),
             std::fs::read_to_string(self.state_dir.join(RENDERED_FILE)),
@@ -666,15 +682,38 @@ impl<C: CaldavPort> Engine<C> {
                     created: self.created_on(uid, index),
                 });
         }
-        if edits.is_empty() {
-            return Ok(first);
+        edits
+    }
+
+    /// Whether the vault has local work waiting (§11.1 phase 1 and the render): a pass
+    /// — or `restask settle` — would write a note, TODO.md or a root note's view.
+    /// Nothing is written and the server is not asked. `false` for a vault an
+    /// integration has settled: the pass over it only does server work.
+    ///
+    /// The daemon asks before a pass that follows a change to a note (§13.1): local
+    /// work in a note that was written a moment ago is, more often than not, the work
+    /// of the device the note is still being edited on.
+    pub async fn unsettled(&self) -> Result<bool, RestaskError> {
+        let _lock = self.lock().await?;
+        let index = Index::load(&self.state_dir)?;
+        let scan = vault::scan(
+            &self.vault,
+            &self.cfg,
+            self.clock.as_ref(),
+            &index,
+            ScanMode::ReadOnly,
+        )?;
+        if !scan.unsettled.is_empty() || !self.local_edits(&scan, &index).is_empty() {
+            return Ok(true);
         }
-        for (path, ops) in &edits {
-            let applied = self.apply_file(path, ops)?;
-            tracing::info!(path = %path, count = applied, "edit applied to its task");
+        let todo = std::fs::read_to_string(self.vault.join(&self.cfg.inbox_file)).ok();
+        if todo.as_deref() != Some(todo_view::render(&scan.local, &self.cfg).as_str()) {
+            return Ok(true);
         }
-        report.normalized += edits.len();
-        scan(report)
+        Ok(scan.views.iter().any(|(path, contents)| {
+            root_view::render(contents, path, &scan.local, &self.cfg)
+                .is_some_and(|rendered| rendered != *contents)
+        }))
     }
 
     // ── phase 2: remote ───────────────────────────────────────────────────────────────

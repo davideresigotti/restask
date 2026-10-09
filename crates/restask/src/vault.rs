@@ -79,6 +79,10 @@ pub struct Scan {
     /// Tasks whose line is a view's own (§7.6): a view is flat, so their indentation
     /// says nothing about a parent — as for the lines of the inbox file.
     pub flat: BTreeSet<TaskUid>,
+    /// Routed files a repair scan would rewrite (§6.4): a line to register, a box
+    /// checked by hand, a copied UID. Only a read-only scan reports them — a repair
+    /// scan has done the work.
+    pub unsettled: BTreeSet<String>,
 }
 
 impl Scan {
@@ -367,10 +371,16 @@ pub fn scan(
             }
         }
         let tasks = match mode {
-            ScanMode::ReadOnly => tasks
-                .into_iter()
-                .filter(|task| !duplicate(task))
-                .collect::<Vec<_>>(),
+            ScanMode::ReadOnly => {
+                let (ops, status) = repairs(&tasks, &duplicate, today, true, &Ids::Long);
+                if !(ops.is_empty() && status.is_empty()) {
+                    scan.unsettled.insert(file.path.clone());
+                }
+                tasks
+                    .into_iter()
+                    .filter(|task| !duplicate(task))
+                    .collect::<Vec<_>>()
+            }
             ScanMode::Repair(ids) => {
                 let (mut ops, status) = repairs(&tasks, &duplicate, today, true, ids);
                 ops.extend(status);
@@ -460,6 +470,14 @@ pub fn scan(
                 scan.duplicates.push((uid.clone(), file.path.clone()));
             }
         }
+        if mode == ScanMode::ReadOnly {
+            let (ops, status) = repairs(&outside, &duplicate, today, true, &Ids::Long);
+            let copied = |task: &ParsedTask| copies.contains(&task.line_no);
+            let (identity, _) = repairs(&own, &copied, today, false, &Ids::Long);
+            if !(ops.is_empty() && status.is_empty() && identity.is_empty()) {
+                scan.unsettled.insert(file.path.clone());
+            }
+        }
         let (contents, outside, own, view) = match mode {
             ScanMode::ReadOnly => (
                 file.contents.clone(),
@@ -538,6 +556,20 @@ pub fn scan(
                 if !seen.insert(uid) {
                     duplicates.insert(task.line_no);
                 }
+            }
+        }
+        if mode == ScanMode::ReadOnly {
+            let own: Vec<ParsedTask> = tasks
+                .iter()
+                .filter(|task| !views.contains(&task.line_no))
+                .cloned()
+                .collect();
+            let duplicate = |task: &ParsedTask| duplicates.contains(&task.line_no);
+            if !repairs(&own, &duplicate, today, false, &Ids::Long)
+                .0
+                .is_empty()
+            {
+                scan.unsettled.insert(file.path.clone());
             }
         }
         let tasks = match mode {
