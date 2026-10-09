@@ -32,6 +32,10 @@ pub struct Snapshots {
     /// Server resources per collection — **only** collections that were listed this
     /// cycle. A list missing here is unknown, never "empty".
     pub remote: BTreeMap<ListSlug, Vec<RemoteResource>>,
+    /// Per listed collection, the names of the resources it holds whose body could not
+    /// be read this cycle. Such a resource exists: the task it may be is unknown, never
+    /// "gone from the server".
+    pub unread: BTreeMap<ListSlug, BTreeSet<String>>,
     /// Collections created during this cycle (they cannot hold deletions).
     pub created: BTreeSet<ListSlug>,
     /// UIDs deleted on some device.
@@ -191,6 +195,11 @@ pub fn plan(s: &Snapshots) -> Plan {
         let entry = s.index.get(uid);
         let copies: &[Copy<'_>] = ctx.managed.get(uid).map(Vec::as_slice).unwrap_or_default();
         let known = entry.is_some() || s.base.contains_key(uid);
+        if copies.is_empty() && ctx.unread(uid, s.local.get(uid), entry) {
+            // The server holds a resource that may be this task and could not be read:
+            // unknown, neither deleted there nor new to it.
+            continue;
+        }
 
         let Some(local) = s.local.get(uid) else {
             if entry.is_some_and(|e| s.unreadable.contains(&e.source_path)) {
@@ -651,6 +660,27 @@ impl<'a> Context<'a> {
         local.status == Status::Active
             && local.source.path != self.s.inbox_file
             && !self.s.flat.contains(&local.uid)
+    }
+
+    /// Whether a resource that could not be read this cycle may be `uid`'s. Only a task
+    /// the server has held can be one (a line never pushed is new, R2); its resource is
+    /// the one named after the UID, or — for a task the server knows by another name
+    /// (§9.5), which need not be what its resource is called — any unread one, in the
+    /// list the task is in or the one it was settled in.
+    fn unread(&self, uid: &TaskUid, local: Option<&Task>, entry: Option<&IndexEntry>) -> bool {
+        if !entry.is_some_and(|entry| entry.caldav_etag.is_some()) {
+            return false;
+        }
+        let lists = [local.map(|task| &task.list), entry.map(|entry| &entry.list)];
+        let mut names = lists
+            .into_iter()
+            .flatten()
+            .filter_map(|list| self.s.unread.get(list))
+            .flatten()
+            .peekable();
+        names.peek().is_some()
+            && (self.s.wires.uids().any(|other| other == uid)
+                || names.any(|name| name == uid.as_str()))
     }
 
     /// R3 precondition: the task was settled, the collection it was settled in was

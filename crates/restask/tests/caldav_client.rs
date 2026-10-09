@@ -364,7 +364,8 @@ async fn list_tasks_is_one_report_carrying_every_body() {
         .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .resources;
     assert_eq!(resources.len(), 2);
     assert_eq!(resources[0].name, UID_A);
     assert_eq!(resources[0].etag, "\"etag-a\"");
@@ -409,7 +410,8 @@ async fn list_tasks_fetches_bodies_the_server_did_not_inline() {
         .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .resources;
     assert_eq!(resources.len(), 1);
     assert_eq!(resources[0].task.task.text, "Fetched separately");
     assert_eq!(resources[0].etag, "\"etag-a\"");
@@ -433,11 +435,13 @@ async fn list_tasks_skips_resources_without_a_vtodo() {
         .await
         .unwrap()
         .unwrap();
+    let (resources, unreadable) = (resources.resources, resources.unreadable);
     assert_eq!(
         resources.len(),
         1,
         "one odd resource must not fail the listing"
     );
+    assert_eq!(unreadable, ["junk"], "and is named: it is there");
     assert_eq!(resources[0].name, UID_A);
 }
 
@@ -584,7 +588,8 @@ async fn server_errors_retry_and_recover() {
         .list_tasks("inbox", &slug("inbox"))
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .resources;
     assert_eq!(resources.len(), 2);
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
@@ -720,7 +725,8 @@ async fn mock_caldav_enforces_preconditions_like_a_server() {
         .list_tasks(inbox.as_str(), &inbox)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .resources;
     assert_eq!(listed.len(), 1);
     assert_eq!(
         (listed[0].name.as_str(), listed[0].etag.as_str()),

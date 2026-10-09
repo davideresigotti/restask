@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::caldav::port::{CaldavPort, CollectionInfo, RemoteResource};
+use crate::caldav::port::{CaldavPort, CollectionInfo, Listing};
 use crate::domain::{ListSlug, Task};
 use crate::vtodo::WireNames;
 use crate::{CaldavErrorKind, RestaskError};
@@ -38,7 +38,7 @@ impl CaldavPort for Offline {
         &self,
         _collection: &str,
         _list: &ListSlug,
-    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
+    ) -> Result<Option<Listing>, RestaskError> {
         unavailable()
     }
 

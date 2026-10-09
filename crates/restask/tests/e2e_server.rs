@@ -123,7 +123,7 @@ async fn e2e_server_restask_dev_lifecycle() {
         .await
         .expect("list_tasks failed")
         .expect("the collection exists");
-    let remote = find(listed, task.uid.as_str())
+    let remote = find(listed.resources, task.uid.as_str())
         .unwrap_or_else(|| panic!("PUT resource `{}` not in REPORT", task.uid.as_str()));
     assert_eq!(remote.name, task.uid.as_str());
     assert!(!remote.etag.is_empty(), "REPORT must carry the etag");
@@ -173,7 +173,7 @@ async fn e2e_server_restask_dev_lifecycle() {
         .await
         .unwrap()
         .unwrap();
-    let replaced = find(listed, task.uid.as_str()).expect("still listed");
+    let replaced = find(listed.resources, task.uid.as_str()).expect("still listed");
     assert_eq!(replaced.task.task.text, "restask e2e probe (edited)");
     assert_eq!(
         replaced.task.extras, extras,
@@ -191,7 +191,7 @@ async fn e2e_server_restask_dev_lifecycle() {
         .unwrap()
         .unwrap();
     assert!(
-        find(listed, task.uid.as_str()).is_none(),
+        find(listed.resources, task.uid.as_str()).is_none(),
         "deleted resource must not appear in REPORT"
     );
 }

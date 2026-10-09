@@ -31,11 +31,12 @@ it (percent-encoding included) so it can be reused in URLs.
 
 ```rust
 pub struct RemoteResource { pub name: String, pub etag: String, pub task: RemoteTask }
+pub struct Listing { pub resources: Vec<RemoteResource>, pub unreadable: Vec<String> }
 
 pub trait CaldavPort: Clone + Send + Sync + 'static {
     async fn list_collections(&self) -> Result<Vec<CollectionInfo>, RestaskError>;
     async fn ensure_collection(&self, slug: &ListSlug, display: &str) -> Result<(), RestaskError>;
-    async fn list_tasks(&self, collection: &str, list: &ListSlug) -> Result<Option<Vec<RemoteResource>>, RestaskError>;
+    async fn list_tasks(&self, collection: &str, list: &ListSlug) -> Result<Option<Listing>, RestaskError>;
     async fn put(&self, task: &Task, collection: &str, name: &str, extras: &[String], wire: &WireNames,
                  if_match: Option<&str>, now: DateTime<Utc>) -> Result<String, RestaskError>;
     async fn delete(&self, collection: &str, name: &str, etag: Option<&str>) -> Result<(), RestaskError>;
@@ -50,8 +51,10 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
   the collection. The daemon's server watch compares it between two looks (§13.1);
   nothing else reads it.
 - **`list_tasks`** is the whole remote snapshot of a list in **one `REPORT`**: every
-  `VTODO` with its etag and body. `Ok(None)` = the collection does not exist. A resource
-  with no parseable `VTODO` is skipped with a warning, never fatal. (A server that does
+  `VTODO` with its etag and body (`Listing::resources`). `Ok(None)` = the collection does
+  not exist. A resource with no parseable `VTODO` — or one listed whose body could then
+  not be fetched — is never fatal: it is logged and named in `Listing::unreadable`, so
+  the planner does not take it for a resource that is gone (§11.2). (A server that does
   not inline `calendar-data` costs one `GET` per resource; Radicale inlines.)
 - **`put`** writes resource `name` — the UID in full (`restask-a42`) for a new resource,
   the listed name when replacing one — with `wire`, the `UID`s to write where they are

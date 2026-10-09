@@ -701,7 +701,7 @@ impl<C: CaldavPort> Engine<C> {
     ) -> Result<(), RestaskError> {
         let inbox_list = vault::inbox_list(&self.cfg)?;
         let todo_lists = vault::todo_lists(&self.cfg)?;
-        let (remote, created, bound) = self
+        let (remote, created, bound, unread) = self
             .remote_snapshot(scan, index, &inbox_list, &todo_lists)
             .await?;
         if self.syncs_here {
@@ -713,6 +713,7 @@ impl<C: CaldavPort> Engine<C> {
             local: scan.local.clone(),
             base: self.load_base(index)?,
             remote,
+            unread,
             created,
             tombstones: tombstones.uids().cloned().collect(),
             index: index.clone(),
@@ -830,7 +831,8 @@ impl<C: CaldavPort> Engine<C> {
     ///
     /// Returns the snapshot, the lists whose collection is not the one of the pass
     /// before — just created, or found at another path than last time, so what is
-    /// missing there was never deleted — and where the lists found by name are.
+    /// missing there was never deleted — where the lists found by name are, and per list
+    /// the resources that are there but could not be read.
     async fn remote_snapshot(
         &self,
         scan: &Scan,
@@ -842,6 +844,7 @@ impl<C: CaldavPort> Engine<C> {
             BTreeMap<ListSlug, Vec<RemoteResource>>,
             BTreeSet<ListSlug>,
             BTreeMap<ListSlug, String>,
+            BTreeMap<ListSlug, BTreeSet<String>>,
         ),
         RestaskError,
     > {
@@ -856,6 +859,7 @@ impl<C: CaldavPort> Engine<C> {
         let mut calendars = before.clone();
         let mut listing = None;
         let mut remote = BTreeMap::new();
+        let mut unread = BTreeMap::new();
         let mut created = BTreeSet::new();
         let mut bound = BTreeMap::new();
         // A collection is one list's. Two names of the vault can find the same one — a
@@ -865,13 +869,16 @@ impl<C: CaldavPort> Engine<C> {
         let own_paths = scope.clone();
         let mut taken: BTreeMap<String, ListSlug> = BTreeMap::new();
         for slug in scope {
-            if let Some(resources) = self.caldav.list_tasks(slug.as_str(), &slug).await? {
+            if let Some(listing) = self.caldav.list_tasks(slug.as_str(), &slug).await? {
                 // At its own path — also when it was found elsewhere before.
                 if calendars.bound.remove(&slug).is_some() {
                     tracing::warn!(list = %slug.as_str(), "collection_changed");
                     created.insert(slug.clone());
                 }
-                remote.insert(slug, resources);
+                if !listing.unreadable.is_empty() {
+                    unread.insert(slug.clone(), listing.unreadable.into_iter().collect());
+                }
+                remote.insert(slug, listing.resources);
                 continue;
             }
             let collections = match &listing {
@@ -898,7 +905,7 @@ impl<C: CaldavPort> Engine<C> {
                     }
                     taken.insert(collection.clone(), slug.clone());
                     // Gone between the two requests: not listed, so nothing is concluded.
-                    let Some(resources) = self.caldav.list_tasks(&collection, &slug).await? else {
+                    let Some(listing) = self.caldav.list_tasks(&collection, &slug).await? else {
                         continue;
                     };
                     if before
@@ -911,7 +918,10 @@ impl<C: CaldavPort> Engine<C> {
                     }
                     calendars.bound.insert(slug.clone(), collection.clone());
                     bound.insert(slug.clone(), collection);
-                    remote.insert(slug, resources);
+                    if !listing.unreadable.is_empty() {
+                        unread.insert(slug.clone(), listing.unreadable.into_iter().collect());
+                    }
+                    remote.insert(slug, listing.resources);
                 }
                 Bound::Ambiguous(found) => {
                     tracing::warn!(
@@ -945,7 +955,7 @@ impl<C: CaldavPort> Engine<C> {
         if calendars != before {
             calendars.save(&self.state_dir)?;
         }
-        Ok((remote, created, bound))
+        Ok((remote, created, bound, unread))
     }
 
     async fn put(

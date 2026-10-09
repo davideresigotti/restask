@@ -18,7 +18,7 @@ use chrono::{DateTime, Local, Utc};
 use reqwest::header::{ETAG, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Client, Method, RequestBuilder, Response};
 
-use crate::caldav::port::{CaldavPort, CollectionInfo, RemoteResource};
+use crate::caldav::port::{CaldavPort, CollectionInfo, Listing, RemoteResource};
 use crate::caldav::protocol::{
     mkcol_body, parse_collections, parse_report, propfind_collections_body, report_vtodos,
 };
@@ -337,7 +337,7 @@ impl CaldavPort for CaldavClient {
         &self,
         collection: &str,
         slug: &ListSlug,
-    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
+    ) -> Result<Option<Listing>, RestaskError> {
         let response = self
             .request(
                 webdav_method("REPORT")?,
@@ -350,30 +350,35 @@ impl CaldavPort for CaldavClient {
             return Ok(None);
         }
         let body = Self::expect_body(response, &[207], "list_tasks").await?;
-        let mut resources = Vec::new();
+        let mut listing = Listing::default();
         for item in parse_report(&body) {
             // Servers that do not inline calendar-data get one GET per resource.
             let data = if item.data.is_empty() {
                 match self.get_body(collection, &item.name).await? {
                     Some(data) => data,
-                    None => continue,
+                    // Listed a moment ago and not there now: nothing is known of it.
+                    None => {
+                        listing.unreadable.push(item.name);
+                        continue;
+                    }
                 }
             } else {
                 item.data
             };
             // `Local` resolves the device offset valid at each instant (DST-correct, §4).
             match from_vcalendar(&data, &Local, slug) {
-                Ok(task) => resources.push(RemoteResource {
+                Ok(task) => listing.resources.push(RemoteResource {
                     name: item.name,
                     etag: item.etag,
                     task,
                 }),
                 Err(error) => {
                     tracing::warn!(list = %slug.as_str(), name = %item.name, %error, "unreadable remote resource skipped");
+                    listing.unreadable.push(item.name);
                 }
             }
         }
-        Ok(Some(resources))
+        Ok(Some(listing))
     }
 
     async fn put(

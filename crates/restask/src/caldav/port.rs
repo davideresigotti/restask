@@ -23,6 +23,17 @@ pub struct RemoteResource {
     pub task: RemoteTask,
 }
 
+/// What one `REPORT` says a collection holds (§10.2).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Listing {
+    /// Every `VTODO` that could be read, in document order.
+    pub resources: Vec<RemoteResource>,
+    /// Names (sans `.ics`) of resources the collection lists but whose body could not
+    /// be read as a `VTODO`. They exist: a task that may be one of them is unknown this
+    /// pass, never deleted (§11.2).
+    pub unreadable: Vec<String>,
+}
+
 /// Transport port to a CalDAV server (§10.2). One impl = one server account; collections
 /// are addressed by their path segment below the account (`collection`), resources by
 /// their `.ics`-sans-suffix name. For most lists the segment is the list's slug; which
@@ -50,13 +61,14 @@ pub trait CaldavPort: Clone + Send + Sync + 'static {
 
     /// The whole remote snapshot of one collection in a single `REPORT` (§10.1): every
     /// `VTODO` with its etag and parsed body, read as tasks of `list`, in document order. `Ok(None)` means the collection
-    /// does not exist. Resources that hold no parseable `VTODO` are skipped with a
-    /// warning — one odd resource never fails the listing.
+    /// does not exist. A resource that holds no parseable `VTODO` never fails the
+    /// listing: it is logged and named in [`Listing::unreadable`], so that it is not
+    /// taken for a resource that is gone.
     fn list_tasks(
         &self,
         collection: &str,
         list: &ListSlug,
-    ) -> impl Future<Output = Result<Option<Vec<RemoteResource>>, RestaskError>> + Send;
+    ) -> impl Future<Output = Result<Option<Listing>, RestaskError>> + Send;
 
     /// `PUT <url>/<user>/<collection>/<name>.ics`: serializes `task` (§8.1) with `extras` (the
     /// replaced resource's unmanaged content) and `now` as `DTSTAMP`/`LAST-MODIFIED`.

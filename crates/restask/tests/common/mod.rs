@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use chrono::{DateTime, FixedOffset, Offset as _, TimeZone, Utc};
 use tempfile::TempDir;
 
-use restask::caldav::{CaldavPort, CollectionInfo, RemoteResource};
+use restask::caldav::{CaldavPort, CollectionInfo, Listing, RemoteResource};
 use restask::domain::{Clock, DeviceTag, ListSlug, LocalDate, Task, TaskUid};
 use restask::vtodo::{from_vcalendar, to_vcalendar_as, WireNames};
 use restask::{CaldavErrorKind, RestaskError};
@@ -226,7 +226,7 @@ impl CaldavPort for MockCaldav {
         &self,
         collection: &str,
         slug: &ListSlug,
-    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
+    ) -> Result<Option<Listing>, RestaskError> {
         if let Some(error) = self.scripted_failure() {
             return Err(error);
         }
@@ -235,21 +235,22 @@ impl CaldavPort for MockCaldav {
         if !state.collections.contains_key(collection) {
             return Ok(None);
         }
-        let mut resources = Vec::new();
+        let mut listing = Listing::default();
         for ((list, name), resource) in &state.resources {
             if list != collection {
                 continue;
             }
-            // Like the real client: a body without a VTODO is skipped, never fatal.
-            if let Ok(task) = from_vcalendar(&resource.body, &Utc.fix(), slug) {
-                resources.push(RemoteResource {
+            // Like the real client: a body without a VTODO is named, never fatal.
+            match from_vcalendar(&resource.body, &Utc.fix(), slug) {
+                Ok(task) => listing.resources.push(RemoteResource {
                     name: name.clone(),
                     etag: resource.etag.clone(),
                     task,
-                });
+                }),
+                Err(_) => listing.unreadable.push(name.clone()),
             }
         }
-        Ok(Some(resources))
+        Ok(Some(listing))
     }
 
     async fn put(

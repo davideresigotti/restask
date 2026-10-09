@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
 
 use common::{sealed, switch_vault, temp_vault, write_vault_file, FixedClock, MockCaldav};
-use restask::caldav::{CaldavPort, CollectionInfo, Offline, RemoteResource};
+use restask::caldav::{CaldavPort, CollectionInfo, Listing, Offline};
 use restask::config::{CaldavConfig, MachineConfig, VaultConfig};
 use restask::domain::{ListSlug, Priority, Task, TaskUid};
 use restask::store::index::Index;
@@ -710,6 +710,45 @@ async fn a_task_deleted_on_the_server_leaves_the_vault() {
     assert!(!state.join(format!("tasks/{UID}.ics")).exists());
 }
 
+/// Found in review (2026-10-09): a resource the server still lists, with a body that
+/// cannot be read as a VTODO in one listing, was taken for a task deleted on the
+/// server — its line was removed from the note and the task tombstoned.
+#[tokio::test]
+async fn a_resource_that_cannot_be_read_does_not_delete_its_line() {
+    let dir = temp_vault();
+    home_note(
+        &dir,
+        &format!("- [ ] unread {ID} {TOKEN}\n- [ ] stays {ID} {TOKEN2}\n"),
+    );
+    let mock = MockCaldav::new();
+    let engine = engine(&dir, &mock);
+    engine.reconcile().await.unwrap();
+    let good = mock.resource("home", UID).unwrap().body;
+    let before = read(&dir, "notes/home.md");
+
+    mock.seed_resource(
+        "home",
+        UID,
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    );
+    let report = engine.reconcile().await.unwrap();
+    assert_eq!(
+        read(&dir, "notes/home.md"),
+        before,
+        "the line is still there"
+    );
+    assert_eq!((report.pushes, report.deletes), (0, 0), "{report:?}");
+    let state = dir.path().join(".restask");
+    assert!(!Tombstones::load(&state).unwrap().contains(&uid(UID)));
+    assert_eq!(Index::load(&state).unwrap().entries.len(), 2);
+
+    // Readable again: the task is the one it was.
+    mock.seed_resource("home", UID, &good);
+    engine.reconcile().await.unwrap();
+    assert_eq!(read(&dir, "notes/home.md"), before);
+    assert_eq!(mock.resource_names("home").len(), 2);
+}
+
 #[tokio::test]
 async fn a_line_removed_from_the_vault_leaves_the_server() {
     let dir = temp_vault();
@@ -978,7 +1017,7 @@ impl CaldavPort for PutRejected {
         &self,
         collection: &str,
         slug: &ListSlug,
-    ) -> Result<Option<Vec<RemoteResource>>, RestaskError> {
+    ) -> Result<Option<Listing>, RestaskError> {
         self.0.list_tasks(collection, slug).await
     }
 

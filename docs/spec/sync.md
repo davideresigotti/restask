@@ -52,6 +52,7 @@ pub struct Snapshots {
     pub local: BTreeMap<TaskUid, Task>,                    // vault scan
     pub base: BTreeMap<TaskUid, Task>,                     // .restask/tasks (validated against the index)
     pub remote: BTreeMap<ListSlug, Vec<RemoteResource>>,   // ONLY collections listed this pass
+    pub unread: BTreeMap<ListSlug, BTreeSet<String>>,      // per listed collection: resources there whose body could not be read
     pub created: BTreeSet<ListSlug>,                       // collections created this pass
     pub tombstones: BTreeSet<TaskUid>,
     pub index: Index,
@@ -91,8 +92,10 @@ another client created (R5), for the record of a recurring task's occurrence (§
 are the next numbers of `ids`, counted on a copy that has seen every UID of the
 snapshots: the same snapshots give the same plan. Without `ids` such a task gets a long
 UID derived from what it is (§3.1), as before the counters.
-Two readings that the snapshots keep apart on purpose: a list missing from `remote` is
-**unknown**, not empty; a path in `unreadable` holds **unknown** tasks, not deleted ones.
+Three readings that the snapshots keep apart on purpose: a list missing from `remote` is
+**unknown**, not empty; a path in `unreadable` holds **unknown** tasks, not deleted ones;
+a name in `unread` is a resource that **exists** and could not be read, not one that is
+gone.
 
 ### 11.3 The merge (`merge::merge`)
 
@@ -142,6 +145,14 @@ A server copy of a UID is a resource whose `UID` is that restask UID, or a resou
 under another `UID` that is the task's: a foreign resource adopted under it (R5,
 below), or one that keeps the long UID the task had before it was renumbered (§11.7).
 The rules do not tell them apart.
+
+Before either table: a settled task with **no server copy** whose list (the one it is in, or the
+one it was settled in) holds a resource that could not be read this pass, and that
+resource may be the task's — it is named after the task's UID, or the task is one whose
+resource goes by another name (§9.5) — is **unknown**: nothing is planned for it. Not
+R3 (the line would be deleted for a resource that is still there), not R2 (it would be
+created a second time), not R6 (its state would be forgotten and the resource adopted
+as new later).
 
 Task **not in the vault**:
 

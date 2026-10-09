@@ -12,5 +12,5 @@ pub mod protocol;
 pub use binding::{list_name, resolve_list, Bound};
 pub use client::CaldavClient;
 pub use offline::Offline;
-pub use port::{CaldavPort, RemoteResource};
+pub use port::{CaldavPort, Listing, RemoteResource};
 pub use protocol::CollectionInfo;

@@ -616,6 +616,61 @@ fn one_of_several_settled_tasks_missing_is_a_real_deletion() {
     );
 }
 
+#[test]
+fn a_settled_task_whose_resource_could_not_be_read_is_unknown_not_deleted() {
+    // The server lists the resource of `b`, with a body that is no VTODO: it is there.
+    let a = task(1, "home", "kept");
+    let b = task(2, "home", "its resource could not be read");
+    let mut world = World::new()
+        .local(&a)
+        .local(&b)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .remote(resource(&a, T0, "\"a\""), "home");
+    let unread = [uid(2).as_str().to_string()].into();
+    world.s.unread.insert(slug("home"), unread);
+    let p = world.plan();
+    assert!(
+        p.is_noop(),
+        "neither deleted (R3) nor pushed anew (R2): {p:?}"
+    );
+}
+
+#[test]
+fn a_removed_line_whose_resource_could_not_be_read_keeps_its_state() {
+    // Forgotten now (R6), the resource would come back as a new task once it reads.
+    let a = task(1, "home", "kept");
+    let b = task(2, "home", "removed from the note");
+    let mut world = World::new()
+        .local(&a)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .remote(resource(&a, T0, "\"a\""), "home");
+    let unread = [uid(2).as_str().to_string()].into();
+    world.s.unread.insert(slug("home"), unread);
+    assert!(world.plan().is_noop());
+}
+
+#[test]
+fn an_unread_resource_of_another_name_hides_no_deletion() {
+    let a = task(1, "home", "kept");
+    let b = task(2, "home", "deleted remotely");
+    let mut world = World::new()
+        .local(&a)
+        .local(&b)
+        .settled(&a, "\"a\"")
+        .settled(&b, "\"b\"")
+        .remote(resource(&a, T0, "\"a\""), "home");
+    world
+        .s
+        .unread
+        .insert(slug("home"), ["junk".to_string()].into());
+    assert_eq!(
+        mutations_for(&world.plan(), "notes/home.md"),
+        [Mutation::Delete { uid: uid(2) }]
+    );
+}
+
 // ── deleted in the vault, tombstones ──────────────────────────────────────────────────
 
 #[test]
