@@ -1609,6 +1609,62 @@ async fn a_changed_emoji_outranks_the_section_the_line_was_moved_to() {
     assert!(body(&mock, "inbox", parked.uid.as_str()).contains("PRIORITY:1"));
 }
 
+/// §7.1: a device reads the state as the file sync has brought it, and that may be well
+/// behind the notes. A task of TODO.md's own that the index does not know — typed a
+/// moment ago on this device, or renumbered by the sync node (§11.7) whose state is
+/// still on its way — is that task, also when its text ends in a wikilink: it is not
+/// the leftover of a mirror line, and no render drops it.
+#[tokio::test]
+async fn an_inbox_task_that_ends_in_a_wikilink_is_kept_by_a_device_whose_state_is_behind() {
+    let laptop = |dir: &TempDir| {
+        let cfg = VaultConfig::load(&dir.path().join("restask.toml")).unwrap();
+        let machine = MachineConfig {
+            node: Some(restask::config::NodeSection::default()),
+            ..MachineConfig::default()
+        };
+        Engine::new(dir.path(), cfg, machine, Offline, clock())
+    };
+
+    // Typed on the device: registered by its first settle, and still there after more.
+    let dir = temp_vault();
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(&dir, "TODO.md", &format!("{todo}- [ ] call [[John]]\n"));
+    let engine = laptop(&dir);
+    engine.settle().await.unwrap();
+    let registered = uid_of(&dir, "TODO.md", "call [[John]]");
+    let settled = read(&dir, "TODO.md");
+    assert!(
+        settled.contains(&format!("- [ ] call [[John]] {ID} {registered}\n")),
+        "{settled}"
+    );
+    for _ in 0..2 {
+        engine.settle().await.unwrap();
+        assert_eq!(read(&dir, "TODO.md"), settled);
+    }
+
+    // Renumbered by the sync node: its notes are here, its state is not yet — the index
+    // still knows the task under its long UID.
+    let dir = temp_vault();
+    let todo = read(&dir, "TODO.md");
+    write_vault_file(
+        &dir,
+        "TODO.md",
+        &format!("{todo}- [ ] call [[John]] {ID} {LONG3}\n"),
+    );
+    settle_as_before_the_counters(&dir, &MockCaldav::new());
+    let renumbered = resealed(&read(&dir, "TODO.md").replace(LONG3, "zz9"));
+    assert!(
+        renumbered.contains(&format!("- [ ] call [[John]] {ID} zz9\n")),
+        "{renumbered}"
+    );
+    write_vault_file(&dir, "TODO.md", &renumbered);
+    let engine = laptop(&dir);
+    for _ in 0..2 {
+        engine.settle().await.unwrap();
+        assert_eq!(read(&dir, "TODO.md"), renumbered);
+    }
+}
+
 #[tokio::test]
 async fn a_mirror_line_whose_source_is_gone_does_not_become_an_inbox_task() {
     let dir = temp_vault();

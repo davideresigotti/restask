@@ -641,15 +641,29 @@ fn inbox_lines_and_unknown_lines_are_never_mirror_edits() {
 }
 
 #[test]
-fn mirror_shape_is_a_wikilink_right_before_the_uid() {
-    assert!(looks_like_mirror(&format!(
-        "- [ ] Review ⏫ [[Alpha#Tasks|Alpha]] 🆔 {U1}"
-    )));
-    // An inbox task that merely mentions a note is a task of its own.
-    assert!(!looks_like_mirror(&format!(
-        "- [ ] Call [[John]] ➕ 2026-09-22 🆔 {U1}"
-    )));
-    assert!(!looks_like_mirror("- [ ] Call [[John]]"));
+fn mirror_shape_is_the_rendered_link_right_before_the_uid() {
+    for mirror in [
+        format!("- [ ] Review ⏫ [[Alpha#Tasks|Alpha]] 🆔 {U1}"),
+        format!("- [x] Review ⏫ [[Alpha|Alpha]] 🆔 {U1}"),
+        "- [ ] Review ⏫ [[Alpha#Tasks|Alpha]]  🆔 a42".to_string(),
+        // What a mirror line writes for its own task, whatever the task's text links to.
+        format!("- [ ] see [[John]] ⏫ [[Alpha#Tasks|Alpha]] 🆔 {U1}"),
+    ] {
+        assert!(looks_like_mirror(&mirror), "{mirror}");
+    }
+    // An inbox task that merely mentions a note is a task of its own — also when the
+    // mention is the last thing before its UID.
+    for own in [
+        format!("- [ ] Call [[John]] ➕ 2026-09-22 🆔 {U1}"),
+        format!("- [ ] Call [[John]] 🆔 {U1}"),
+        "- [ ] Call [[John]] 🆔 a42".to_string(),
+        format!("- [ ] Read [[Books/Dune|the book]] 🆔 {U1}"),
+        format!("- [ ] Read [[Dune#Part 2]] 🆔 {U1}"),
+        format!("- [ ] odd [[|]] 🆔 {U1}"),
+        "- [ ] Call [[John]]".to_string(),
+    ] {
+        assert!(!looks_like_mirror(&own), "{own}");
+    }
 }
 
 // ── §7.2 the seal ─────────────────────────────────────────────────────────────────────

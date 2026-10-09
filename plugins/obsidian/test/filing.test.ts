@@ -14,6 +14,7 @@ import {
 	highestNumber,
 	isMirrorShaped,
 	isSealed,
+	looksLikeMirror,
 	mirrorDropped,
 	mirrorEdited,
 	mirrorLine,
@@ -342,9 +343,12 @@ describe("§15.6 filing a line in the TODO.md view", () => {
 	});
 
 	it("treats a mirror-shaped line as the view's own when told no note has the task", () => {
-		const before = view("## 🔺 Highest Priority", `- [x] read 🔺 ✅ ${TODAY} [[Book]] ${A}`, "", "## Done", "");
+		const before = view("## 🔺 Highest Priority", `- [x] read 🔺 ✅ ${TODAY} [[Book|Book]] ${A}`, "", "## Done", "");
 		expect(refiled(before, 6)).toBeUndefined();
-		expect(refiled(before, 6, true)).toEqual(view("## Done", `- [x] read 🔺 ✅ ${TODAY} [[Book]] ${A}`, ""));
+		expect(refiled(before, 6, true)).toEqual(view("## Done", `- [x] read 🔺 ✅ ${TODAY} [[Book|Book]] ${A}`, ""));
+		// A task that merely ends in a wikilink is the view's own without being told (§7.1).
+		const mention = view("## 🔺 Highest Priority", `- [x] read 🔺 ✅ ${TODAY} [[Book]] ${A}`, "", "## Done", "");
+		expect(refiled(mention, 6)).toEqual(view("## Done", `- [x] read 🔺 ✅ ${TODAY} [[Book]] ${A}`, ""));
 	});
 
 	it("takes a line out, with the section it leaves empty", () => {
@@ -914,6 +918,35 @@ describe("§7.6 the view a root note holds", () => {
 		// A section that is followed by more of the note ends in its blank line.
 		const followed = [...empty.slice(0, 9), "", "# Links", ""];
 		expect(resealed(followed, viewOf(followed, ROOT))[2]).toBe(`restask-render: ${digest("# TODO\n\n## Done\n\n")}`);
+	});
+
+	it("tells a leftover mirror line of TODO.md from a task that ends in a wikilink (§7.1)", () => {
+		// The engine's cases (`todo_view.rs`).
+		for (const mirror of [
+			`- [ ] Review ⏫ [[Alpha#Tasks|Alpha]] ${A}`,
+			`- [x] Review ⏫ [[Alpha|Alpha]] ${A}`,
+			"- [ ] Review ⏫ [[Alpha#Tasks|Alpha]]  🆔 a42",
+			`- [ ] see [[John]] ⏫ [[Alpha#Tasks|Alpha]] ${A}`,
+		]) {
+			expect(looksLikeMirror(mirror), mirror).toBe(true);
+		}
+		for (const own of [
+			`- [ ] Call [[John]] ➕ 2026-09-22 ${A}`,
+			`- [ ] Call [[John]] ${A}`,
+			"- [ ] Call [[John]] 🆔 a42",
+			`- [ ] Read [[Books/Dune|the book]] ${A}`,
+			`- [ ] Read [[Dune#Part 2]] ${A}`,
+			`- [ ] odd [[|]] ${A}`,
+			"- [ ] Call [[John]]",
+		]) {
+			expect(looksLikeMirror(own), own).toBe(false);
+		}
+		// Such a task is settled as a line of the view's own: nothing is carried to a note.
+		const doc = view("## No Priority", "- [x] Call [[John]] 🆔 a42", "", "## Done", "");
+		const result = settled(doc, 6, VIEW, TODAY, uid);
+		expect(result?.mirror).toBeUndefined();
+		expect(result?.carry).toBeUndefined();
+		expect(result?.lines).toEqual(view("## Done", `- [x] Call [[John]] ✅ ${TODAY} 🆔 a42`, ""));
 	});
 
 	it("knows a mirror line by its exact shape", () => {

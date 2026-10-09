@@ -531,10 +531,26 @@ fn strip_link<'a>(text: &'a str, link: &str) -> Option<&'a str> {
     text.strip_suffix(link).map(str::trim_end)
 }
 
-/// `true` when `raw` has the shape of a rendered mirror line: a wikilink directly before
-/// the `🆔` token. Used to recognise leftovers of the view when no other evidence exists.
+/// `true` when `raw` has the shape of a rendered mirror line: the link to its note as
+/// the render writes it ([`mirror_line`]) — `[[<stem>|<stem>]]` or
+/// `[[<stem>#<heading>|<stem>]]` — directly before the `🆔` token. Used to recognise
+/// leftovers of the view when no other evidence exists; a task of the view's own whose
+/// text merely ends in a wikilink (`call [[John]]`) is not one.
 pub fn looks_like_mirror(raw: &str) -> bool {
-    raw.rfind("🆔")
+    let Some(before) = raw
+        .rfind("🆔")
         .map(|at| raw[..at].trim_end())
-        .is_some_and(|before| before.ends_with("]]") && before.contains("[["))
+        .and_then(|before| before.strip_suffix("]]"))
+    else {
+        return false;
+    };
+    let Some(open) = before.rfind("[[") else {
+        return false;
+    };
+    before[open + 2..]
+        .rsplit_once('|')
+        .is_some_and(|(target, alias)| {
+            let stem = target.split('#').next().unwrap_or(target);
+            !stem.is_empty() && stem == alias
+        })
 }

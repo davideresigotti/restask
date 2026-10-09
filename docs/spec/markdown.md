@@ -265,8 +265,13 @@ The same comparison finds the lines the user moved to another section (§7.4).
 Telling inbox lines from mirror lines when the file is read: a line whose UID is claimed
 by a note is a mirror line. A UID no note claims is a mirror line whose source is gone if
 the index says the task lived in a note (or, with no index entry, if the line has the
-rendered shape — a wikilink right before `🆔`); otherwise it is an inbox task, whatever
-its text contains.
+rendered shape — the link a mirror line ends in, `[[<stem>|<stem>]]` or
+`[[<stem>#<heading>|<stem>]]`, right before `🆔`); otherwise it is an inbox task,
+whatever its text contains. A device reads the index as the file sync has brought it,
+which may be a while after the notes: a task of the inbox file's own that the index
+does not know yet — typed a moment ago, or renumbered by the sync node (§11.7) — is
+still that task, also when its text ends in a wikilink (`call [[John]]`), which is not
+that shape.
 
 ### 7.2 The seal
 

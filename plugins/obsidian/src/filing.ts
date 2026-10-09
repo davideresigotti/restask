@@ -234,12 +234,24 @@ function withCreated(line: string, date: string): string {
 	return `${line.slice(0, end)} ${date}${line.slice(end)}`;
 }
 
-/** `true` when `raw` has the shape of a rendered mirror line: a wikilink right before the `🆔` token (§7.1). */
-function looksLikeMirror(raw: string): boolean {
+/**
+ * `true` when `raw` has the shape of a rendered mirror line (§7.1): the link to its note
+ * as the render writes it — `[[<stem>|<stem>]]` or `[[<stem>#<heading>|<stem>]]` — right
+ * before the `🆔` token. A task of the view's own whose text merely ends in a wikilink
+ * (`call [[John]]`) is not one (the engine's `looks_like_mirror`).
+ */
+export function looksLikeMirror(raw: string): boolean {
 	const at = raw.lastIndexOf("🆔");
 	if (at < 0) return false;
 	const before = raw.slice(0, at).trimEnd();
-	return before.endsWith("]]") && before.includes("[[");
+	if (!before.endsWith("]]")) return false;
+	const open = before.lastIndexOf("[[");
+	if (open < 0) return false;
+	const link = before.slice(open + 2, -2);
+	const bar = link.lastIndexOf("|");
+	if (bar < 0) return false;
+	const stem = link.slice(0, bar).split("#")[0];
+	return stem !== "" && stem === link.slice(bar + 1);
 }
 
 /** TODO.md's layout (§7). */
