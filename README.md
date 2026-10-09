@@ -4,9 +4,15 @@
 
 Restask is a self-hosted system that connects selected `.md` notes in your vault to your CalDAV server. Checkboxes in your notes are linked to tasks in your Radicale (or similar) collections, so reminders and calendar tasks on your phone, desktop, etc. stay in sync with your Obsidian vault.
 
-## Screenshots
-
 ## Videos
+https://github.com/user-attachments/assets/7e6384f2-d228-4bfa-92c5-60be04b21f88
+
+https://github.com/user-attachments/assets/3eb60d8b-b00a-4107-a8ad-e4befb525127
+
+## Screenshots
+| Obsidian (mobile) | Tasks.org (mobile) | Widget (mobile) |
+|---|---|---|
+| <img width="250" alt="obsidian_mobile" src="https://github.com/user-attachments/assets/39e3193e-8b27-4b83-9e0a-44babd8c63e6" /> | <img width="250" alt="task_mobile" src="https://github.com/user-attachments/assets/5ae27f72-5fb3-4a7a-a2fb-b1d1d613be5f" /> | <img width="250" alt="widget-mobile" src="https://github.com/user-attachments/assets/d55f784e-c1ae-48ef-ae62-46cbaebfdfa9" /> |
 
 # Disclaimer
 - I built restask to solve a problem of my own, and I'm sharing it in the hope that someone else needs it too.
