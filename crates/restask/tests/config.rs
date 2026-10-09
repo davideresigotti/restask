@@ -12,6 +12,7 @@ use restask::config::{
     ENV_CALDAV_USERNAME, ENV_CONFIG, ENV_VAULT,
 };
 use restask::daemon::DaemonConfig;
+use restask::store::{device_file, Device};
 use tempfile::tempdir;
 
 /// Builds an injectable environment lookup from key/value pairs (hermetic; no process env).
@@ -414,6 +415,45 @@ fn every_vault_has_a_machine_config_of_its_own() {
         std::os::unix::fs::symlink(&second, &link).unwrap();
         assert_eq!(machine_config_of(&main, &link), own);
     }
+}
+
+/// Seen on the maintainer's machine (2026-10-09): a vault that is not the machine's
+/// first and was never set up there got a new directory under `vaults/` — `-2`, `-3`,
+/// … `-15` — at every `restask settle`, and with each a new device identity and a new
+/// claim in the vault's `.restask/devices/`.
+#[test]
+fn a_vault_without_a_config_keeps_the_directory_its_identity_is_in() {
+    let home = tempdir().unwrap();
+    let main = home.path().join("restask/config.toml");
+    let further = home.path().join("restask/vaults");
+    let folders = tempdir().unwrap();
+    let first = folders.path().join("Obsidian");
+    let second = folders.path().join("Work Notes");
+    let third = folders.path().join("elsewhere/Work Notes");
+    for vault in [&first, &second, &third] {
+        fs::create_dir_all(vault.join(".restask")).unwrap();
+    }
+    config_naming(&main, &first);
+
+    // The first command in the second vault registers a task: the identity goes
+    // beside the config the vault will have, the claim into the vault.
+    let own = further.join("work-notes/config.toml");
+    assert_eq!(machine_config_of(&main, &second), own);
+    let taken = std::collections::BTreeSet::new();
+    let state = second.join(".restask");
+    let device = Device::open(&state, Some(&device_file(&own)), None, &taken).unwrap();
+
+    // Every later command finds the same directory, and so the same identity.
+    assert_eq!(machine_config_of(&main, &second), own);
+    let again = Device::open(&state, Some(&device_file(&own)), None, &taken).unwrap();
+    assert_eq!(again, device);
+    assert_eq!(fs::read_dir(state.join("devices")).unwrap().count(), 1);
+
+    // Another vault of the same folder name has no claim to it.
+    assert_eq!(
+        machine_config_of(&main, &third),
+        further.join("work-notes-2/config.toml")
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@ pub mod wires;
 
 pub use cache::{cache_path, cache_read, cache_remove, cache_write};
 pub use calendars::Calendars;
-pub use device::{device_file, switched, Device};
+pub use device::{device_file, is_identity_of, switched, Device};
 pub use index::{Index, IndexEntry};
 pub use tombstones::Tombstones;
 pub use wires::Wires;

@@ -168,6 +168,17 @@ pub fn device_file(config: &Path) -> PathBuf {
     config.with_file_name("device")
 }
 
+/// Whether the identity kept in `file` is one of the vault whose state is `state_dir`:
+/// the claim of its tag there holds its secret. This is how a directory of machine
+/// state that has no config yet is known to be a vault's (§14.2).
+pub fn is_identity_of(file: &Path, state_dir: &Path) -> bool {
+    let Ok(Some(device)) = read_identity_quietly(file) else {
+        return false;
+    };
+    std::fs::read_to_string(state_dir.join(DEVICES_DIR).join(device.tag.as_str()))
+        .is_ok_and(|claim| claim.trim() == device.secret)
+}
+
 /// The content of a claim file.
 fn claim_of(secret: &str) -> String {
     format!("{secret}\n")
@@ -176,13 +187,22 @@ fn claim_of(secret: &str) -> String {
 /// Reads an identity file: `<tag> <secret> <last>`. A missing file, or one that is not
 /// that, is no identity.
 fn read_identity(file: &Path) -> Result<Option<Device>, RestaskError> {
+    let device = read_identity_quietly(file)?;
+    if device.is_none() && file.exists() {
+        tracing::warn!(path = %file.display(), "unreadable device identity; taking a new one");
+    }
+    Ok(device)
+}
+
+/// [`read_identity`] without a word about a file that is no identity.
+fn read_identity_quietly(file: &Path) -> Result<Option<Device>, RestaskError> {
     let text = match std::fs::read_to_string(file) {
         Ok(text) => text,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
     let mut words = text.split_whitespace();
-    let device = match (words.next(), words.next(), words.next()) {
+    Ok(match (words.next(), words.next(), words.next()) {
         (Some(tag), Some(secret), Some(last)) => DeviceTag::parse(tag)
             .ok()
             .zip(last.parse().ok())
@@ -192,9 +212,5 @@ fn read_identity(file: &Path) -> Result<Option<Device>, RestaskError> {
                 last,
             }),
         _ => None,
-    };
-    if device.is_none() {
-        tracing::warn!(path = %file.display(), "unreadable device identity; taking a new one");
-    }
-    Ok(device)
+    })
 }

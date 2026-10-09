@@ -537,6 +537,8 @@ pub fn machine_config_path_for_from<E: Fn(&str) -> Option<String>>(
 /// 3. else — `main` is another vault's — a further config of this vault's own, in a
 ///    directory called after the vault's folder (`-2`, `-3` … when another vault of that
 ///    name has it). Whatever lies beside a config (the password file) is per vault too.
+///    A directory that holds no config yet is the vault's when the device identity in
+///    it is claimed in that vault (§9.4).
 pub fn machine_config_of(main: &Path, vault: &Path) -> PathBuf {
     let further = main.parent().unwrap_or(Path::new(".")).join("vaults");
     let mut configs: Vec<PathBuf> = fs::read_dir(&further)
@@ -558,10 +560,22 @@ pub fn machine_config_of(main: &Path, vault: &Path) -> PathBuf {
         Some(named) if !same_folder(&named, vault) && named.is_dir() => {}
         _ => return main.to_path_buf(),
     }
+    // A directory without a config is this vault's when what it holds is: the identity
+    // this machine mints UIDs under in the vault (§9.4) is written there by the first
+    // command that registers a task, long before setup writes a config. Taken for
+    // another vault's, it sent every command to a directory of its own — and to a new
+    // identity, with a new claim in the vault.
+    let state = vault.join(crate::vault::STATE_DIR);
     let name = folder_slug(vault);
     let mut dir = further.join(&name);
     let mut count = 1;
     while dir.exists() {
+        let config = dir.join("config.toml");
+        if !config.is_file()
+            && crate::store::is_identity_of(&crate::store::device_file(&config), &state)
+        {
+            return config;
+        }
         count += 1;
         dir = further.join(format!("{name}-{count}"));
     }

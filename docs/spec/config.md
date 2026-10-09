@@ -47,7 +47,11 @@ own sync node, its own daemon; a command run in one never loads what belongs to 
    `<name>` is the vault folder's name in lower case, runs of other characters a dash
    (`Work Notes` → `work-notes`), with `-2`, `-3` … when a vault of the same folder name
    holds that directory. Until setup writes it the vault has no machine config (the
-   defaults: no server), never a borrowed one.
+   defaults: no server), never a borrowed one. The directory exists before the config
+   does — the first command that registers a task writes `device` there — and is known
+   as this vault's by that file: the claim of its tag in the vault holds its secret
+   (§9.4). (Read as another vault's, it gave the vault a new directory, a new identity
+   and a new claim in `.restask/devices/` at every command.)
 
 `RESTASK_CONFIG` names the file outright and ends the search. What lies beside a config
 is per vault with it: the password file (§17), the name of the daemon's unit on
